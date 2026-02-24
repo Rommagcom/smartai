@@ -1,0 +1,2 @@
+# smartai
+Smart Ai assistant
