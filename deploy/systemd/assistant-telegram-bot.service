@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Assistant Telegram Bot Bridge
+After=network-online.target assistant-api.service
+Wants=network-online.target assistant-api.service
+
+[Service]
+Type=simple
+User=assistant
+Group=assistant
+WorkingDirectory=/opt/assistant/backend
+EnvironmentFile=/opt/assistant/backend/.env
+ExecStart=/opt/assistant/.venv/bin/python -m integrations.messengers.telegram.run
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
