@@ -18,9 +18,15 @@ class FakeUser:
         self.id = user_id
 
 
+class FakeChat:
+    def __init__(self, chat_id: int) -> None:
+        self.id = chat_id
+
+
 class FakeUpdate:
     def __init__(self, user_id: int, text: str | None = None) -> None:
         self.effective_user = FakeUser(user_id)
+        self.effective_chat = FakeChat(user_id)
         self.effective_message = FakeMessage(text=text)
 
 

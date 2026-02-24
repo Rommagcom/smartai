@@ -53,3 +53,45 @@ class PdfCreateRequest(BaseModel):
     title: str = "Generated document"
     content: str
     filename: str = "document.pdf"
+
+
+class TaskHistoryItem(BaseModel):
+    job_type: str
+    status: str
+    input: dict = {}
+    result: dict | None = None
+    error: str | None = None
+    attempt: int = 0
+    max_retries: int = 0
+    created_at: datetime
+    started_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class TaskHistoryResponse(BaseModel):
+    items: list[TaskHistoryItem]
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class WorkerDeliveryError(BaseModel):
+    message: str
+
+
+class WorkerDeliveryItem(BaseModel):
+    type: str = "worker_result"
+    success: bool
+    status: str
+    job_type: str
+    message: str
+    result_preview: dict | None = None
+    next_action_hint: str | None = None
+    error: WorkerDeliveryError | None = None
+    delivered_at: str
+    result: dict | None = None
+
+
+class WorkerResultsPollResponse(BaseModel):
+    items: list[WorkerDeliveryItem]

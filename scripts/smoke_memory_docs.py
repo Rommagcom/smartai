@@ -1,6 +1,6 @@
 import asyncio
 import os
-import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -11,11 +11,14 @@ from app.main import app
 from app.models.long_term_memory import LongTermMemory
 from app.models.user import User
 from app.services.memory_service import memory_service
+from app.services.ollama_client import ollama_client
 from app.services.rag_service import rag_service
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "smoke_memory_docs.db"
 SMOKE_PASSWORD = os.getenv("SMOKE_TEST_PASSWORD", "SmokePass123")
+MEMORY_ENDPOINT = "/api/v1/memory"
+MEMORY_CLEANUP_ENDPOINT = "/api/v1/memory/cleanup"
 
 
 def ensure(condition: bool, message: str) -> None:
@@ -42,19 +45,10 @@ async def run() -> None:
         async with session_factory() as session:
             yield session
 
-    async def fake_create_long_term_memory(db, user_id, fact_type, content, importance_score=0.5, expiration_date=None):
-        memory = LongTermMemory(
-            id=uuid.uuid4(),
-            user_id=user_id,
-            fact_type=fact_type,
-            content=content,
-            embedding=[0.0] * 1024,
-            importance_score=importance_score,
-            expiration_date=expiration_date,
-        )
-        db.add(memory)
-        await db.flush()
-        return memory
+    async def fake_embeddings(text: str) -> list[float]:
+        del text
+        await asyncio.sleep(0)
+        return [0.0] * 1024
 
     async def fake_ingest_document(user_id: str, filename: str, content: bytes) -> int:
         await asyncio.sleep(0)
@@ -72,7 +66,7 @@ async def run() -> None:
         ]
 
     app.dependency_overrides[get_db] = override_get_db
-    memory_service.create_long_term_memory = fake_create_long_term_memory
+    ollama_client.embeddings = fake_embeddings
     rag_service.ingest_document = fake_ingest_document
     rag_service.retrieve_context = fake_retrieve_context
 
@@ -91,13 +85,41 @@ async def run() -> None:
             "expiration_date": None,
         }
 
-        create_memory = client.post("/api/v1/memory", json=memory_payload, headers=headers)
+        create_memory = client.post(MEMORY_ENDPOINT, json=memory_payload, headers=headers)
         ensure(create_memory.status_code == 200, f"create memory failed: {create_memory.text}")
+        memory_id = create_memory.json().get("id")
+        ensure(bool(memory_id), f"memory id is missing: {create_memory.text}")
 
-        list_memory = client.get("/api/v1/memory", headers=headers)
+        create_memory_duplicate = client.post(MEMORY_ENDPOINT, json=memory_payload, headers=headers)
+        ensure(create_memory_duplicate.status_code == 200, f"create duplicate memory failed: {create_memory_duplicate.text}")
+
+        expired_payload = {
+            "fact_type": "fact",
+            "content": "Устаревший факт",
+            "importance_score": 0.4,
+            "expiration_date": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            "is_pinned": False,
+            "is_locked": False,
+        }
+        create_expired = client.post(MEMORY_ENDPOINT, json=expired_payload, headers=headers)
+        ensure(create_expired.status_code == 200, f"create expired memory failed: {create_expired.text}")
+
+        pin = client.patch(f"/api/v1/memory/{memory_id}/pin", json={"value": True}, headers=headers)
+        ensure(pin.status_code == 200, f"pin memory failed: {pin.text}")
+        ensure(pin.json().get("is_pinned") is True, f"memory should be pinned: {pin.text}")
+
+        lock = client.patch(f"/api/v1/memory/{memory_id}/lock", json={"value": True}, headers=headers)
+        ensure(lock.status_code == 200, f"lock memory failed: {lock.text}")
+        ensure(lock.json().get("is_locked") is True, f"memory should be locked: {lock.text}")
+
+        list_memory = client.get(MEMORY_ENDPOINT, headers=headers)
         ensure(list_memory.status_code == 200, f"list memory failed: {list_memory.text}")
         items = list_memory.json()
-        ensure(len(items) >= 1, f"memory list empty: {list_memory.text}")
+        ensure(len(items) == 1, f"dedup expected one memory item: {list_memory.text}")
+
+        cleanup = client.post(MEMORY_CLEANUP_ENDPOINT, headers=headers)
+        ensure(cleanup.status_code == 200, f"memory cleanup failed: {cleanup.text}")
+        ensure(int(cleanup.json().get("deleted_count") or 0) >= 1, f"cleanup should remove expired memory: {cleanup.text}")
 
         upload = client.post(
             "/api/v1/documents/upload",

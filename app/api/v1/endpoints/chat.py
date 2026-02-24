@@ -7,6 +7,7 @@ from app.api.types import CurrentUser, DBSession
 from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
 from app.models.user import User
+from app.models.worker_task import WorkerTask
 from app.schemas.chat import (
     BrowserActionRequest,
     ChatRequest,
@@ -14,18 +15,42 @@ from app.schemas.chat import (
     FeedbackRequest,
     MessageOut,
     PdfCreateRequest,
+    TaskHistoryItem,
+    TaskHistoryResponse,
+    WorkerResultsPollResponse,
     WebFetchRequest,
     WebSearchRequest,
 )
+from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
+from app.services.skills_registry_service import skills_registry_service
 from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
 from app.services.web_tools_service import web_tools_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
+
+
+def _safe_task_payload(payload: dict | None) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if not str(k).startswith("__")}
+
+
+def _safe_task_result(result: dict | None) -> dict | None:
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        return {"raw": str(result)}
+
+    preview = dict(result)
+    if "file_base64" in preview:
+        preview.pop("file_base64", None)
+        preview["artifact_ready"] = True
+    return preview
 
 
 @router.post("")
@@ -75,6 +100,17 @@ async def chat(
         used_memory_ids=[UUID(mid) for mid in used_memory_ids],
         tool_calls=tool_calls,
         artifacts=artifacts,
+    )
+
+
+@router.get("/skills", response_model=SkillsRegistryResponse)
+async def skills_registry(
+    current_user: CurrentUser,
+) -> SkillsRegistryResponse:
+    del current_user
+    return SkillsRegistryResponse(
+        registry_version=skills_registry_service.REGISTRY_VERSION,
+        skills=skills_registry_service.list_contracts(),
     )
 
 
@@ -203,10 +239,56 @@ async def pdf_create(
     )
 
 
-@router.get("/worker-results/poll")
+@router.get("/worker-results/poll", response_model=WorkerResultsPollResponse)
 async def poll_worker_results(
     current_user: CurrentUser,
     limit: int = 20,
-) -> dict:
+) -> WorkerResultsPollResponse:
     items = worker_result_service.pop_many(user_id=str(current_user.id), limit=limit)
-    return {"items": items}
+    return WorkerResultsPollResponse(items=items)
+
+
+@router.get("/tasks/history", response_model=TaskHistoryResponse)
+async def task_history(
+    db: DBSession,
+    current_user: CurrentUser,
+    limit: int = 20,
+    offset: int = 0,
+) -> TaskHistoryResponse:
+    safe_limit = max(1, min(limit, 100))
+    safe_offset = max(0, offset)
+
+    result = await db.execute(
+        select(WorkerTask)
+        .where(WorkerTask.user_id == current_user.id)
+        .order_by(WorkerTask.created_at.desc())
+        .offset(safe_offset)
+        .limit(safe_limit + 1)
+    )
+    rows = result.scalars().all()
+    has_more = len(rows) > safe_limit
+    visible_rows = rows[:safe_limit]
+
+    items = [
+        TaskHistoryItem(
+            job_type=row.job_type,
+            status=row.status,
+            input=_safe_task_payload(row.payload),
+            result=_safe_task_result(row.result),
+            error=row.error,
+            attempt=int(row.attempt_count or 0),
+            max_retries=int(row.max_retries or 0),
+            created_at=row.created_at,
+            started_at=row.started_at,
+            next_retry_at=row.next_retry_at,
+            completed_at=row.completed_at,
+        )
+        for row in visible_rows
+    ]
+
+    return TaskHistoryResponse(
+        items=items,
+        limit=safe_limit,
+        offset=safe_offset,
+        has_more=has_more,
+    )

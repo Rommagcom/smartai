@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from app.core.config import settings
+from app.services.egress_policy_service import egress_policy_service
 
 
 class WebToolsService:
@@ -18,7 +19,7 @@ class WebToolsService:
             raise ValueError("Only http/https URLs are allowed")
         if not parsed.netloc:
             raise ValueError("Invalid URL")
-        return url
+        return egress_policy_service.validate_url(url)
 
     async def web_fetch(self, url: str, max_chars: int = 12000) -> dict:
         safe_url = self._validate_url(url)

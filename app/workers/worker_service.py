@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
+from redis.asyncio import Redis
+from sqlalchemy import select
+
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
+from app.models.worker_task import WorkerTask
 from app.services.pdf_service import pdf_service
+from app.services.delivery_format_service import build_worker_delivery_payload
 from app.services.web_tools_service import web_tools_service
 from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
-from app.workers.models import WorkerJob, WorkerJobType
+from app.workers.models import WorkerJobStatus, WorkerJobType
 
 WorkerHandler = Callable[[dict], Awaitable[dict]]
 
 
 class WorkerService:
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[WorkerJob] = asyncio.Queue()
-        self._jobs: dict[str, WorkerJob] = {}
+        self._redis: Redis | None = None
         self._handlers: dict[WorkerJobType, WorkerHandler] = {
             WorkerJobType.WEB_SEARCH: self._handle_web_search,
             WorkerJobType.WEB_FETCH: self._handle_web_fetch,
@@ -25,35 +35,198 @@ class WorkerService:
     def register_handler(self, job_type: WorkerJobType, handler: WorkerHandler) -> None:
         self._handlers[job_type] = handler
 
-    async def enqueue(self, job_type: WorkerJobType, payload: dict) -> WorkerJob:
-        job = WorkerJob(job_type=job_type, payload=payload)
-        self._jobs[job.id] = job
-        await self._queue.put(job)
-        return job
+    def _get_redis(self) -> Redis:
+        if self._redis is None:
+            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        return self._redis
 
-    def get_job(self, job_id: str) -> WorkerJob | None:
-        return self._jobs.get(job_id)
+    async def enqueue(
+        self,
+        job_type: WorkerJobType,
+        payload: dict,
+        *,
+        max_retries: int | None = None,
+        dedupe_key: str | None = None,
+    ) -> dict:
+        retries = max(0, max_retries if max_retries is not None else settings.WORKER_MAX_RETRIES)
+        payload_copy = dict(payload or {})
+        user_id = str(payload_copy.get("__user_id") or "").strip() or None
 
-    async def run_once(self) -> WorkerJob:
-        job = await self._queue.get()
-        job.mark_running()
-        handler = self._handlers.get(job.job_type)
-        if not handler:
-            job.mark_failed(f"No handler for job_type={job.job_type}")
-            await self._notify_user(job)
-            return job
+        dedupe = dedupe_key or self._build_dedupe_key(job_type=job_type, payload=payload_copy)
+        existing_task = await self._find_deduplicated_task(dedupe)
+        if existing_task:
+            return {
+                "task": existing_task,
+                "enqueued": False,
+                "deduplicated": True,
+            }
 
-        try:
-            result = await handler(job.payload)
-            job.mark_success(result=result)
-        except Exception as exc:
-            job.mark_failed(str(exc))
-        await self._notify_user(job)
-        return job
+        async with AsyncSessionLocal() as db:
+            task = WorkerTask(
+                user_id=UUID(user_id) if user_id else None,
+                job_type=job_type.value,
+                payload=payload_copy,
+                status=WorkerJobStatus.QUEUED.value,
+                attempt_count=0,
+                max_retries=retries,
+                dedupe_key=dedupe,
+            )
+            db.add(task)
+            await db.commit()
+            await db.refresh(task)
+
+        redis = self._get_redis()
+        await redis.lpush(settings.WORKER_QUEUE_KEY, str(task.id))
+        return {
+            "task": task,
+            "enqueued": True,
+            "deduplicated": False,
+        }
+
+    async def get_job(self, job_id: str) -> WorkerTask | None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(WorkerTask).where(WorkerTask.id == UUID(job_id)))
+            return result.scalar_one_or_none()
+
+    async def run_once(self) -> WorkerTask | None:
+        await self._promote_retries()
+        redis = self._get_redis()
+        item = await redis.brpop(settings.WORKER_QUEUE_KEY, timeout=settings.WORKER_BRPOP_TIMEOUT_SECONDS)
+        if not item:
+            return None
+
+        task_id = item[1]
+        return await self._process_task(task_id)
 
     async def run_forever(self) -> None:
         while True:
-            await self.run_once()
+            task = await self.run_once()
+            if task is None:
+                await asyncio.sleep(0.2)
+
+    async def _process_task(self, task_id: str) -> WorkerTask | None:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(WorkerTask).where(WorkerTask.id == UUID(task_id)))
+            task = result.scalar_one_or_none()
+            if not task:
+                return None
+
+            task.status = WorkerJobStatus.RUNNING.value
+            task.started_at = datetime.now(timezone.utc)
+            task.next_retry_at = None
+            await db.commit()
+
+            try:
+                job_type = WorkerJobType(task.job_type)
+                handler = self._handlers.get(job_type)
+            except Exception:
+                handler = None
+
+            if not handler:
+                await self._fail_task(db, task, f"No handler for job_type={task.job_type}")
+                return task
+
+            try:
+                run_result = await handler(task.payload)
+                task.status = WorkerJobStatus.SUCCESS.value
+                task.result = run_result
+                task.error = None
+                task.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                await self._notify_user(task)
+            except Exception as exc:
+                await self._fail_task(db, task, str(exc))
+
+            return task
+
+    async def _fail_task(self, db, task: WorkerTask, error: str) -> None:
+        task.attempt_count = int(task.attempt_count) + 1
+        task.error = error
+
+        if task.attempt_count <= task.max_retries:
+            delay = self._retry_delay_seconds(task.attempt_count)
+            run_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            task.status = WorkerJobStatus.RETRY_SCHEDULED.value
+            task.next_retry_at = run_at
+            await db.commit()
+
+            redis = self._get_redis()
+            await redis.zadd(settings.WORKER_RETRY_ZSET_KEY, {str(task.id): run_at.timestamp()})
+            return
+
+        task.status = WorkerJobStatus.FAILED.value
+        task.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await self._notify_user(task)
+
+    async def _promote_retries(self) -> None:
+        redis = self._get_redis()
+        now_ts = datetime.now(timezone.utc).timestamp()
+        ready_ids = await redis.zrangebyscore(settings.WORKER_RETRY_ZSET_KEY, min=0, max=now_ts, start=0, num=100)
+        if not ready_ids:
+            return
+
+        async with AsyncSessionLocal() as db:
+            uuids = [UUID(task_id) for task_id in ready_ids]
+            result = await db.execute(select(WorkerTask).where(WorkerTask.id.in_(uuids)))
+            rows = result.scalars().all()
+            for row in rows:
+                row.status = WorkerJobStatus.QUEUED.value
+                row.next_retry_at = None
+            await db.commit()
+
+        pipe = redis.pipeline()
+        for task_id in ready_ids:
+            pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, task_id)
+            pipe.lpush(settings.WORKER_QUEUE_KEY, task_id)
+        await pipe.execute()
+
+    @staticmethod
+    def _retry_delay_seconds(attempt_count: int) -> int:
+        base = max(1, settings.WORKER_RETRY_BASE_DELAY_SECONDS)
+        max_delay = max(base, settings.WORKER_RETRY_MAX_DELAY_SECONDS)
+        value = base * (2 ** max(0, attempt_count - 1))
+        return min(max_delay, value)
+
+    @staticmethod
+    def _build_dedupe_key(job_type: WorkerJobType, payload: dict) -> str:
+        user_id = str(payload.get("__user_id") or "")
+        normalized_payload = {
+            key: value
+            for key, value in (payload or {}).items()
+            if not key.startswith("__")
+        }
+        raw = json.dumps(
+            {
+                "job_type": job_type.value,
+                "user_id": user_id,
+                "payload": normalized_payload,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    async def _find_deduplicated_task(self, dedupe_key: str) -> WorkerTask | None:
+        window_start = datetime.now(timezone.utc) - timedelta(seconds=settings.WORKER_DEDUPE_WINDOW_SECONDS)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(WorkerTask)
+                .where(
+                    WorkerTask.dedupe_key == dedupe_key,
+                    WorkerTask.status.in_(
+                        [
+                            WorkerJobStatus.QUEUED.value,
+                            WorkerJobStatus.RUNNING.value,
+                            WorkerJobStatus.RETRY_SCHEDULED.value,
+                        ]
+                    ),
+                    WorkerTask.created_at >= window_start,
+                )
+                .order_by(WorkerTask.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
 
     async def _handle_web_search(self, payload: dict) -> dict:
         query = str(payload.get("query") or "").strip()
@@ -79,41 +252,21 @@ class WorkerService:
             filename = f"{filename}.pdf"
         return await asyncio.to_thread(pdf_service.create_pdf_base64, title, content, filename)
 
-    async def _notify_user(self, job: WorkerJob) -> None:
-        user_id = str(job.payload.get("__user_id") or "").strip()
+    async def _notify_user(self, job: WorkerTask) -> None:
+        payload_data = job.payload if isinstance(job.payload, dict) else {}
+        user_id = str(payload_data.get("__user_id") or (job.user_id and str(job.user_id)) or "").strip()
         if not user_id:
             return
 
-        if job.status.value == "success":
-            payload = {
-                "type": "worker_result",
-                "status": "success",
-                "job_type": job.job_type.value,
-                "message": "Фоновая задача выполнена.",
-                "result": self._result_preview(job.result),
-            }
-        else:
-            payload = {
-                "type": "worker_result",
-                "status": "failed",
-                "job_type": job.job_type.value,
-                "message": "Фоновая задача завершилась с ошибкой.",
-                "error": job.error,
-            }
+        is_success = job.status == WorkerJobStatus.SUCCESS.value
+        payload = build_worker_delivery_payload(
+            job_type=job.job_type,
+            is_success=is_success,
+            result=job.result,
+            error_message=job.error,
+        )
         worker_result_service.push(user_id=user_id, payload=payload)
         await connection_manager.send_to_user(user_id=user_id, payload=payload)
-
-    @staticmethod
-    def _result_preview(result: dict | None) -> dict:
-        if not isinstance(result, dict):
-            return {"raw": str(result)}
-
-        preview = dict(result)
-        file_base64 = preview.pop("file_base64", None)
-        if file_base64 is not None:
-            preview["artifact_ready"] = True
-            preview["artifact_note"] = "Результат содержит файл. Для передачи файла используйте чатовый tool-вызов без фоновой очереди."
-        return preview
 
 
 worker_service = WorkerService()

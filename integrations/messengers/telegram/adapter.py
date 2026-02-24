@@ -169,16 +169,46 @@ class TelegramAdapter(MessengerAdapter):
 
     @staticmethod
     def _format_worker_item(item: dict[str, Any]) -> str:
-        status = item.get("status", "unknown")
+        success = item.get("success")
+        if success is None:
+            success = item.get("status") == "success"
         job_type = item.get("job_type", "job")
-        if status == "success":
+        if bool(success):
+            preview = item.get("result_preview")
+            if preview is None:
+                preview = item.get("result", {})
+            artifact_hint = str(item.get("next_action_hint") or "").strip()
+            if not artifact_hint:
+                artifact_hint = TelegramAdapter._artifact_ready_hint(job_type=job_type, preview=preview)
+            suffix = f"\n\n{artifact_hint}" if artifact_hint else ""
             return (
                 f"✅ Фоновая задача выполнена ({job_type})\n"
-                f"Результат:\n{_safe_json(item.get('result', {}), max_len=3200)}"
+                f"Результат:\n{_safe_json(preview, max_len=3200)}"
+                f"{suffix}"
             )
+        error_obj = item.get("error")
+        error_message = error_obj.get("message") if isinstance(error_obj, dict) else error_obj
         return (
             f"❌ Фоновая задача завершилась с ошибкой ({job_type})\n"
-            f"Ошибка: {item.get('error', 'unknown error')}"
+            f"Ошибка: {error_message or 'unknown error'}"
+        )
+
+    @staticmethod
+    def _artifact_ready_hint(job_type: str, preview: Any) -> str:
+        if not isinstance(preview, dict):
+            return ""
+        if not preview.get("artifact_ready"):
+            return ""
+
+        if str(job_type) == "pdf_create":
+            return (
+                "Файл готов. Чтобы получить сам PDF в Telegram, запусти задачу напрямую без фоновой очереди, "
+                "например командой /make_pdf <title>|<content>."
+            )
+
+        return (
+            "Файл готов. Чтобы получить файл в Telegram, повтори задачу через /chat без фразы про фон/очередь "
+            "(выполнение пойдёт сразу и вернёт артефакт)."
         )
 
     async def _reply_api_result(self, update: Update, result: dict) -> None:

@@ -89,6 +89,55 @@ async def run() -> None:
         ensure(body.get("status_code") == 200, f"unexpected call status: {called.text}")
         ensure("Bearer abc123" == body.get("headers", {}).get("Authorization"), "auth header not injected")
 
+        onboarding_connect_payload = {
+            "service_name": "onboarding_service",
+            "token": "onboard-token",
+            "base_url": "https://example.test",
+            "endpoints": [{"name": "ping", "url": "https://example.test/ping", "method": "GET"}],
+            "healthcheck": {"url": "https://example.test/health", "method": "GET"},
+        }
+        connected = client.post("/api/v1/integrations/onboarding/connect", json=onboarding_connect_payload, headers=headers)
+        ensure(connected.status_code == 200, f"onboarding connect failed: {connected.text}")
+        connected_payload = connected.json()
+        draft = connected_payload.get("draft") or {}
+        draft_id = str(connected_payload.get("draft_id") or "")
+        ensure(bool(draft_id), f"draft_id is missing: {connected.text}")
+        ensure(draft.get("service_name") == "onboarding_service", f"invalid onboarding draft: {connected.text}")
+
+        status_connected = client.get(f"/api/v1/integrations/onboarding/status/{draft_id}", headers=headers)
+        ensure(status_connected.status_code == 200, f"onboarding status (connected) failed: {status_connected.text}")
+        ensure(status_connected.json().get("step") == "connected", f"expected connected step: {status_connected.text}")
+
+        tested = client.post("/api/v1/integrations/onboarding/test", json={"draft_id": draft_id}, headers=headers)
+        ensure(tested.status_code == 200, f"onboarding test failed: {tested.text}")
+        test_payload = tested.json().get("test") or {}
+        ensure(test_payload.get("success") is True, f"onboarding healthcheck should pass: {tested.text}")
+
+        status_tested = client.get(f"/api/v1/integrations/onboarding/status/{draft_id}", headers=headers)
+        ensure(status_tested.status_code == 200, f"onboarding status (tested) failed: {status_tested.text}")
+        ensure(status_tested.json().get("step") == "tested", f"expected tested step: {status_tested.text}")
+
+        saved = client.post(
+            "/api/v1/integrations/onboarding/save",
+            json={"draft_id": draft_id, "is_active": True, "require_successful_test": True},
+            headers=headers,
+        )
+        ensure(saved.status_code == 200, f"onboarding save failed: {saved.text}")
+        saved_integration = saved.json().get("integration") or {}
+        saved_integration_id = saved_integration.get("id")
+        ensure(bool(saved_integration_id), f"saved integration id missing: {saved.text}")
+
+        status_saved = client.get(f"/api/v1/integrations/onboarding/status/{draft_id}", headers=headers)
+        ensure(status_saved.status_code == 200, f"onboarding status (saved) failed: {status_saved.text}")
+        status_saved_payload = status_saved.json()
+        ensure(status_saved_payload.get("step") == "saved", f"expected saved step: {status_saved.text}")
+        ensure(status_saved_payload.get("saved_integration_id") == saved_integration_id, f"saved integration mismatch: {status_saved.text}")
+
+        health = client.get(f"/api/v1/integrations/{saved_integration_id}/health", headers=headers)
+        ensure(health.status_code == 200, f"integration health failed: {health.text}")
+        health_payload = health.json().get("health") or {}
+        ensure(health_payload.get("success") is True, f"saved integration health should pass: {health.text}")
+
     await engine.dispose()
     if DB_PATH.exists():
         DB_PATH.unlink()

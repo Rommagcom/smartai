@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime
 import json
 from uuid import UUID
 
@@ -9,38 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.api_integration import ApiIntegration
 from app.models.cron_job import CronJob
-from app.models.long_term_memory import LongTermMemory
 from app.models.user import User
 from app.services.api_executor import api_executor
+from app.services.auth_data_security_service import auth_data_security_service
 from app.services.memory_service import memory_service
+from app.services.integration_onboarding_service import integration_onboarding_service
 from app.services.ollama_client import ollama_client
 from app.services.pdf_service import pdf_service
 from app.services.rag_service import rag_service
 from app.services.sandbox_service import sandbox_service
 from app.services.schedule_parser_service import schedule_parser_service
 from app.services.scheduler_service import scheduler_service
+from app.services.skills_registry_service import skills_registry_service
 from app.services.web_tools_service import web_tools_service
 from app.workers.models import WorkerJobType
 from app.workers.worker_service import worker_service
 
-TOOL_NAMES = {
-    "web_search",
-    "web_fetch",
-    "browser",
-    "pdf_create",
-    "execute_python",
-    "memory_add",
-    "memory_list",
-    "memory_search",
-    "doc_search",
-    "cron_add",
-    "cron_list",
-    "cron_delete",
-    "worker_enqueue",
-    "integration_add",
-    "integrations_list",
-    "integration_call",
-}
+TOOL_NAMES = skills_registry_service.tool_names()
 
 
 class ToolOrchestratorService:
@@ -51,11 +38,7 @@ class ToolOrchestratorService:
             "Если инструменты не нужны: use_tools=false и steps=[]. "
             "Если нужны: 1..3 шага в порядке выполнения. "
             "Доступные инструменты: "
-            "web_search(query, limit), web_fetch(url, max_chars), browser(url, action: extract_text|screenshot|pdf), "
-            "pdf_create(title, content, filename), execute_python(code), "
-            "memory_add(fact_type, content, importance_score), memory_list(), memory_search(query, top_k), "
-            "doc_search(query, top_k), cron_add(name, cron_expression OR schedule_text, action_type, payload, task_text), cron_list(), cron_delete(job_id), "
-            "worker_enqueue(job_type, payload), integration_add(service_name, token_optional, base_url_optional, endpoints_optional), integrations_list(), integration_call(integration_id, url, method, payload, headers). "
+            f"{skills_registry_service.planner_signatures()}. "
             "Правила: "
             "1) Для актуальных данных (курс валют, новости, погода) обычно сначала web_search, потом web_fetch. "
             "2) Для PDF отчета после сбора данных добавляй pdf_create. "
@@ -63,18 +46,22 @@ class ToolOrchestratorService:
             "4) Если пользователь просит 'подключить API', используй integration_add. "
             "5) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
             "6) Если пользователь просит выполнить задачу в фоне/очереди (например 'поставь в очередь', 'обработай в фоне'), используй worker_enqueue. "
-            "7) Не выдумывай аргументы, если их нет в сообщении."
+            "7) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
+            "8) Не выдумывай аргументы, если их нет в сообщении."
         )
 
-        planner_raw = await ollama_client.chat(
-            messages=[
-                {"role": "system", "content": f"{system_prompt}\n\n{planner_prompt}"},
-                {"role": "user", "content": user_message},
-            ],
-            stream=False,
-            options={"temperature": 0.0, "top_p": 0.1},
-        )
-        return self._normalize_plan(self._parse_json(planner_raw))
+        try:
+            planner_raw = await ollama_client.chat(
+                messages=[
+                    {"role": "system", "content": f"{system_prompt}\n\n{planner_prompt}"},
+                    {"role": "user", "content": user_message},
+                ],
+                stream=False,
+                options={"temperature": 0.0, "top_p": 0.1},
+            )
+            return self._normalize_plan(self._parse_json(planner_raw))
+        except Exception:
+            return {"use_tools": False, "steps": [], "response_hint": ""}
 
     async def execute_tool_chain(
         self,
@@ -95,6 +82,18 @@ class ToolOrchestratorService:
                         "arguments": arguments,
                         "success": False,
                         "error": f"Unsupported tool: {tool}",
+                    }
+                )
+                continue
+
+            validation_error = skills_registry_service.validate_input(tool, arguments)
+            if validation_error:
+                results.append(
+                    {
+                        "tool": tool,
+                        "arguments": arguments,
+                        "success": False,
+                        "error": f"Invalid arguments: {validation_error}",
                     }
                 )
                 continue
@@ -163,10 +162,135 @@ class ToolOrchestratorService:
             "cron_list": self._cron_list,
             "cron_delete": self._cron_delete,
             "worker_enqueue": self._worker_enqueue,
+            "integration_onboarding_connect": self._integration_onboarding_connect,
+            "integration_onboarding_test": self._integration_onboarding_test,
+            "integration_onboarding_save": self._integration_onboarding_save,
+            "integration_health": self._integration_health,
             "integration_add": self._integration_add,
             "integrations_list": self._integrations_list,
             "integration_call": self._integration_call,
         }
+
+    async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, user
+        await asyncio.sleep(0)
+        service_name = str(arguments.get("service_name") or "custom-api").strip() or "custom-api"
+        token = str(arguments.get("token") or "").strip() or None
+        base_url = str(arguments.get("base_url") or "").strip() or None
+        endpoints_raw = arguments.get("endpoints")
+        endpoints = [item for item in endpoints_raw if isinstance(item, dict)] if isinstance(endpoints_raw, list) else []
+        healthcheck = arguments.get("healthcheck") if isinstance(arguments.get("healthcheck"), dict) else None
+
+        draft = integration_onboarding_service.build_draft(
+            service_name=service_name,
+            token=token,
+            base_url=base_url,
+            endpoints=endpoints,
+            healthcheck=healthcheck,
+        )
+        return {
+            "status": "connected",
+            "message": "Черновик подключения интеграции подготовлен. Следующий шаг: integration_onboarding_test.",
+            "draft": draft,
+        }
+
+    async def _integration_onboarding_test(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db
+        draft_id = str(arguments.get("draft_id") or "").strip()
+        draft = self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
+        if not draft:
+            raise ValueError("integration_onboarding_test requires draft or draft_id")
+        normalized = self._normalize_onboarding_draft(draft)
+        test = await integration_onboarding_service.test_draft(normalized)
+        draft_id = self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
+        integration_onboarding_service.update_after_test(
+            user_id=str(user.id),
+            draft_id=draft_id,
+            draft=normalized,
+            test=test,
+        )
+        return {
+            "status": "tested",
+            "draft_id": draft_id,
+            "draft": normalized,
+            "test": test,
+        }
+
+    async def _integration_onboarding_save(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        draft_id = str(arguments.get("draft_id") or "").strip()
+        draft = self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
+        if not draft:
+            raise ValueError("integration_onboarding_save requires draft or draft_id")
+
+        normalized = self._normalize_onboarding_draft(draft)
+        require_successful_test = bool(arguments.get("require_successful_test", False))
+        test = await integration_onboarding_service.test_draft(normalized)
+        if require_successful_test and not bool(test.get("success")):
+            raise ValueError(f"Healthcheck failed: {test.get('message')}")
+
+        integration = await integration_onboarding_service.save_draft(
+            db=db,
+            user_id=user.id,
+            draft=normalized,
+            is_active=bool(arguments.get("is_active", True)),
+        )
+        draft_id = self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
+        integration_onboarding_service.update_after_save(
+            user_id=str(user.id),
+            draft_id=draft_id,
+            integration_id=str(integration.id),
+        )
+        return {
+            "status": "saved",
+            "draft_id": draft_id,
+            "integration": {
+                "id": str(integration.id),
+                "service_name": integration.service_name,
+                "is_active": integration.is_active,
+                "endpoints": integration.endpoints,
+            },
+            "test": test,
+        }
+
+    @staticmethod
+    def _resolve_onboarding_draft(arguments: dict, user_id: str, draft_id: str) -> dict:
+        draft = arguments.get("draft") if isinstance(arguments.get("draft"), dict) else {}
+        if draft:
+            return draft
+        if not draft_id:
+            return {}
+        state = integration_onboarding_service.get_session(user_id=user_id, draft_id=draft_id)
+        if state and isinstance(state.get("draft"), dict):
+            return state.get("draft")
+        return {}
+
+    @staticmethod
+    def _normalize_onboarding_draft(draft: dict) -> dict:
+        return integration_onboarding_service.build_draft(
+            service_name=str(draft.get("service_name") or "custom-api"),
+            token=str((draft.get("auth_data") or {}).get("token") or ""),
+            base_url=str((draft.get("auth_data") or {}).get("base_url") or ""),
+            endpoints=draft.get("endpoints") if isinstance(draft.get("endpoints"), list) else [],
+            healthcheck=draft.get("healthcheck") if isinstance(draft.get("healthcheck"), dict) else None,
+        )
+
+    @staticmethod
+    def _ensure_onboarding_session(user_id: str, draft_id: str, draft: dict) -> str:
+        if draft_id:
+            return draft_id
+        state = integration_onboarding_service.create_session(user_id=user_id, draft=draft)
+        return str(state.get("draft_id") or "")
+
+    async def _integration_health(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        integration_id_raw = str(arguments.get("integration_id") or "").strip()
+        if not integration_id_raw:
+            raise ValueError("integration_health requires integration_id")
+        integration_id = UUID(integration_id_raw)
+        result = await db.execute(select(ApiIntegration).where(ApiIntegration.id == integration_id, ApiIntegration.user_id == user.id))
+        integration = result.scalar_one_or_none()
+        if not integration:
+            raise ValueError("Integration not found")
+        return await integration_onboarding_service.check_health(integration)
 
     async def _worker_enqueue(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db
@@ -186,10 +310,15 @@ class ToolOrchestratorService:
 
         payload["__user_id"] = str(user.id)
         payload["__requested_job_type"] = job_type_raw
-        await worker_service.enqueue(job_type=job_type, payload=payload)
+        enqueue_result = await worker_service.enqueue(job_type=job_type, payload=payload)
+        deduplicated = bool(enqueue_result.get("deduplicated"))
         return {
-            "status": "queued",
-            "message": "Задача поставлена в очередь. Отправлю результат отдельным сообщением после обработки.",
+            "status": "queued" if not deduplicated else "deduplicated",
+            "message": (
+                "Похожая задача уже в обработке. Использую существующую очередь выполнения."
+                if deduplicated
+                else "Задача поставлена в очередь. Отправлю результат отдельным сообщением после обработки."
+            ),
         }
 
     async def _web_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -247,12 +376,21 @@ class ToolOrchestratorService:
         if not content:
             raise ValueError("memory_add requires content")
         importance = float(arguments.get("importance_score", 0.5))
+        expiration_date_raw = str(arguments.get("expiration_date") or "").strip()
+        expiration_date = None
+        if expiration_date_raw:
+            expiration_date = datetime.fromisoformat(expiration_date_raw.replace("Z", "+00:00"))
+        is_pinned = bool(arguments.get("is_pinned", False))
+        is_locked = bool(arguments.get("is_locked", False))
         memory = await memory_service.create_long_term_memory(
             db=db,
             user_id=user.id,
             fact_type=fact_type,
             content=content,
             importance_score=max(0.0, min(1.0, importance)),
+            expiration_date=expiration_date,
+            is_pinned=is_pinned,
+            is_locked=is_locked,
         )
         await db.flush()
         return {
@@ -260,17 +398,14 @@ class ToolOrchestratorService:
             "fact_type": memory.fact_type,
             "content": memory.content,
             "importance_score": memory.importance_score,
+            "expiration_date": memory.expiration_date.isoformat() if memory.expiration_date else None,
+            "is_pinned": memory.is_pinned,
+            "is_locked": memory.is_locked,
         }
 
     async def _memory_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del arguments
-        result = await db.execute(
-            select(LongTermMemory)
-            .where(LongTermMemory.user_id == user.id)
-            .order_by(LongTermMemory.importance_score.desc(), LongTermMemory.created_at.desc())
-            .limit(200)
-        )
-        rows = result.scalars().all()
+        rows = await memory_service.list_memories(db=db, user_id=user.id, limit=200)
         return {
             "items": [
                 {
@@ -278,6 +413,9 @@ class ToolOrchestratorService:
                     "fact_type": item.fact_type,
                     "content": item.content,
                     "importance_score": item.importance_score,
+                    "is_pinned": item.is_pinned,
+                    "is_locked": item.is_locked,
+                    "expiration_date": item.expiration_date.isoformat() if item.expiration_date else None,
                 }
                 for item in rows
             ]
@@ -418,8 +556,8 @@ class ToolOrchestratorService:
 
     async def _integration_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         service_name = str(arguments.get("service_name") or arguments.get("name") or "custom-api").strip()
-        token = str(arguments.get("token") or "").strip()
-        base_url = str(arguments.get("base_url") or "").strip()
+        token = str(arguments.get("token") or arguments.get("token_optional") or "").strip()
+        base_url = str(arguments.get("base_url") or arguments.get("base_url_optional") or "").strip()
 
         endpoints_raw = arguments.get("endpoints")
         endpoints: list[dict] = []
@@ -438,7 +576,7 @@ class ToolOrchestratorService:
         integration = ApiIntegration(
             user_id=user.id,
             service_name=service_name,
-            auth_data=auth_data,
+            auth_data=auth_data_security_service.encrypt(auth_data),
             endpoints=endpoints,
             is_active=True,
         )
@@ -468,7 +606,13 @@ class ToolOrchestratorService:
         if not integration:
             raise ValueError("Integration not found")
 
-        if token := integration.auth_data.get("token"):
+        auth_data, rotated = auth_data_security_service.resolve_for_runtime(integration.auth_data)
+        if rotated is not None:
+            integration.auth_data = rotated
+            db.add(integration)
+            await db.flush()
+
+        if token := auth_data.get("token"):
             headers["Authorization"] = f"Bearer {token}"
         return await api_executor.call(method=method, url=endpoint, headers=headers, body=payload)
 

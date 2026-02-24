@@ -11,6 +11,7 @@ from app.models.long_term_memory import LongTermMemory  # noqa: F401
 from app.models.message import Message  # noqa: F401
 from app.models.session import Session  # noqa: F401
 from app.models.user import User  # noqa: F401
+from app.models.worker_task import WorkerTask  # noqa: F401
 
 config = context.config
 
