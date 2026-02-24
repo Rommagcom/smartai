@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     BROWSER_HEADLESS: bool = True
     CHROME_EXECUTABLE_PATH: str = ""
 
+    OBS_LOG_JSON: bool = True
+    OBS_ALERT_BUFFER_SIZE: int = 200
+
     SANDBOX_TIMEOUT_SECONDS: int = 30
     SANDBOX_MEMORY_LIMIT: str = "256m"
     SANDBOX_CPU_LIMIT: str = "0.5"
