@@ -106,3 +106,9 @@ class IntegrationHealthResponse(BaseModel):
     is_active: bool
     healthcheck: dict
     health: IntegrationOnboardingTestResult
+
+
+class IntegrationAuthDataRotateResponse(BaseModel):
+    scanned: int
+    rotated: int
+    failed: int

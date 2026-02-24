@@ -141,6 +141,7 @@ Backend-only система персонального AI ассистента �
 - `POST /api/v1/integrations/onboarding/save`
 - `GET /api/v1/integrations/onboarding/status/{draft_id}`
 - `GET /api/v1/integrations/{integration_id}/health`
+- `POST /api/v1/integrations/admin/rotate-auth-data` (admin)
 - `WS /api/v1/ws/chat?token=<access_token>`
 
 > Важно: `POST /api/v1/chat` вернёт `428 Precondition Required`, пока не выполнен `POST /api/v1/users/me/soul/setup`.
@@ -209,6 +210,8 @@ Backend-only система персонального AI ассистента �
 5. Проверьте, что новые/прочитанные записи перешифрованы ключом `k2`.
 6. После валидации удалите старый ключ из keyring:
    - финально: `AUTH_DATA_ENCRYPTION_KEYS=k2:<new_key>`.
+
+> Для ускоренной миграции можно вызвать `POST /api/v1/integrations/admin/rotate-auth-data` (admin-only), чтобы batch-перешифровать все интеграции без ожидания lazy-rotation.
 
 #### Safety checklist
 - Никогда не публикуйте ключи в репозитории, используйте secret manager/.env в защищённом хранилище.

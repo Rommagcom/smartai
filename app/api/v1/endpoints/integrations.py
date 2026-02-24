@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.api.types import CurrentUser, DBSession
 from app.models.api_integration import ApiIntegration
 from app.schemas.integration import (
+    IntegrationAuthDataRotateResponse,
     IntegrationCreate,
     IntegrationHealthResponse,
     IntegrationOnboardingConnectRequest,
@@ -22,6 +23,11 @@ from app.services.auth_data_security_service import auth_data_security_service
 from app.services.integration_onboarding_service import integration_onboarding_service
 
 router = APIRouter()
+
+
+def _require_admin(current_user: CurrentUser) -> None:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
 
 
 async def _resolve_integration_auth_data(*, db: DBSession, integration: ApiIntegration) -> dict:
@@ -197,6 +203,34 @@ async def integration_health(
     await _resolve_integration_auth_data(db=db, integration=integration)
     health_result = await integration_onboarding_service.check_health(integration)
     return IntegrationHealthResponse(**health_result)
+
+
+@router.post("/admin/rotate-auth-data", response_model=IntegrationAuthDataRotateResponse)
+async def admin_rotate_auth_data(
+    db: DBSession,
+    current_user: CurrentUser,
+) -> IntegrationAuthDataRotateResponse:
+    _require_admin(current_user)
+
+    result = await db.execute(select(ApiIntegration).order_by(ApiIntegration.created_at.desc()))
+    rows = result.scalars().all()
+
+    scanned = 0
+    rotated = 0
+    failed = 0
+    for integration in rows:
+        scanned += 1
+        try:
+            _, rotated_payload = auth_data_security_service.resolve_for_runtime(integration.auth_data)
+            if rotated_payload is not None:
+                integration.auth_data = rotated_payload
+                db.add(integration)
+                rotated += 1
+        except Exception:
+            failed += 1
+
+    await db.commit()
+    return IntegrationAuthDataRotateResponse(scanned=scanned, rotated=rotated, failed=failed)
 
 
 @router.post("/{integration_id}/call", responses={404: {"description": "Integration not found"}, 400: {"description": "url is required"}})
