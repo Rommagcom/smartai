@@ -8,7 +8,7 @@ Backend-only система персонального AI ассистента �
 - APScheduler (cron)
 
 ## Реализовано
-- Неголосовой чат-ассистент (REST + WebSocket)
+- Неголосовой чат-ассистент (REST + WebSocket, Telegram)
 - Локальная интеграция с Ollama
 - Short-term memory (история сессии)
 - Long-term memory (таблица `long_term_memory` + embeddings)
@@ -96,6 +96,10 @@ Backend-only система персонального AI ассистента �
    - `python scripts/smoke_onboarding_step.py`
 - Telegram bridge flow (хендлеры `start/chat/memory_add` без real Telegram API):
    - `python scripts/smoke_telegram_bridge.py`
+- Worker queue flow (Redis-backed enqueue/dedup/retry/success/fail + poll):
+   - `python scripts/smoke_worker_queue.py`
+- Worker chat API flow (`POST /chat` -> `worker_enqueue` -> worker run -> `worker-results/poll`):
+   - `python scripts/smoke_worker_chat_flow.py`
 
 ## Ключевые endpoint'ы
 - `POST /api/v1/auth/register`
@@ -116,17 +120,27 @@ Backend-only система персонального AI ассистента �
 - `POST /api/v1/chat/tools/web-fetch`
 - `POST /api/v1/chat/tools/browser`
 - `POST /api/v1/chat/tools/pdf-create`
+- `GET /api/v1/chat/tasks/history`
 - `GET /api/v1/chat/worker-results/poll`
+- `GET /api/v1/chat/skills`
 - `POST /api/v1/documents/upload`
 - `GET /api/v1/documents/search`
 - `POST /api/v1/memory`
 - `GET /api/v1/memory`
+- `POST /api/v1/memory/cleanup`
+- `PATCH /api/v1/memory/{memory_id}/pin`
+- `PATCH /api/v1/memory/{memory_id}/lock`
 - `POST /api/v1/cron`
 - `GET /api/v1/cron`
 - `DELETE /api/v1/cron/{job_id}`
 - `POST /api/v1/integrations`
 - `GET /api/v1/integrations`
 - `POST /api/v1/integrations/{integration_id}/call`
+- `POST /api/v1/integrations/onboarding/connect`
+- `POST /api/v1/integrations/onboarding/test`
+- `POST /api/v1/integrations/onboarding/save`
+- `GET /api/v1/integrations/onboarding/status/{draft_id}`
+- `GET /api/v1/integrations/{integration_id}/health`
 - `WS /api/v1/ws/chat?token=<access_token>`
 
 > Важно: `POST /api/v1/chat` вернёт `428 Precondition Required`, пока не выполнен `POST /api/v1/users/me/soul/setup`.
@@ -135,15 +149,55 @@ Backend-only система персонального AI ассистента �
 - Пользователь пишет обычный запрос в `POST /api/v1/chat`.
 - Ассистент автоматически определяет, нужен ли tool-вызов (`web_search`, `web_fetch`, `browser`, `pdf_create`, `memory`, `cron`, `integrations`, `execute_python`, `doc_search`).
 - Поддерживаются цепочки до 3 шагов в одном сообщении (например: `web_search -> web_fetch -> pdf_create`).
+- Если planner/tool-chain недоступен или падает, chat автоматически делает fallback на обычный LLM-ответ (без ошибки для пользователя).
 - Если tool вернул файл (например PDF/скриншот), API вернёт его в `artifacts` (base64), а Telegram-бот отправит как файл в чат.
 - Поддерживается фоновая очередь: если пользователь просит выполнить задачу в фоне/очереди, ассистент ставит её в worker и отвечает понятным статусом (`задача в очереди на обработке`) без отправки `job_id`.
 - После выполнения worker отправляет пользователю событие `worker_result` через WebSocket с итогом задачи (или текстом ошибки).
 - Для Telegram бот автоматически опрашивает `GET /api/v1/chat/worker-results/poll` и отправляет итог фоновой задачи отдельным сообщением в чат.
 
+### Durable очередь (Redis + БД)
+- Worker-задачи сохраняются в таблице `worker_tasks` (статусы: `queued`, `running`, `retry_scheduled`, `success`, `failed`).
+- Redis используется как брокер: `WORKER_QUEUE_KEY` (основная очередь) и `WORKER_RETRY_ZSET_KEY` (отложенные retry).
+- Retry policy: экспоненциальная задержка от `WORKER_RETRY_BASE_DELAY_SECONDS` до `WORKER_RETRY_MAX_DELAY_SECONDS`, максимум `WORKER_MAX_RETRIES` попыток.
+- Дедупликация: одинаковые активные задачи в окне `WORKER_DEDUPE_WINDOW_SECONDS` не дублируются в очереди.
+
+### Delivery layer (WebSocket + Telegram)
+- Фоновый результат доставляется в едином формате события `worker_result` для обоих каналов.
+- Поля payload: `success`, `status`, `job_type`, `message`, `result_preview`, `next_action_hint`, `error.message`, `delivered_at`.
+- Для обратной совместимости в payload сохраняется `result` (alias для preview).
+
+### Skills-контракт и реестр
+- Реестр базовых skills доступен через `GET /api/v1/chat/skills`.
+- Каждый skill описан контрактом: `manifest` (name/title/description/version), `input_schema` (JSON Schema), `permissions`.
+- `tool_orchestrator` использует этот реестр как source of truth для допустимых имен инструментов.
+- Перед выполнением tool-вызова `tool_orchestrator` валидирует входные аргументы по `input_schema` из реестра skills.
+
 ### Подключение внешнего API через чат
 - Пользователь может попросить в чате: `подключи API ...` — ассистент создаст интеграцию через внутренний tool `integration_add`.
 - После подключения запросы вида `возьми данные из моего API ...` выполняются цепочкой `integrations_list -> integration_call`.
 - Интеграции изолированы по `user_id` и доступны только владельцу.
+
+### Integrations chat-onboarding API
+- Пошаговый onboarding: `connect -> test -> save` через endpoint’ы `/api/v1/integrations/onboarding/*`.
+- `connect` создаёт onboarding-сессию и возвращает `draft_id` + текущий `step=connected`.
+- `test` и `save` могут работать по `draft_id` (или по raw `draft`), обновляя шаги `tested` и `saved`.
+- `status/{draft_id}` возвращает текущее состояние сессии (`step`, `draft`, `last_test`, `saved_integration_id`).
+- `connect` нормализует draft подключения (service/auth/endpoints/healthcheck) без сохранения.
+- `test` проверяет доступность API по healthcheck и возвращает `success/status_code/response_preview`.
+- `save` сохраняет интеграцию (опционально с обязательным успешным test).
+- `GET /api/v1/integrations/{integration_id}/health` выполняет health-check для уже сохранённой интеграции.
+
+### Security hardening
+- `auth_data` интеграций шифруется в БД (Fernet) перед сохранением.
+- Ротация ключей поддерживается через keyring: `AUTH_DATA_ENCRYPTION_KEYS` (формат `kid:key,kid:key`) и `AUTH_DATA_ACTIVE_KEY_ID`.
+- При чтении интеграции выполняется lazy-rotation: если запись зашифрована старым ключом (или в legacy plaintext), она автоматически перешифровывается активным ключом.
+- Sandbox egress policy применяется к `web_fetch/browser/api_executor`:
+   - `SANDBOX_EGRESS_ENABLED`
+   - `SANDBOX_EGRESS_BLOCK_PRIVATE_NETWORKS`
+   - `SANDBOX_EGRESS_ALLOWLIST_MODE`
+   - `SANDBOX_EGRESS_ALLOWED_HOSTS`
+   - `SANDBOX_EGRESS_DENIED_HOSTS`
+   - `SANDBOX_EGRESS_ALLOWED_PORTS`
 
 ### Напоминания на естественном языке
 - В чате можно писать без cron-формата: `запиши на 25 февраля на 9:00 к врачу`, `на завтра на 9:00`, `сегодня на 23:00`.
@@ -155,6 +209,13 @@ Backend-only система персонального AI ассистента �
 - Backend сохранит это в `user.preferences.timezone` и в `long-term memory` (как `timezone=UTC+03:00`).
 - Команда `запомни ...` сохраняет факт в long-term memory без ручного вызова `/memory`.
 - Проверка текущей зоны: спросить в чате `какая у меня зона` (или `мой UTC`).
+
+### Memory quality
+- Dedup: одинаковые факты (`fact_type + normalized content`) объединяются в одну запись памяти.
+- TTL: поддерживается `expiration_date`; при `MEMORY_DEFAULT_TTL_DAYS > 0` TTL проставляется автоматически для новых неприкреплённых фактов.
+- Importance decay: для неприкреплённых/неблокированных фактов важность постепенно снижается (настраивается через `MEMORY_DECAY_HALF_LIFE_DAYS` и `MEMORY_DECAY_MIN_FACTOR`).
+- Pin/Lock: важные факты можно закрепить (`pin`) или заблокировать (`lock`), чтобы исключить TTL-очистку и decay.
+- Cleanup: `POST /api/v1/memory/cleanup` физически удаляет просроченные неприкреплённые/неблокированные факты пользователя.
 - При создании напоминаний из естественного языка timezone берётся из `preferences.timezone` (если не задано — `Europe/Moscow`).
 
 ## Telegram Bot (модуль мессенджера)

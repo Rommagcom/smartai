@@ -8,6 +8,42 @@
 			"args": [
 				"scripts/smoke_all.py"
 			]
+		},
+		{
+			"label": "alembic-upgrade-head",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"alembic",
+				"upgrade",
+				"head"
+			]
+		},
+		{
+			"label": "run-smoke-worker-queue",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_queue.py"
+			]
+		},
+		{
+			"label": "run-smoke-worker-chat-flow",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_chat_flow.py"
+			]
+		},
+		{
+			"label": "run-smoke-memory-docs",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_memory_docs"
+			]
 		}
 	]
 }

@@ -6,6 +6,7 @@ from app.models.message import Message
 from app.models.session import Session
 from app.models.telegram_allowed_user import TelegramAllowedUser
 from app.models.user import User
+from app.models.worker_task import WorkerTask
 
 __all__ = [
     "User",
@@ -16,4 +17,5 @@ __all__ = [
     "CodeSnippet",
     "ApiIntegration",
     "TelegramAllowedUser",
+    "WorkerTask",
 ]

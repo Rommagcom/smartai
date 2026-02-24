@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,6 +18,12 @@ class LongTermMemory(UUIDTimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(settings.EMBEDDING_DIM))
     importance_score: Mapped[float] = mapped_column(Float, default=0.5)
+    dedupe_key: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     expiration_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_decay_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", back_populates="memories")

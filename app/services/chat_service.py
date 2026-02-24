@@ -47,23 +47,26 @@ class ChatService:
         return calls
 
     async def _run_planned_tools(self, db: AsyncSession, user: User, user_message: str) -> tuple[list[dict], str] | None:
-        planner = await tool_orchestrator_service.plan_tool_calls(
-            user_message=user_message,
-            system_prompt=user.system_prompt_template,
-        )
-        use_tools = bool(planner.get("use_tools"))
-        planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
-        if not use_tools or not planned_steps:
-            return None
+        try:
+            planner = await tool_orchestrator_service.plan_tool_calls(
+                user_message=user_message,
+                system_prompt=user.system_prompt_template,
+            )
+            use_tools = bool(planner.get("use_tools"))
+            planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
+            if not use_tools or not planned_steps:
+                return None
 
-        tool_calls = await tool_orchestrator_service.execute_tool_chain(
-            db=db,
-            user=user,
-            steps=planned_steps,
-            max_steps=3,
-        )
-        response_hint = str(planner.get("response_hint") or "")
-        return tool_calls, response_hint
+            tool_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=planned_steps,
+                max_steps=3,
+            )
+            response_hint = str(planner.get("response_hint") or "")
+            return tool_calls, response_hint
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_timezone_offset(text: str) -> str | None:

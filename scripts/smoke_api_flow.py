@@ -12,6 +12,7 @@ from app.models.session import Session
 from app.models.user import User
 from app.services.chat_service import chat_service
 from app.services.memory_service import memory_service
+from app.services.skills_registry_service import skills_registry_service
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "smoke_test.db"
@@ -37,11 +38,13 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
 
 
 async def fake_respond(db, user, session_id, user_message):
+    del db, user, session_id, user_message
     await asyncio.sleep(0)
-    return "smoke-ok", [], []
+    return "smoke-ok", [], [], [], []
 
 
 async def fake_extract_and_store_facts(db, user_id, user_text, assistant_text):
+    del db, user_id, user_text, assistant_text
     await asyncio.sleep(0)
     return None
 
@@ -83,10 +86,24 @@ async def run() -> None:
         soul_setup = client.post("/api/v1/users/me/soul/setup", json=soul_setup_payload, headers=headers)
         ensure(soul_setup.status_code == 200, f"soul setup failed: {soul_setup.text}")
 
+        skills = client.get("/api/v1/chat/skills", headers=headers)
+        ensure(skills.status_code == 200, f"skills registry failed: {skills.text}")
+        skills_payload = skills.json()
+        skill_items = skills_payload.get("skills") or []
+        ensure(isinstance(skill_items, list) and len(skill_items) > 0, f"skills registry is empty: {skills_payload}")
+        first = skill_items[0]
+        ensure("manifest" in first and "input_schema" in first and "permissions" in first, f"invalid skill contract: {first}")
+
         chat = client.post("/api/v1/chat", json={"message": "Привет"}, headers=headers)
         ensure(chat.status_code == 200, f"chat failed: {chat.text}")
         body = chat.json()
         ensure(body.get("response") == "smoke-ok", f"unexpected response: {body}")
+
+        validation_ok = skills_registry_service.validate_input("web_search", {"query": "ok", "limit": 5})
+        ensure(validation_ok is None, f"expected valid args, got: {validation_ok}")
+
+        validation_error = skills_registry_service.validate_input("web_search", {"query": "ok", "extra": 1})
+        ensure(bool(validation_error), "expected validation error for extra argument")
 
     await engine.dispose()
     print("SMOKE_OK")
