@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -13,14 +15,17 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models.worker_task import WorkerTask
+from app.services.alerting_service import alerting_service
 from app.services.pdf_service import pdf_service
 from app.services.delivery_format_service import build_worker_delivery_payload
+from app.services.observability_metrics_service import observability_metrics_service
 from app.services.web_tools_service import web_tools_service
 from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
 from app.workers.models import WorkerJobStatus, WorkerJobType
 
 WorkerHandler = Callable[[dict], Awaitable[dict]]
+logger = logging.getLogger(__name__)
 
 
 class WorkerService:
@@ -48,40 +53,67 @@ class WorkerService:
         max_retries: int | None = None,
         dedupe_key: str | None = None,
     ) -> dict:
-        retries = max(0, max_retries if max_retries is not None else settings.WORKER_MAX_RETRIES)
-        payload_copy = dict(payload or {})
-        user_id = str(payload_copy.get("__user_id") or "").strip() or None
+        started_at = perf_counter()
+        success = False
+        try:
+            retries = max(0, max_retries if max_retries is not None else settings.WORKER_MAX_RETRIES)
+            payload_copy = dict(payload or {})
+            user_id = str(payload_copy.get("__user_id") or "").strip() or None
 
-        dedupe = dedupe_key or self._build_dedupe_key(job_type=job_type, payload=payload_copy)
-        existing_task = await self._find_deduplicated_task(dedupe)
-        if existing_task:
-            return {
-                "task": existing_task,
-                "enqueued": False,
-                "deduplicated": True,
-            }
+            dedupe = dedupe_key or self._build_dedupe_key(job_type=job_type, payload=payload_copy)
+            existing_task = await self._find_deduplicated_task(dedupe)
+            if existing_task:
+                success = True
+                return {
+                    "task": existing_task,
+                    "enqueued": False,
+                    "deduplicated": True,
+                }
 
-        async with AsyncSessionLocal() as db:
-            task = WorkerTask(
-                user_id=UUID(user_id) if user_id else None,
-                job_type=job_type.value,
-                payload=payload_copy,
-                status=WorkerJobStatus.QUEUED.value,
-                attempt_count=0,
-                max_retries=retries,
-                dedupe_key=dedupe,
+            async with AsyncSessionLocal() as db:
+                task = WorkerTask(
+                    user_id=UUID(user_id) if user_id else None,
+                    job_type=job_type.value,
+                    payload=payload_copy,
+                    status=WorkerJobStatus.QUEUED.value,
+                    attempt_count=0,
+                    max_retries=retries,
+                    dedupe_key=dedupe,
+                )
+                db.add(task)
+                await db.commit()
+                await db.refresh(task)
+
+            redis = self._get_redis()
+            await redis.lpush(settings.WORKER_QUEUE_KEY, str(task.id))
+            success = True
+            logger.info(
+                "worker task enqueued",
+                extra={
+                    "context": {
+                        "component": "worker",
+                        "event": "enqueue",
+                        "job_type": job_type.value,
+                        "task_id": str(task.id),
+                        "deduplicated": False,
+                    }
+                },
             )
-            db.add(task)
-            await db.commit()
-            await db.refresh(task)
-
-        redis = self._get_redis()
-        await redis.lpush(settings.WORKER_QUEUE_KEY, str(task.id))
-        return {
-            "task": task,
-            "enqueued": True,
-            "deduplicated": False,
-        }
+            return {
+                "task": task,
+                "enqueued": True,
+                "deduplicated": False,
+            }
+        finally:
+            observability_metrics_service.record(
+                component="worker",
+                operation="enqueue",
+                success=success,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
+        
+        
+    
 
     async def get_job(self, job_id: str) -> WorkerTask | None:
         async with AsyncSessionLocal() as db:
@@ -100,11 +132,23 @@ class WorkerService:
 
     async def run_forever(self) -> None:
         while True:
-            task = await self.run_once()
-            if task is None:
-                await asyncio.sleep(0.2)
+            try:
+                task = await self.run_once()
+                if task is None:
+                    await asyncio.sleep(0.2)
+            except Exception as exc:
+                alerting_service.emit(
+                    component="worker",
+                    severity="critical",
+                    message="worker loop crashed",
+                    details={"error": str(exc)},
+                )
+                logger.exception("worker loop error")
+                await asyncio.sleep(0.5)
 
     async def _process_task(self, task_id: str) -> WorkerTask | None:
+        started_at = perf_counter()
+        success = False
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(WorkerTask).where(WorkerTask.id == UUID(task_id)))
             task = result.scalar_one_or_none()
@@ -124,6 +168,12 @@ class WorkerService:
 
             if not handler:
                 await self._fail_task(db, task, f"No handler for job_type={task.job_type}")
+                observability_metrics_service.record(
+                    component="worker",
+                    operation="process_task",
+                    success=False,
+                    latency_ms=(perf_counter() - started_at) * 1000,
+                )
                 return task
 
             try:
@@ -134,9 +184,27 @@ class WorkerService:
                 task.completed_at = datetime.now(timezone.utc)
                 await db.commit()
                 await self._notify_user(task)
+                success = True
+                logger.info(
+                    "worker task finished",
+                    extra={
+                        "context": {
+                            "component": "worker",
+                            "event": "task_success",
+                            "task_id": str(task.id),
+                            "job_type": task.job_type,
+                        }
+                    },
+                )
             except Exception as exc:
                 await self._fail_task(db, task, str(exc))
 
+            observability_metrics_service.record(
+                component="worker",
+                operation="process_task",
+                success=success,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
             return task
 
     async def _fail_task(self, db, task: WorkerTask, error: str) -> None:
@@ -157,6 +225,17 @@ class WorkerService:
         task.status = WorkerJobStatus.FAILED.value
         task.completed_at = datetime.now(timezone.utc)
         await db.commit()
+        alerting_service.emit(
+            component="worker",
+            severity="warning",
+            message="worker task failed permanently",
+            details={
+                "task_id": str(task.id),
+                "job_type": task.job_type,
+                "attempt_count": int(task.attempt_count),
+                "error": str(error),
+            },
+        )
         await self._notify_user(task)
 
     async def _promote_retries(self) -> None:

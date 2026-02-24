@@ -142,6 +142,8 @@ Backend-only система персонального AI ассистента �
 - `GET /api/v1/integrations/onboarding/status/{draft_id}`
 - `GET /api/v1/integrations/{integration_id}/health`
 - `POST /api/v1/integrations/admin/rotate-auth-data` (admin)
+- `GET /api/v1/observability/metrics` (admin)
+- `GET /api/v1/observability/alerts` (admin)
 - `WS /api/v1/ws/chat?token=<access_token>`
 
 > Важно: `POST /api/v1/chat` вернёт `428 Precondition Required`, пока не выполнен `POST /api/v1/users/me/soul/setup`.
@@ -217,6 +219,14 @@ Backend-only система персонального AI ассистента �
 - Никогда не публикуйте ключи в репозитории, используйте secret manager/.env в защищённом хранилище.
 - На период ротации всегда держите минимум 2 ключа в keyring (старый + новый).
 - Убедитесь, что интеграционные smoke/health-check проходят до удаления старого ключа.
+
+### Observability
+- Structured logs: backend пишет JSON-логи (`ts`, `level`, `logger`, `message`, контекстные поля).
+- Метрики собираются in-memory с latency/success/failure по ключевым операциям (`worker.*`, `scheduler.*`, `telegram_bridge.*`).
+- Алерты (in-memory buffer) генерируются для критичных сбоев в `worker`, `scheduler`, `telegram_bridge`.
+- Доступ к данным наблюдаемости:
+   - `GET /api/v1/observability/metrics` — snapshot counters + latency aggregates.
+   - `GET /api/v1/observability/alerts?limit=50` — последние alert-события.
 
 ### Напоминания на естественном языке
 - В чате можно писать без cron-формата: `запиши на 25 февраля на 9:00 к врачу`, `на завтра на 9:00`, `сегодня на 23:00`.

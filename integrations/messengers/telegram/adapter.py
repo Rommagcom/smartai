@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from contextlib import suppress
 from io import BytesIO
+from time import perf_counter
 from typing import Any
 
 from telegram import InputFile, Update
@@ -18,8 +20,12 @@ from telegram.ext import (
 )
 
 from integrations.messengers.base.adapter import MessengerAdapter
+from app.services.alerting_service import alerting_service
+from app.services.observability_metrics_service import observability_metrics_service
 from integrations.messengers.telegram.backend_client import BackendApiClient
 from integrations.messengers.telegram.settings import get_telegram_settings
+
+logger = logging.getLogger(__name__)
 
 (
     SOUL_NAME,
@@ -146,26 +152,71 @@ class TelegramAdapter(MessengerAdapter):
 
             users_snapshot = list(self._known_users.items())
             for _, data in users_snapshot:
-                await self._poll_worker_results_for_user(application, data)
+                try:
+                    await self._poll_worker_results_for_user(application, data)
+                except Exception as exc:
+                    alerting_service.emit(
+                        component="telegram_bridge",
+                        severity="warning",
+                        message="worker results polling failed",
+                        details={"error": str(exc)},
+                    )
+                    logger.exception("telegram polling error")
 
     async def _poll_worker_results_for_user(self, application: Application, data: dict[str, Any]) -> None:
+        started_at = perf_counter()
+        success = False
         token = str(data.get("token") or "")
         chat_id = data.get("chat_id")
         if not token or chat_id is None:
+            observability_metrics_service.record(
+                component="telegram_bridge",
+                operation="poll_results",
+                success=False,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
             return
 
         res = await self.client.worker_results_poll(token=token, limit=20)
         if res.get("status") != 200:
+            status = int(res.get("status") or 0)
+            if status >= 500:
+                alerting_service.emit(
+                    component="telegram_bridge",
+                    severity="warning",
+                    message="backend poll returned server error",
+                    details={"status": status},
+                )
+            observability_metrics_service.record(
+                component="telegram_bridge",
+                operation="poll_results",
+                success=False,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
             return
 
         items = res.get("payload", {}).get("items", [])
         if not isinstance(items, list) or not items:
+            success = True
+            observability_metrics_service.record(
+                component="telegram_bridge",
+                operation="poll_results",
+                success=success,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
             return
 
         for item in items:
             if not isinstance(item, dict):
                 continue
             await application.bot.send_message(chat_id=chat_id, text=self._format_worker_item(item))
+        success = True
+        observability_metrics_service.record(
+            component="telegram_bridge",
+            operation="poll_results",
+            success=success,
+            latency_ms=(perf_counter() - started_at) * 1000,
+        )
 
     @staticmethod
     def _format_worker_item(item: dict[str, Any]) -> str:
