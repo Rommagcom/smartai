@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.session import get_db
@@ -54,10 +55,20 @@ async def run() -> None:
     app.dependency_overrides[get_db] = override_get_db
     api_executor.call = fake_call
 
+    async def ensure_admin(username: str) -> None:
+        async with session_factory() as db:
+            user = (await db.execute(select(User).where(User.username == username))).scalar_one_or_none()
+            ensure(user is not None, "user not found for admin elevation")
+            user.is_admin = True
+            db.add(user)
+            await db.commit()
+
     with TestClient(app) as client:
         credentials = {"username": "integration_user", "password": SMOKE_PASSWORD}
         register = client.post("/api/v1/auth/register", json=credentials)
         ensure(register.status_code == 200, f"register failed: {register.text}")
+
+        await ensure_admin("integration_user")
 
         token = register.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
@@ -137,6 +148,11 @@ async def run() -> None:
         ensure(health.status_code == 200, f"integration health failed: {health.text}")
         health_payload = health.json().get("health") or {}
         ensure(health_payload.get("success") is True, f"saved integration health should pass: {health.text}")
+
+        rotate = client.post("/api/v1/integrations/admin/rotate-auth-data", headers=headers)
+        ensure(rotate.status_code == 200, f"admin rotate auth_data failed: {rotate.text}")
+        rotate_payload = rotate.json()
+        ensure(int(rotate_payload.get("scanned") or 0) >= 1, f"rotation scanned should be >=1: {rotate.text}")
 
     await engine.dispose()
     if DB_PATH.exists():
