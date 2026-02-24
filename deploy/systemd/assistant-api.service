@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Assistant FastAPI Backend
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=assistant
+Group=assistant
+WorkingDirectory=/opt/assistant/backend
+EnvironmentFile=/opt/assistant/backend/.env
+ExecStart=/opt/assistant/.venv/bin/gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 --timeout 120
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

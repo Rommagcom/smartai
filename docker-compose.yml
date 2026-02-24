@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: assistant-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - ollama
+      - redis
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+
+  telegram-bot:
+    build: .
+    container_name: assistant-telegram-bot
+    env_file:
+      - .env
+    command: ["python", "-m", "integrations.messengers.telegram.run"]
+    depends_on:
+      - api
+    environment:
+      CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: assistant-postgres
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: assistant
+      POSTGRES_DB: assistant
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: assistant-redis
+    ports:
+      - "6379:6379"
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    command: minio server /minio_data --console-address ":9001"
+
+  milvus-standalone:
+    image: milvusdb/milvus:v2.3.3
+    container_name: milvus-standalone
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - minio
+    volumes:
+      - milvus_data:/var/lib/milvus
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: assistant-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+volumes:
+  postgres_data:
+  milvus_data:
+  ollama_models:
