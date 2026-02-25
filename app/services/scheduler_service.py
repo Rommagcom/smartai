@@ -2,6 +2,10 @@ from datetime import datetime, timezone
 import logging
 from time import perf_counter
 
+from sqlalchemy import select
+
+from app.db.session import AsyncSessionLocal
+from app.models.cron_job import CronJob
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -41,6 +45,60 @@ class SchedulerService:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("scheduler stopped", extra={"context": {"component": "scheduler", "event": "shutdown"}})
+
+    async def bootstrap_from_db(self) -> dict:
+        started_at = perf_counter()
+        success = False
+        loaded = 0
+        failed = 0
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(CronJob).where(CronJob.is_active.is_(True)).order_by(CronJob.created_at.desc())
+                )
+                rows = result.scalars().all()
+
+            for row in rows:
+                try:
+                    self.add_or_replace_job(
+                        job_id=str(row.id),
+                        cron_expression=row.cron_expression,
+                        user_id=str(row.user_id),
+                        action_type=row.action_type,
+                        payload=row.payload if isinstance(row.payload, dict) else {},
+                    )
+                    loaded += 1
+                except Exception:
+                    failed += 1
+
+            success = failed == 0
+            logger.info(
+                "scheduler bootstrap complete",
+                extra={
+                    "context": {
+                        "component": "scheduler",
+                        "event": "bootstrap",
+                        "loaded": loaded,
+                        "failed": failed,
+                    }
+                },
+            )
+            return {"loaded": loaded, "failed": failed}
+        except Exception as exc:
+            alerting_service.emit(
+                component="scheduler",
+                severity="critical",
+                message="scheduler bootstrap failed",
+                details={"error": str(exc)},
+            )
+            raise
+        finally:
+            observability_metrics_service.record(
+                component="scheduler",
+                operation="bootstrap",
+                success=success,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
 
     def add_or_replace_job(self, job_id: str, cron_expression: str, user_id: str, action_type: str, payload: dict) -> None:
         started_at = perf_counter()

@@ -52,18 +52,24 @@ Backend-only система персонального AI ассистента �
    - `alembic upgrade head`
 3. Установите systemd unit-файлы:
    - `sudo cp deploy/systemd/assistant-api.service /etc/systemd/system/`
+   - `sudo cp deploy/systemd/assistant-scheduler-leader.service /etc/systemd/system/`
+   - `sudo cp deploy/systemd/assistant-worker.service /etc/systemd/system/`
    - `sudo cp deploy/systemd/assistant-telegram-bot.service /etc/systemd/system/`
    - `sudo systemctl daemon-reload`
 4. Включите и запустите сервисы:
    - `sudo systemctl enable --now assistant-api`
+   - `sudo systemctl enable --now assistant-scheduler-leader`
+   - `sudo systemctl enable --now assistant-worker`
    - `sudo systemctl enable --now assistant-telegram-bot`
 5. Проверка:
-   - `sudo systemctl status assistant-api assistant-telegram-bot`
+   - `sudo systemctl status assistant-api assistant-scheduler-leader assistant-worker assistant-telegram-bot`
    - `sudo journalctl -u assistant-api -f`
 
 Файлы:
 - `docker-compose.db.yml` — только PostgreSQL/Redis/Milvus стек
 - `deploy/systemd/assistant-api.service` — systemd unit для FastAPI
+- `deploy/systemd/assistant-scheduler-leader.service` — systemd unit для scheduler leader
+- `deploy/systemd/assistant-worker.service` — systemd unit для worker-процесса
 - `deploy/systemd/assistant-telegram-bot.service` — systemd unit для Telegram-бота
 - `deploy/systemd/INSTALL.md` — пошаговая установка
 
@@ -100,6 +106,8 @@ Backend-only система персонального AI ассистента �
    - `python scripts/smoke_worker_queue.py`
 - Worker chat API flow (`POST /chat` -> `worker_enqueue` -> worker run -> `worker-results/poll`):
    - `python scripts/smoke_worker_chat_flow.py`
+- Chat tools + reminders E2E (`tool chain + cron_add via /chat`):
+   - `python scripts/smoke_chat_tools_reminders.py`
 
 ## Ключевые endpoint'ы
 - `POST /api/v1/auth/register`
@@ -143,6 +151,7 @@ Backend-only система персонального AI ассистента �
 - `GET /api/v1/integrations/{integration_id}/health`
 - `POST /api/v1/integrations/admin/rotate-auth-data` (admin)
 - `GET /api/v1/observability/metrics` (admin)
+- `GET /api/v1/observability/metrics/prometheus` (admin)
 - `GET /api/v1/observability/alerts` (admin)
 - `WS /api/v1/ws/chat?token=<access_token>`
 
@@ -160,7 +169,8 @@ Backend-only система персонального AI ассистента �
 
 ### Durable очередь (Redis + БД)
 - Worker-задачи сохраняются в таблице `worker_tasks` (статусы: `queued`, `running`, `retry_scheduled`, `success`, `failed`).
-- Redis используется как брокер: `WORKER_QUEUE_KEY` (основная очередь) и `WORKER_RETRY_ZSET_KEY` (отложенные retry).
+- Redis используется как брокер: `WORKER_QUEUE_KEY` (основная очередь), `WORKER_PROCESSING_QUEUE_KEY` (in-flight задачи) и `WORKER_RETRY_ZSET_KEY` (отложенные retry).
+- Восстановление после падений: при старте/цикле worker выполняет recovery processing-очереди и requeue/retry для зависших задач по lease timeout (`WORKER_RUNNING_LEASE_SECONDS`).
 - Retry policy: экспоненциальная задержка от `WORKER_RETRY_BASE_DELAY_SECONDS` до `WORKER_RETRY_MAX_DELAY_SECONDS`, максимум `WORKER_MAX_RETRIES` попыток.
 - Дедупликация: одинаковые активные задачи в окне `WORKER_DEDUPE_WINDOW_SECONDS` не дублируются в очереди.
 
@@ -168,6 +178,8 @@ Backend-only система персонального AI ассистента �
 - Фоновый результат доставляется в едином формате события `worker_result` для обоих каналов.
 - Поля payload: `success`, `status`, `job_type`, `message`, `result_preview`, `next_action_hint`, `error.message`, `delivered_at`.
 - Для обратной совместимости в payload сохраняется `result` (alias для preview).
+- Poll delivery теперь хранится в Redis (ключи `WORKER_RESULT_QUEUE_PREFIX:*`) с TTL/ограничением размера, что устраняет потерю результатов между процессами.
+- WebSocket fanout отправляет payload параллельно с timeout (`WEBSOCKET_SEND_TIMEOUT_SECONDS`), чтобы медленные клиенты не блокировали остальных.
 
 ### Skills-контракт и реестр
 - Реестр базовых skills доступен через `GET /api/v1/chat/skills`.
@@ -226,7 +238,257 @@ Backend-only система персонального AI ассистента �
 - Алерты (in-memory buffer) генерируются для критичных сбоев в `worker`, `scheduler`, `telegram_bridge`.
 - Доступ к данным наблюдаемости:
    - `GET /api/v1/observability/metrics` — snapshot counters + latency aggregates.
+   - `GET /api/v1/observability/metrics/prometheus` — text exposition format для Prometheus scrape.
    - `GET /api/v1/observability/alerts?limit=50` — последние alert-события.
+
+### Runtime mode flags (scaling)
+- `SCHEDULER_ENABLED=true|false` — запускать ли APScheduler в данном процессе.
+- `WORKER_ENABLED=true|false` — запускать ли embedded worker loop в данном процессе.
+- Для multi-instance обычно включают scheduler только в одном процессе (leader), а worker — в выделенных worker-процессах.
+- В `docker-compose.yml` добавлены profile-сервисы:
+   - `scheduler-leader` (`--profile multi`)
+   - `worker` (`--profile multi`)
+- Пример запуска multi-profile:
+   - `docker compose --profile multi up -d --build`
+- Пример с масштабированием worker:
+   - `docker compose --profile multi up -d --build --scale worker=3`
+- Role-based override файл:
+   - `docker-compose.multi.yml` (фиксирует флаги ролей для `api/scheduler-leader/worker`)
+   - запуск: `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`
+- Быстрая проверка топологии после запуска:
+   - `bash deploy/check-multi.sh 3`
+   - скрипт проверяет: ровно 1 `scheduler-leader`, заданное число `worker`, минимум 1 `api`.
+
+### Production runbook (multi-instance)
+Рекомендуемая схема:
+- `api` replicas (`WORKER_ENABLED=false`, `SCHEDULER_ENABLED=false`) — только HTTP/WebSocket.
+- `scheduler-leader` (1 экземпляр, `SCHEDULER_ENABLED=true`, `WORKER_ENABLED=false`) — только APScheduler + bootstrap cron jobs.
+- `worker` replicas (`WORKER_ENABLED=true`, `SCHEDULER_ENABLED=false`) — обработка очереди и retry.
+- `telegram-bridge` (1+ экземпляров при необходимости) — polling Telegram + backend bridge.
+
+Минимальные env-параметры для продакшена:
+- `REDIS_URL` — общий Redis для queue/retry/result delivery.
+- `WORKER_QUEUE_KEY`, `WORKER_PROCESSING_QUEUE_KEY`, `WORKER_RETRY_ZSET_KEY`.
+- `WORKER_RUNNING_LEASE_SECONDS`, `WORKER_PROCESSING_RECOVERY_BATCH`.
+- `WORKER_RESULT_QUEUE_PREFIX`, `WORKER_RESULT_QUEUE_MAX_ITEMS`, `WORKER_RESULT_TTL_SECONDS`.
+- `WEBSOCKET_SEND_TIMEOUT_SECONDS`, `TELEGRAM_POLL_CONCURRENCY`, `TELEGRAM_KNOWN_USER_TTL_SECONDS`.
+
+Порядок запуска/деплоя:
+1. Поднять Redis/PostgreSQL/Milvus/Ollama.
+2. Применить миграции: `alembic upgrade head`.
+3. Запустить `scheduler-leader` (один экземпляр).
+4. Запустить `worker` replicas.
+5. Запустить `api` replicas.
+6. Запустить `telegram-bridge` (если используется).
+
+Проверка после выката:
+- Health API: `GET /health`.
+- Worker delivery: `GET /api/v1/chat/worker-results/poll` возвращает результаты после enqueue.
+- Scheduler bootstrap: в логах есть `scheduler bootstrap complete`.
+- Observability: `assistant_observability_up == 1`, алерты не растут аномально.
+
+Антипаттерны:
+- Не запускать больше одного scheduler-leader без leader-election.
+- Не держать `WORKER_ENABLED=true` на всех API-репликах (избыточная конкуренция за очередь).
+- Не хранить bridge/JWT/rotation keys в репозитории.
+
+### Load validation checklist (post-deploy)
+Цель: убедиться, что очередь, polling, WebSocket fanout и scheduler работают стабильно под нагрузкой.
+
+Базовые SLO (рекомендуемые стартовые значения):
+- `POST /api/v1/chat` p95 < 1500 ms для коротких запросов без тяжелых tool-цепочек.
+- Worker queue backlog стабильно снижается (нет бесконечного роста `queued/retry_scheduled`).
+- `worker-results/poll` p95 < 400 ms при активной фоновой обработке.
+- WebSocket delivery success > 99% (без роста ошибок `ws fanout publish failed` / `ws fanout listener crashed`).
+- Scheduler: после рестарта есть `scheduler bootstrap complete`, и cron jobs исполняются без пропусков.
+
+Проверка топологии перед тестом:
+1. Запусти multi-instance стек:
+   - `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`
+2. Проверь роли:
+   - `bash deploy/check-multi.sh 3`
+
+Нагрузочные сценарии (минимальный набор):
+1. Chat RPS smoke (без heavy tools):
+   - 5–10 минут, постоянная нагрузка, фиксированный пул пользователей.
+   - Смотри p95 latency и долю 5xx.
+2. Worker burst:
+   - пачкой отправить 500–2000 фоновых задач (`worker_enqueue` через chat/tool path).
+   - Критерий: очередь не залипает, retry не растет бесконтрольно, delivery приходит через poll/ws.
+3. Telegram polling soak:
+   - 30+ минут с активными known users.
+   - Критерий: нет деградации цикла polling, нет аномального роста alertов.
+4. Restart resilience:
+   - перезапуск `worker` и `scheduler-leader` во время нагрузки.
+   - Критерий: задачи не теряются, stale RUNNING подбираются recovery-механизмом, cron поднимается из БД.
+
+Автоматизированный сценарий (k6):
+- Скрипт: `scripts/load/k6_chat_worker_burst.js`
+- Локальный запуск (если установлен `k6`):
+   - `k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_chat_worker_burst.js`
+- Запуск через Docker:
+   - `docker run --rm -i --network host -v "$PWD:/work" -w /work grafana/k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_chat_worker_burst.js`
+- Параметры:
+   - `K6_USERNAME`, `K6_PASSWORD` (если нужен фиксированный пользователь)
+   - `K6_THINK_TIME_SECONDS` (пауза между итерациями)
+
+Telegram polling soak (backend-side, без Telegram API):
+- Скрипт: `scripts/load/k6_telegram_polling_soak.js`
+- Локальный запуск:
+   - `k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_telegram_polling_soak.js`
+- Через Docker:
+   - `docker run --rm -i --network host -v "$PWD:/work" -w /work grafana/k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_telegram_polling_soak.js`
+- Сценарий делает длительный `worker-results/poll` + фоновую генерацию результатов через очередь (`POST /chat` с worker enqueue intent).
+
+Упрощённый запуск через Makefile:
+- `make load-chat BASE_URL=http://localhost:8000/api/v1`
+- `make load-telegram-soak BASE_URL=http://localhost:8000/api/v1`
+- `make multi-up WORKERS=3`
+- `make multi-check WORKERS=3`
+- `make smoke-all`
+
+Альтернатива через justfile:
+- `just load-chat` (или `BASE_URL=http://localhost:8000/api/v1 just load-chat`)
+- `just load-telegram-soak`
+- `just multi-up` (или `WORKERS=3 just multi-up`)
+- `just multi-check`
+- `just smoke-all`
+
+Что смотреть в метриках/логах:
+- `assistant_worker_process_task_failed`, `assistant_worker_process_task_success`.
+- `assistant_telegram_bridge_poll_results_failed`.
+- `assistant_scheduler_execute_action_failed`.
+- alerts endpoint: `GET /api/v1/observability/alerts?limit=200`.
+
+Критерии завершения теста:
+- Нет потери задач/результатов после рестартов.
+- Нет накопления backlog при целевой нагрузке.
+- Нет устойчивого роста error-rate в worker/telegram/scheduler.
+- p95/throughput в рамках согласованных SLO.
+
+#### Prometheus scrape example
+```yaml
+scrape_configs:
+   - job_name: assistant_backend_observability
+      metrics_path: /api/v1/observability/metrics/prometheus
+      scheme: http
+      static_configs:
+         - targets: ["localhost:8000"]
+      authorization:
+         type: Bearer
+         credentials: "<ADMIN_JWT_TOKEN>"
+```
+
+- Для production лучше использовать short-lived service token/admin JWT через secret manager.
+- Если backend за reverse proxy, укажи внешний host/port в `targets`.
+
+#### Prometheus recording rules example
+```yaml
+groups:
+   - name: assistant_observability_recording
+      rules:
+         - record: assistant:worker_process_task_failed:rate5m
+            expr: rate(assistant_worker_process_task_failed[5m])
+
+         - record: assistant:worker_process_task_success:rate5m
+            expr: rate(assistant_worker_process_task_success[5m])
+
+         - record: assistant:telegram_bridge_poll_failed:rate5m
+            expr: rate(assistant_telegram_bridge_poll_results_failed[5m])
+
+         - record: assistant:scheduler_execute_failed:rate5m
+            expr: rate(assistant_scheduler_execute_action_failed[5m])
+```
+
+#### Prometheus alert rules example
+```yaml
+groups:
+   - name: assistant_observability_alerts
+      rules:
+         - alert: AssistantWorkerFailureSpike
+            expr: assistant:worker_process_task_failed:rate5m > 0.05
+            for: 10m
+            labels:
+               severity: warning
+               component: worker
+            annotations:
+               summary: "Worker failure rate is elevated"
+               description: "Worker failed tasks rate > 0.05/sec for 10m"
+
+         - alert: AssistantSchedulerExecutionFailures
+            expr: assistant:scheduler_execute_failed:rate5m > 0.01
+            for: 10m
+            labels:
+               severity: warning
+               component: scheduler
+            annotations:
+               summary: "Scheduler action failures detected"
+               description: "Scheduler execute_action failures persist for 10m"
+
+         - alert: AssistantTelegramBridgePollFailures
+            expr: assistant:telegram_bridge_poll_failed:rate5m > 0.02
+            for: 10m
+            labels:
+               severity: warning
+               component: telegram_bridge
+            annotations:
+               summary: "Telegram bridge polling failures detected"
+               description: "Poll failures to backend worker-results API persist for 10m"
+
+         - alert: AssistantCriticalAlertsEmitted
+            expr: increase(assistant_alerts_worker_critical[10m]) + increase(assistant_alerts_scheduler_critical[10m]) + increase(assistant_alerts_telegram_bridge_critical[10m]) > 0
+            for: 0m
+            labels:
+               severity: critical
+               component: observability
+            annotations:
+               summary: "Critical alert event emitted by backend"
+               description: "At least one critical in-app alert was emitted in last 10m"
+```
+
+- Пороговые значения (`0.05`, `0.01`, `0.02`) стартовые: адаптируй под реальную нагрузку и baseline.
+- Готовые файлы для infra:
+   - `deploy/prometheus/recording_rules.yml`
+   - `deploy/prometheus/alerts.yml`
+
+#### Prometheus `rule_files` example
+```yaml
+rule_files:
+   - /etc/prometheus/deploy/prometheus/recording_rules.yml
+   - /etc/prometheus/deploy/prometheus/alerts.yml
+```
+
+- Если монтируешь репозиторий в другой путь контейнера, скорректируй абсолютные пути в `rule_files`.
+
+#### Docker Compose fragment (Prometheus)
+```yaml
+services:
+   prometheus:
+      image: prom/prometheus:v2.55.1
+      container_name: assistant-prometheus
+      ports:
+         - "9090:9090"
+      environment:
+         PROMETHEUS_ADMIN_JWT_TOKEN: "<ADMIN_JWT_TOKEN>"
+      volumes:
+         - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+         - ./deploy/prometheus/recording_rules.yml:/etc/prometheus/deploy/prometheus/recording_rules.yml:ro
+         - ./deploy/prometheus/alerts.yml:/etc/prometheus/deploy/prometheus/alerts.yml:ro
+```
+
+- Готовый шаблон конфига: `deploy/prometheus/prometheus.yml`.
+- В `targets` используется `api:8000` (имя сервиса из `docker-compose.yml`); для внешнего деплоя замени на нужный host:port.
+
+#### Quick start (Prometheus)
+1. Экспортируй admin JWT для scrape:
+   - `set PROMETHEUS_ADMIN_JWT_TOKEN=<ADMIN_JWT_TOKEN>` (Windows CMD)
+   - `$env:PROMETHEUS_ADMIN_JWT_TOKEN="<ADMIN_JWT_TOKEN>"` (PowerShell)
+2. Подними стек с Prometheus:
+   - `docker compose up -d --build`
+3. Проверь статус targets:
+   - открой `http://localhost:9090/targets` и убедись, что `assistant_backend_observability` в состоянии `UP`.
+4. Быстрая проверка метрик:
+   - открой `http://localhost:9090/graph` и выполни запрос `assistant_observability_up`.
 
 ### Напоминания на естественном языке
 - В чате можно писать без cron-формата: `запиши на 25 февраля на 9:00 к врачу`, `на завтра на 9:00`, `сегодня на 23:00`.

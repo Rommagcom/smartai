@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any
 from urllib.parse import urljoin
 from uuid import uuid4
 
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.api_integration import ApiIntegration
 from app.services.api_executor import api_executor
 from app.services.auth_data_security_service import auth_data_security_service
@@ -15,6 +18,45 @@ from app.services.auth_data_security_service import auth_data_security_service
 class IntegrationOnboardingService:
     def __init__(self) -> None:
         self._sessions: dict[str, dict] = {}
+        self._redis: Redis | None = None
+
+    def _get_redis(self) -> Redis:
+        if self._redis is None:
+            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        return self._redis
+
+    @staticmethod
+    def _session_key(draft_id: str) -> str:
+        return f"assistant:onboarding:{draft_id}"
+
+    async def _save_session(self, state: dict) -> None:
+        draft_id = str(state.get("draft_id") or "").strip()
+        if not draft_id:
+            return
+        self._sessions[draft_id] = state
+        try:
+            redis = self._get_redis()
+            ttl = max(60, int(settings.INTEGRATION_ONBOARDING_SESSION_TTL_SECONDS))
+            await redis.set(self._session_key(draft_id), json.dumps(state, ensure_ascii=False), ex=ttl)
+        except Exception:
+            return
+
+    async def _load_session(self, draft_id: str) -> dict | None:
+        state = self._sessions.get(draft_id)
+        if state:
+            return state
+        try:
+            redis = self._get_redis()
+            raw = await redis.get(self._session_key(draft_id))
+            if not raw:
+                return None
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                return None
+            self._sessions[draft_id] = parsed
+            return parsed
+        except Exception:
+            return None
 
     @staticmethod
     def build_draft(
@@ -149,7 +191,7 @@ class IntegrationOnboardingService:
             "health": result,
         }
 
-    def create_session(self, *, user_id: str, draft: dict) -> dict:
+    async def create_session(self, *, user_id: str, draft: dict) -> dict:
         draft_id = uuid4().hex
         state = {
             "draft_id": draft_id,
@@ -160,34 +202,36 @@ class IntegrationOnboardingService:
             "saved_integration_id": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._sessions[draft_id] = state
+        await self._save_session(state)
         return state
 
-    def get_session(self, *, user_id: str, draft_id: str) -> dict | None:
-        state = self._sessions.get(str(draft_id))
+    async def get_session(self, *, user_id: str, draft_id: str) -> dict | None:
+        state = await self._load_session(str(draft_id))
         if not state:
             return None
         if str(state.get("user_id") or "") != str(user_id):
             return None
         return state
 
-    def update_after_test(self, *, user_id: str, draft_id: str, draft: dict, test: dict) -> dict | None:
-        state = self.get_session(user_id=user_id, draft_id=draft_id)
+    async def update_after_test(self, *, user_id: str, draft_id: str, draft: dict, test: dict) -> dict | None:
+        state = await self.get_session(user_id=user_id, draft_id=draft_id)
         if not state:
             return None
         state["draft"] = draft
         state["last_test"] = test
         state["step"] = "tested"
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await self._save_session(state)
         return state
 
-    def update_after_save(self, *, user_id: str, draft_id: str, integration_id: str) -> dict | None:
-        state = self.get_session(user_id=user_id, draft_id=draft_id)
+    async def update_after_save(self, *, user_id: str, draft_id: str, integration_id: str) -> dict | None:
+        state = await self.get_session(user_id=user_id, draft_id=draft_id)
         if not state:
             return None
         state["step"] = "saved"
         state["saved_integration_id"] = integration_id
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await self._save_session(state)
         return state
 
     def build_status_response(self, state: dict) -> dict:

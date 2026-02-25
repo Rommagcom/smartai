@@ -28,12 +28,36 @@ class Settings(BaseSettings):
 
     REDIS_URL: str = "redis://localhost:6379/0"
     WORKER_QUEUE_KEY: str = "assistant:worker:queue"
+    WORKER_PROCESSING_QUEUE_KEY: str = "assistant:worker:processing"
     WORKER_RETRY_ZSET_KEY: str = "assistant:worker:retry"
+    WORKER_RESULT_QUEUE_PREFIX: str = "assistant:worker:result"
+    WORKER_RESULT_QUEUE_MAX_ITEMS: int = 200
+    WORKER_RESULT_TTL_SECONDS: int = 86400
     WORKER_BRPOP_TIMEOUT_SECONDS: int = 5
     WORKER_MAX_RETRIES: int = 3
     WORKER_DEDUPE_WINDOW_SECONDS: int = 300
     WORKER_RETRY_BASE_DELAY_SECONDS: int = 10
     WORKER_RETRY_MAX_DELAY_SECONDS: int = 300
+    WORKER_RUNNING_LEASE_SECONDS: int = 180
+    WORKER_PROCESSING_RECOVERY_BATCH: int = 200
+
+    WORKER_ENABLED: bool = True
+    SCHEDULER_ENABLED: bool = True
+
+    WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
+    WS_FANOUT_REDIS_ENABLED: bool = True
+    WS_FANOUT_CHANNEL_PREFIX: str = "assistant:ws:fanout"
+
+    TELEGRAM_POLL_CONCURRENCY: int = 10
+    TELEGRAM_KNOWN_USER_TTL_SECONDS: int = 86400
+
+    HTTP_CLIENT_MAX_CONNECTIONS: int = 200
+    HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = 50
+    HTTP_CLIENT_KEEPALIVE_EXPIRY_SECONDS: float = 30.0
+
+    INTEGRATION_ONBOARDING_SESSION_TTL_SECONDS: int = 86400
+
+    RAG_EMBEDDING_CONCURRENCY: int = 4
 
     TELEGRAM_BACKEND_BRIDGE_SECRET: str = "change-me-telegram-bridge-secret"
 

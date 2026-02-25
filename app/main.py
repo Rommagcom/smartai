@@ -8,8 +8,10 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.services.alerting_service import alerting_service
+from app.services.http_client_service import http_client_service
 from app.services.milvus_service import milvus_service
 from app.services.scheduler_service import scheduler_service
+from app.services.websocket_manager import connection_manager
 from app.workers.worker_service import worker_service
 
 setup_logging()
@@ -20,19 +22,37 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     worker_task: asyncio.Task | None = None
     try:
+        connection_manager.start()
         milvus_service.ensure_collection()
     except Exception as exc:
         logger.warning("Milvus init skipped", extra={"context": {"error": str(exc)}})
         alerting_service.emit(component="startup", severity="warning", message="Milvus init skipped", details={"error": str(exc)})
-    scheduler_service.start()
-    worker_task = asyncio.create_task(worker_service.run_forever())
+
+    if settings.SCHEDULER_ENABLED:
+        scheduler_service.start()
+        try:
+            await scheduler_service.bootstrap_from_db()
+        except Exception as exc:
+            logger.exception("scheduler bootstrap failed")
+            alerting_service.emit(component="startup", severity="warning", message="Scheduler bootstrap failed", details={"error": str(exc)})
+    else:
+        logger.info("scheduler disabled", extra={"context": {"component": "scheduler", "event": "disabled"}})
+
+    if settings.WORKER_ENABLED:
+        worker_task = asyncio.create_task(worker_service.run_forever())
+    else:
+        logger.info("worker disabled", extra={"context": {"component": "worker", "event": "disabled"}})
+
     logger.info("application started", extra={"context": {"component": "app", "event": "startup"}})
     yield
-    scheduler_service.shutdown()
+    if settings.SCHEDULER_ENABLED:
+        scheduler_service.shutdown()
     if worker_task:
         worker_task.cancel()
         with suppress(asyncio.CancelledError):
             await worker_task
+    await connection_manager.stop()
+    await http_client_service.close()
     logger.info("application stopped", extra={"context": {"component": "app", "event": "shutdown"}})
 
 

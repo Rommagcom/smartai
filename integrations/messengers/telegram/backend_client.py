@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from app.services.http_client_service import http_client_service
 from integrations.messengers.common.auth_bridge import build_backend_credentials
 
 
@@ -27,15 +28,16 @@ class BackendApiClient:
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.request(
-                method=method,
-                url=f"{self.base_url}{path}",
-                json=json,
-                params=params,
-                headers=headers,
-                files=files,
-            )
+        client = http_client_service.get()
+        response = await client.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            json=json,
+            params=params,
+            headers=headers,
+            files=files,
+            timeout=60,
+        )
         payload: Any
         try:
             payload = response.json()

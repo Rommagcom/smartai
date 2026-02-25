@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  api:
+    environment:
+      WORKER_ENABLED: "false"
+      SCHEDULER_ENABLED: "false"
+
+  scheduler-leader:
+    environment:
+      WORKER_ENABLED: "false"
+      SCHEDULER_ENABLED: "true"
+
+  worker:
+    environment:
+      WORKER_ENABLED: "true"
+      SCHEDULER_ENABLED: "false"

@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 
 from app.core.config import settings
 from app.services.egress_policy_service import egress_policy_service
+from app.services.http_client_service import http_client_service
 
 
 class WebToolsService:
@@ -23,9 +24,9 @@ class WebToolsService:
 
     async def web_fetch(self, url: str, max_chars: int = 12000) -> dict:
         safe_url = self._validate_url(url)
-        async with httpx.AsyncClient(timeout=settings.WEB_FETCH_TIMEOUT_SECONDS, follow_redirects=True) as client:
-            response = await client.get(safe_url)
-            response.raise_for_status()
+        client = http_client_service.get()
+        response = await client.get(safe_url, timeout=settings.WEB_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
+        response.raise_for_status()
 
         content_type = response.headers.get("content-type", "")
         text = response.text
@@ -55,13 +56,14 @@ class WebToolsService:
         return await self._duckduckgo_search(query, limit)
 
     async def _searxng_search(self, query: str, limit: int) -> dict:
-        async with httpx.AsyncClient(timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS) as client:
-            response = await client.get(
-                settings.SEARXNG_BASE_URL.rstrip("/") + "/search",
-                params={"q": query, "format": "json"},
-            )
-            response.raise_for_status()
-            payload = response.json()
+        client = http_client_service.get()
+        response = await client.get(
+            settings.SEARXNG_BASE_URL.rstrip("/") + "/search",
+            params={"q": query, "format": "json"},
+            timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
 
         results: list[dict] = []
         for item in payload.get("results", [])[:limit]:
@@ -76,9 +78,14 @@ class WebToolsService:
         return {"query": query, "results": results, "provider": "searxng"}
 
     async def _duckduckgo_search(self, query: str, limit: int) -> dict:
-        async with httpx.AsyncClient(timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS, follow_redirects=True) as client:
-            response = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
-            response.raise_for_status()
+        client = http_client_service.get()
+        response = await client.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
         results: list[dict] = []

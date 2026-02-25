@@ -244,7 +244,7 @@ async def poll_worker_results(
     current_user: CurrentUser,
     limit: int = 20,
 ) -> WorkerResultsPollResponse:
-    items = worker_result_service.pop_many(user_id=str(current_user.id), limit=limit)
+    items = await worker_result_service.pop_many(user_id=str(current_user.id), limit=limit)
     return WorkerResultsPollResponse(items=items)
 
 

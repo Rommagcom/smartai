@@ -62,6 +62,77 @@ class MockRedis:
         value = queue.pop()
         return key, value
 
+    async def brpoplpush(self, source: str, destination: str, **kwargs):
+        queue = self.queues.get(source) or []
+        timeout_seconds = int(kwargs.get("timeout", 0) or 0)
+        if not queue:
+            await asyncio.sleep(max(0, min(timeout_seconds, 1)))
+            return None
+        value = queue.pop()
+        self.queues[destination].insert(0, value)
+        return value
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[str]:
+        await asyncio.sleep(0)
+        queue = self.queues.get(key) or []
+        if not queue:
+            return []
+        end = None if stop < 0 else stop + 1
+        return list(queue[start:end])
+
+    async def lrem(self, key: str, count: int, value: str) -> int:
+        await asyncio.sleep(0)
+        queue = self.queues.get(key) or []
+        if not queue:
+            return 0
+
+        if count == 0:
+            removed, retained = self._remove_all(queue, value)
+            self.queues[key] = retained
+            return removed
+
+        if count > 0:
+            removed, retained = self._remove_from_left(queue, value, count)
+            self.queues[key] = retained
+            return removed
+
+        removed, retained = self._remove_from_right(queue, value, abs(count))
+        self.queues[key] = retained
+        return removed
+
+    @staticmethod
+    def _remove_all(queue: list[str], value: str) -> tuple[int, list[str]]:
+        retained = [item for item in queue if item != value]
+        removed = len(queue) - len(retained)
+        return removed, retained
+
+    @staticmethod
+    def _remove_from_left(queue: list[str], value: str, count: int) -> tuple[int, list[str]]:
+        removed = 0
+        retained: list[str] = []
+        remaining = count
+        for item in queue:
+            if item == value and remaining > 0:
+                removed += 1
+                remaining -= 1
+                continue
+            retained.append(item)
+        return removed, retained
+
+    @staticmethod
+    def _remove_from_right(queue: list[str], value: str, count: int) -> tuple[int, list[str]]:
+        removed = 0
+        reversed_items = list(reversed(queue))
+        retained_reversed: list[str] = []
+        remaining = count
+        for item in reversed_items:
+            if item == value and remaining > 0:
+                removed += 1
+                remaining -= 1
+                continue
+            retained_reversed.append(item)
+        return removed, list(reversed(retained_reversed))
+
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
         await asyncio.sleep(0)
         for member, score in mapping.items():
@@ -192,7 +263,7 @@ async def run() -> None:
         second_run = await worker_service.run_once()
         ensure(second_run is not None, "expected retried task execution")
 
-        success_items = worker_result_service.pop_many(user_id=str(user.id), limit=10)
+        success_items = await worker_result_service.pop_many(user_id=str(user.id), limit=10)
         ensure(any(item.get("success") is True for item in success_items), f"expected success event, got: {success_items}")
         ensure(any("result_preview" in item for item in success_items), f"expected result_preview in success event, got: {success_items}")
         ensure(any("next_action_hint" in item for item in success_items), f"expected next_action_hint in success event, got: {success_items}")
@@ -207,7 +278,7 @@ async def run() -> None:
         failed_run = await worker_service.run_once()
         ensure(failed_run is not None, "expected failed task execution")
 
-        failed_items = worker_result_service.pop_many(user_id=str(user.id), limit=10)
+        failed_items = await worker_result_service.pop_many(user_id=str(user.id), limit=10)
         ensure(any(item.get("success") is False for item in failed_items), f"expected failed event, got: {failed_items}")
         ensure(any(isinstance(item.get("error"), dict) and item.get("error", {}).get("message") for item in failed_items), f"expected error.message in failed event, got: {failed_items}")
 

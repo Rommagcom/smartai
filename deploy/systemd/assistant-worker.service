@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Assistant Worker Queue Processor
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=assistant
+Group=assistant
+WorkingDirectory=/opt/assistant/backend
+EnvironmentFile=/opt/assistant/backend/.env
+ExecStart=/opt/assistant/.venv/bin/python -m app.workers.run
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+groups:
+  - name: assistant_observability_recording
+    rules:
+      - record: assistant:worker_process_task_failed:rate5m
+        expr: rate(assistant_worker_process_task_failed[5m])
+
+      - record: assistant:worker_process_task_success:rate5m
+        expr: rate(assistant_worker_process_task_success[5m])
+
+      - record: assistant:telegram_bridge_poll_failed:rate5m
+        expr: rate(assistant_telegram_bridge_poll_results_failed[5m])
+
+      - record: assistant:scheduler_execute_failed:rate5m
+        expr: rate(assistant_scheduler_execute_action_failed[5m])

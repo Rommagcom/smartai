@@ -1,7 +1,9 @@
+import asyncio
 from io import BytesIO
 
 from pypdf import PdfReader
 
+from app.core.config import settings
 from app.services.milvus_service import milvus_service
 from app.services.ollama_client import ollama_client
 
@@ -29,9 +31,20 @@ class RagService:
     async def ingest_document(self, user_id: str, filename: str, content: bytes) -> int:
         text = self.parse_document(filename, content)
         chunks = chunk_text(text)
-        vectors: list[list[float]] = []
-        for chunk in chunks:
-            vectors.append(await ollama_client.embeddings(chunk))
+        if not chunks:
+            return 0
+
+        concurrency = max(1, int(settings.RAG_EMBEDDING_CONCURRENCY))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def embed_one(index: int, chunk: str) -> tuple[int, list[float]]:
+            async with semaphore:
+                vector = await ollama_client.embeddings(chunk)
+                return index, vector
+
+        embedded = await asyncio.gather(*(embed_one(index, chunk) for index, chunk in enumerate(chunks)))
+        embedded.sort(key=lambda item: item[0])
+        vectors = [vector for _, vector in embedded]
         milvus_service.insert_chunks(user_id=user_id, chunks=chunks, vectors=vectors, source_doc=filename)
         return len(chunks)
 

@@ -222,19 +222,18 @@ class MemoryService:
 
     async def apply_importance_decay(self, db: AsyncSession, user_id: UUID) -> None:
         now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=1)
         result = await db.execute(
             select(LongTermMemory).where(
                 LongTermMemory.user_id == user_id,
                 LongTermMemory.is_pinned.is_(False),
                 LongTermMemory.is_locked.is_(False),
                 self._active_filter(now),
+                or_(LongTermMemory.last_decay_at.is_(None), LongTermMemory.last_decay_at < cutoff),
             )
         )
         rows = result.scalars().all()
         for row in rows:
-            decay_anchor = row.last_decay_at or row.created_at
-            if decay_anchor and (now - decay_anchor).total_seconds() < 3600:
-                continue
             decayed = self._effective_importance(row, now)
             if decayed < float(row.importance_score or 0.0):
                 row.importance_score = max(0.0, min(1.0, decayed))
