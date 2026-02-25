@@ -346,6 +346,8 @@ Telegram polling soak (backend-side, без Telegram API):
 - `make multi-up WORKERS=3`
 - `make multi-check WORKERS=3`
 - `make smoke-all`
+- `make pre-release WORKERS=3` (поднять multi + проверить топологию + прогнать smoke)
+- `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker` (дополнительно прогнать k6)
 
 Альтернатива через justfile:
 - `just load-chat` (или `BASE_URL=http://localhost:8000/api/v1 just load-chat`)
@@ -353,6 +355,7 @@ Telegram polling soak (backend-side, без Telegram API):
 - `just multi-up` (или `WORKERS=3 just multi-up`)
 - `just multi-check`
 - `just smoke-all`
+- `just pre-release` (переменные: `WORKERS`, `BASE_URL`, `RUN_K6`, `K6_MODE`)
 
 Ubuntu prerequisites (22.04/24.04):
 - Установить базовые инструменты:
@@ -389,6 +392,13 @@ Ubuntu prerequisites (22.04/24.04):
 - `pip install -r requirements.txt`
 - `python -m scripts.smoke_all` (или `make smoke-all`, `just smoke-all`)
 - `k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_chat_worker_burst.js`
+
+Pre-release в одну команду (Ubuntu):
+- `cd backend`
+- `chmod +x scripts/pre_release_check.sh`
+- `make pre-release WORKERS=3`
+- С k6: `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=native`
+- С k6 через Docker: `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker`
 
 Что смотреть в метриках/логах:
 - `assistant_worker_process_task_failed`, `assistant_worker_process_task_success`.
