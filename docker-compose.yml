@@ -18,6 +18,49 @@ services:
     environment:
       CHROME_EXECUTABLE_PATH: /usr/bin/chromium
 
+  scheduler-leader:
+    build: .
+    container_name: assistant-scheduler-leader
+    profiles: ["multi"]
+    env_file:
+      - .env
+    command:
+      [
+        "gunicorn",
+        "app.main:app",
+        "-k",
+        "uvicorn.workers.UvicornWorker",
+        "-w",
+        "1",
+        "-b",
+        "0.0.0.0:8010",
+        "--timeout",
+        "120",
+      ]
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - ollama
+      - redis
+    environment:
+      CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+      WORKER_ENABLED: "false"
+      SCHEDULER_ENABLED: "true"
+
+  worker:
+    build: .
+    profiles: ["multi"]
+    env_file:
+      - .env
+    command: ["python", "-m", "app.workers.run"]
+    depends_on:
+      - postgres
+      - redis
+      - milvus-standalone
+      - ollama
+    environment:
+      CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+
   telegram-bot:
     build: .
     container_name: assistant-telegram-bot
@@ -28,6 +71,20 @@ services:
       - api
     environment:
       CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: assistant-prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+    environment:
+      PROMETHEUS_ADMIN_JWT_TOKEN: ${PROMETHEUS_ADMIN_JWT_TOKEN:-}
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/recording_rules.yml:/etc/prometheus/deploy/prometheus/recording_rules.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/deploy/prometheus/alerts.yml:ro
 
   postgres:
     image: pgvector/pgvector:pg16

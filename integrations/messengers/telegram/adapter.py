@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime, timezone
 import json
 import logging
 from contextlib import suppress
@@ -137,6 +138,7 @@ class TelegramAdapter(MessengerAdapter):
                     "token": token,
                     "chat_id": update.effective_chat.id,
                     "username": username,
+                    "last_seen_at": datetime.now(timezone.utc).isoformat(),
                 }
             return auth
         except PermissionError as exc:
@@ -150,10 +152,19 @@ class TelegramAdapter(MessengerAdapter):
             if not self._known_users:
                 continue
 
+            self._cleanup_known_users()
+
             users_snapshot = list(self._known_users.items())
-            for _, data in users_snapshot:
+            if not users_snapshot:
+                continue
+
+            concurrency = max(1, int(self.settings.TELEGRAM_POLL_CONCURRENCY))
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def poll_one(data: dict[str, Any]) -> None:
                 try:
-                    await self._poll_worker_results_for_user(application, data)
+                    async with semaphore:
+                        await self._poll_worker_results_for_user(application, data)
                 except Exception as exc:
                     alerting_service.emit(
                         component="telegram_bridge",
@@ -162,6 +173,29 @@ class TelegramAdapter(MessengerAdapter):
                         details={"error": str(exc)},
                     )
                     logger.exception("telegram polling error")
+
+            await asyncio.gather(*(poll_one(data) for _, data in users_snapshot), return_exceptions=False)
+
+    def _cleanup_known_users(self) -> None:
+        ttl_seconds = max(60, int(self.settings.TELEGRAM_KNOWN_USER_TTL_SECONDS))
+        now = datetime.now(timezone.utc)
+        stale_ids: list[int] = []
+
+        for tg_user_id, data in self._known_users.items():
+            raw_ts = str(data.get("last_seen_at") or "").strip()
+            if not raw_ts:
+                continue
+            try:
+                last_seen = datetime.fromisoformat(raw_ts)
+            except Exception:
+                stale_ids.append(tg_user_id)
+                continue
+            age = (now - last_seen).total_seconds()
+            if age > ttl_seconds:
+                stale_ids.append(tg_user_id)
+
+        for tg_user_id in stale_ids:
+            self._known_users.pop(tg_user_id, None)
 
     async def _poll_worker_results_for_user(self, application: Application, data: dict[str, Any]) -> None:
         started_at = perf_counter()

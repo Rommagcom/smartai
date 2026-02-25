@@ -37,6 +37,20 @@ class FakeContext:
         self.bot = None
 
 
+class FakeBot:
+    def __init__(self) -> None:
+        self.sent_messages: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id: int, text: str) -> None:
+        await asyncio.sleep(0)
+        self.sent_messages.append((chat_id, text))
+
+
+class FakeApplication:
+    def __init__(self) -> None:
+        self.bot = FakeBot()
+
+
 def ensure(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -101,6 +115,40 @@ async def run() -> None:
     await adapter.memory_add(update_memory, context_memory)
     ensure(len(update_memory.effective_message.replies) > 0, "memory_add should produce reply")
     ensure("любит краткие ответы" in update_memory.effective_message.replies[-1], "memory_add reply should contain payload")
+
+    async def worker_results_poll_ok(token: str, limit: int = 20):
+        del token, limit
+        await asyncio.sleep(0)
+        return {
+            "status": 200,
+            "payload": {
+                "items": [
+                    {
+                        "success": True,
+                        "job_type": "pdf_create",
+                        "result_preview": {
+                            "artifact_ready": True,
+                            "file_name": "report.pdf",
+                        },
+                    }
+                ]
+            },
+        }
+
+    adapter.client.worker_results_poll = worker_results_poll_ok
+    app = FakeApplication()
+    await adapter._poll_worker_results_for_user(
+        app,
+        {
+            "token": "token-1",
+            "chat_id": 123,
+            "username": "tg_123",
+        },
+    )
+    ensure(len(app.bot.sent_messages) == 1, "expected one delivered worker result message")
+    delivered_text = app.bot.sent_messages[0][1]
+    ensure("Фоновая задача выполнена" in delivered_text, f"unexpected delivery text: {delivered_text}")
+    ensure("Файл готов" in delivered_text, f"artifact hint missing in delivery text: {delivered_text}")
 
     print("SMOKE_TELEGRAM_BRIDGE_OK")
 

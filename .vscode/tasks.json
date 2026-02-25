@@ -44,6 +44,24 @@
 				"-m",
 				"scripts.smoke_memory_docs"
 			]
+		},
+		{
+			"label": "run-smoke-all-once",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_all.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "tmp-smoke-worker-queue",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_queue.py"
+			],
+			"isBackground": false
 		}
 	]
 }

@@ -197,13 +197,13 @@ class ToolOrchestratorService:
     async def _integration_onboarding_test(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db
         draft_id = str(arguments.get("draft_id") or "").strip()
-        draft = self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
+        draft = await self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
         if not draft:
             raise ValueError("integration_onboarding_test requires draft or draft_id")
         normalized = self._normalize_onboarding_draft(draft)
         test = await integration_onboarding_service.test_draft(normalized)
-        draft_id = self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
-        integration_onboarding_service.update_after_test(
+        draft_id = await self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
+        await integration_onboarding_service.update_after_test(
             user_id=str(user.id),
             draft_id=draft_id,
             draft=normalized,
@@ -218,7 +218,7 @@ class ToolOrchestratorService:
 
     async def _integration_onboarding_save(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         draft_id = str(arguments.get("draft_id") or "").strip()
-        draft = self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
+        draft = await self._resolve_onboarding_draft(arguments=arguments, user_id=str(user.id), draft_id=draft_id)
         if not draft:
             raise ValueError("integration_onboarding_save requires draft or draft_id")
 
@@ -234,8 +234,8 @@ class ToolOrchestratorService:
             draft=normalized,
             is_active=bool(arguments.get("is_active", True)),
         )
-        draft_id = self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
-        integration_onboarding_service.update_after_save(
+        draft_id = await self._ensure_onboarding_session(user_id=str(user.id), draft_id=draft_id, draft=normalized)
+        await integration_onboarding_service.update_after_save(
             user_id=str(user.id),
             draft_id=draft_id,
             integration_id=str(integration.id),
@@ -253,13 +253,13 @@ class ToolOrchestratorService:
         }
 
     @staticmethod
-    def _resolve_onboarding_draft(arguments: dict, user_id: str, draft_id: str) -> dict:
+    async def _resolve_onboarding_draft(arguments: dict, user_id: str, draft_id: str) -> dict:
         draft = arguments.get("draft") if isinstance(arguments.get("draft"), dict) else {}
         if draft:
             return draft
         if not draft_id:
             return {}
-        state = integration_onboarding_service.get_session(user_id=user_id, draft_id=draft_id)
+        state = await integration_onboarding_service.get_session(user_id=user_id, draft_id=draft_id)
         if state and isinstance(state.get("draft"), dict):
             return state.get("draft")
         return {}
@@ -275,10 +275,10 @@ class ToolOrchestratorService:
         )
 
     @staticmethod
-    def _ensure_onboarding_session(user_id: str, draft_id: str, draft: dict) -> str:
+    async def _ensure_onboarding_session(user_id: str, draft_id: str, draft: dict) -> str:
         if draft_id:
             return draft_id
-        state = integration_onboarding_service.create_session(user_id=user_id, draft=draft)
+        state = await integration_onboarding_service.create_session(user_id=user_id, draft=draft)
         return str(state.get("draft_id") or "")
 
     async def _integration_health(self, db: AsyncSession, user: User, arguments: dict) -> dict:

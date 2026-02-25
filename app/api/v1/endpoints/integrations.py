@@ -43,8 +43,8 @@ async def _resolve_integration_auth_data(*, db: DBSession, integration: ApiInteg
     return auth_data
 
 
-def _resolve_onboarding_draft_payload(*, current_user: CurrentUser, draft_id: str, draft: object) -> tuple[dict | None, dict | None]:
-    state = integration_onboarding_service.get_session(user_id=str(current_user.id), draft_id=draft_id) if draft_id else None
+async def _resolve_onboarding_draft_payload(*, current_user: CurrentUser, draft_id: str, draft: object) -> tuple[dict | None, dict | None]:
+    state = await integration_onboarding_service.get_session(user_id=str(current_user.id), draft_id=draft_id) if draft_id else None
     if draft is not None:
         draft_payload = draft.model_dump()
         return draft_payload, state
@@ -63,10 +63,10 @@ def _normalize_onboarding_draft(draft_payload: dict) -> dict:
     )
 
 
-def _ensure_onboarding_session(*, current_user: CurrentUser, draft_id: str, state: dict | None, draft: dict) -> str:
+async def _ensure_onboarding_session(*, current_user: CurrentUser, draft_id: str, state: dict | None, draft: dict) -> str:
     if state and draft_id:
         return draft_id
-    created = integration_onboarding_service.create_session(user_id=str(current_user.id), draft=draft)
+    created = await integration_onboarding_service.create_session(user_id=str(current_user.id), draft=draft)
     return str(created.get("draft_id") or "")
 
 
@@ -101,7 +101,7 @@ async def onboarding_connect(
         endpoints=[item.model_dump() for item in payload.endpoints],
         healthcheck=payload.healthcheck.model_dump() if payload.healthcheck else None,
     )
-    state = integration_onboarding_service.create_session(user_id=str(current_user.id), draft=draft)
+    state = await integration_onboarding_service.create_session(user_id=str(current_user.id), draft=draft)
     return IntegrationOnboardingConnectResponse(
         draft_id=str(state.get("draft_id") or ""),
         step=str(state.get("step") or "connected"),
@@ -116,14 +116,14 @@ async def onboarding_test(
     current_user: CurrentUser,
 ) -> IntegrationOnboardingTestResponse:
     draft_id = str(payload.draft_id or "").strip()
-    draft_payload, state = _resolve_onboarding_draft_payload(current_user=current_user, draft_id=draft_id, draft=payload.draft)
+    draft_payload, state = await _resolve_onboarding_draft_payload(current_user=current_user, draft_id=draft_id, draft=payload.draft)
     if not isinstance(draft_payload, dict):
         raise HTTPException(status_code=400, detail="Onboarding draft is required")
 
     draft = _normalize_onboarding_draft(draft_payload)
     test_result = await integration_onboarding_service.test_draft(draft)
-    draft_id = _ensure_onboarding_session(current_user=current_user, draft_id=draft_id, state=state, draft=draft)
-    integration_onboarding_service.update_after_test(
+    draft_id = await _ensure_onboarding_session(current_user=current_user, draft_id=draft_id, state=state, draft=draft)
+    await integration_onboarding_service.update_after_test(
         user_id=str(current_user.id),
         draft_id=draft_id,
         draft=draft,
@@ -139,7 +139,7 @@ async def onboarding_save(
     current_user: CurrentUser,
 ) -> IntegrationOnboardingSaveResponse:
     draft_id = str(payload.draft_id or "").strip()
-    draft_payload, state = _resolve_onboarding_draft_payload(current_user=current_user, draft_id=draft_id, draft=payload.draft)
+    draft_payload, state = await _resolve_onboarding_draft_payload(current_user=current_user, draft_id=draft_id, draft=payload.draft)
     if not isinstance(draft_payload, dict):
         raise HTTPException(status_code=400, detail="Onboarding draft is required")
 
@@ -154,8 +154,8 @@ async def onboarding_save(
         draft=draft,
         is_active=payload.is_active,
     )
-    draft_id = _ensure_onboarding_session(current_user=current_user, draft_id=draft_id, state=state, draft=draft)
-    integration_onboarding_service.update_after_save(
+    draft_id = await _ensure_onboarding_session(current_user=current_user, draft_id=draft_id, state=state, draft=draft)
+    await integration_onboarding_service.update_after_save(
         user_id=str(current_user.id),
         draft_id=draft_id,
         integration_id=str(integration.id),
@@ -181,7 +181,7 @@ async def onboarding_status(
     draft_id: str,
     current_user: CurrentUser,
 ) -> IntegrationOnboardingStatusResponse:
-    state = integration_onboarding_service.get_session(user_id=str(current_user.id), draft_id=draft_id)
+    state = await integration_onboarding_service.get_session(user_id=str(current_user.id), draft_id=draft_id)
     if not state:
         raise HTTPException(status_code=404, detail="Onboarding draft not found")
     return IntegrationOnboardingStatusResponse(**integration_onboarding_service.build_status_response(state))

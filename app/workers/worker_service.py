@@ -121,13 +121,17 @@ class WorkerService:
             return result.scalar_one_or_none()
 
     async def run_once(self) -> WorkerTask | None:
+        await self._recover_processing_queue()
+        await self._recover_stale_running_tasks()
         await self._promote_retries()
         redis = self._get_redis()
-        item = await redis.brpop(settings.WORKER_QUEUE_KEY, timeout=settings.WORKER_BRPOP_TIMEOUT_SECONDS)
-        if not item:
+        task_id = await redis.brpoplpush(
+            settings.WORKER_QUEUE_KEY,
+            settings.WORKER_PROCESSING_QUEUE_KEY,
+            timeout=settings.WORKER_BRPOP_TIMEOUT_SECONDS,
+        )
+        if not task_id:
             return None
-
-        task_id = item[1]
         return await self._process_task(task_id)
 
     async def run_forever(self) -> None:
@@ -149,63 +153,67 @@ class WorkerService:
     async def _process_task(self, task_id: str) -> WorkerTask | None:
         started_at = perf_counter()
         success = False
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(WorkerTask).where(WorkerTask.id == UUID(task_id)))
-            task = result.scalar_one_or_none()
-            if not task:
-                return None
+        redis = self._get_redis()
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(WorkerTask).where(WorkerTask.id == UUID(task_id)))
+                task = result.scalar_one_or_none()
+                if not task:
+                    return None
 
-            task.status = WorkerJobStatus.RUNNING.value
-            task.started_at = datetime.now(timezone.utc)
-            task.next_retry_at = None
-            await db.commit()
+                task.status = WorkerJobStatus.RUNNING.value
+                task.started_at = datetime.now(timezone.utc)
+                task.next_retry_at = None
+                await db.commit()
 
-            try:
-                job_type = WorkerJobType(task.job_type)
-                handler = self._handlers.get(job_type)
-            except Exception:
-                handler = None
+                try:
+                    job_type = WorkerJobType(task.job_type)
+                    handler = self._handlers.get(job_type)
+                except Exception:
+                    handler = None
 
-            if not handler:
-                await self._fail_task(db, task, f"No handler for job_type={task.job_type}")
+                if not handler:
+                    await self._fail_task(db, task, f"No handler for job_type={task.job_type}")
+                    observability_metrics_service.record(
+                        component="worker",
+                        operation="process_task",
+                        success=False,
+                        latency_ms=(perf_counter() - started_at) * 1000,
+                    )
+                    return task
+
+                try:
+                    run_result = await handler(task.payload)
+                    task.status = WorkerJobStatus.SUCCESS.value
+                    task.result = run_result
+                    task.error = None
+                    task.completed_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    await self._notify_user(task)
+                    success = True
+                    logger.info(
+                        "worker task finished",
+                        extra={
+                            "context": {
+                                "component": "worker",
+                                "event": "task_success",
+                                "task_id": str(task.id),
+                                "job_type": task.job_type,
+                            }
+                        },
+                    )
+                except Exception as exc:
+                    await self._fail_task(db, task, str(exc))
+
                 observability_metrics_service.record(
                     component="worker",
                     operation="process_task",
-                    success=False,
+                    success=success,
                     latency_ms=(perf_counter() - started_at) * 1000,
                 )
                 return task
-
-            try:
-                run_result = await handler(task.payload)
-                task.status = WorkerJobStatus.SUCCESS.value
-                task.result = run_result
-                task.error = None
-                task.completed_at = datetime.now(timezone.utc)
-                await db.commit()
-                await self._notify_user(task)
-                success = True
-                logger.info(
-                    "worker task finished",
-                    extra={
-                        "context": {
-                            "component": "worker",
-                            "event": "task_success",
-                            "task_id": str(task.id),
-                            "job_type": task.job_type,
-                        }
-                    },
-                )
-            except Exception as exc:
-                await self._fail_task(db, task, str(exc))
-
-            observability_metrics_service.record(
-                component="worker",
-                operation="process_task",
-                success=success,
-                latency_ms=(perf_counter() - started_at) * 1000,
-            )
-            return task
+        finally:
+            await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
 
     async def _fail_task(self, db, task: WorkerTask, error: str) -> None:
         task.attempt_count = int(task.attempt_count) + 1
@@ -259,6 +267,93 @@ class WorkerService:
             pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, task_id)
             pipe.lpush(settings.WORKER_QUEUE_KEY, task_id)
         await pipe.execute()
+
+    async def _recover_processing_queue(self) -> None:
+        redis = self._get_redis()
+        max_batch = max(10, int(settings.WORKER_PROCESSING_RECOVERY_BATCH))
+        raw_ids = await redis.lrange(settings.WORKER_PROCESSING_QUEUE_KEY, 0, max_batch - 1)
+        task_ids = [str(item) for item in raw_ids if str(item).strip()]
+        if not task_ids:
+            return
+
+        valid_uuids: list[UUID] = []
+        for task_id in task_ids:
+            try:
+                valid_uuids.append(UUID(task_id))
+            except ValueError:
+                await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
+
+        if not valid_uuids:
+            return
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(WorkerTask).where(WorkerTask.id.in_(valid_uuids)))
+            rows = result.scalars().all()
+            task_map = {str(row.id): row for row in rows}
+
+            now = datetime.now(timezone.utc)
+            lease_seconds = max(10, int(settings.WORKER_RUNNING_LEASE_SECONDS))
+            stale_before = now - timedelta(seconds=lease_seconds)
+
+            for task_id in task_ids:
+                task = task_map.get(task_id)
+                await self._recover_processing_item(
+                    db=db,
+                    redis=redis,
+                    task_id=task_id,
+                    task=task,
+                    stale_before=stale_before,
+                )
+
+    async def _recover_processing_item(
+        self,
+        *,
+        db,
+        redis: Redis,
+        task_id: str,
+        task: WorkerTask | None,
+        stale_before: datetime,
+    ) -> None:
+        if not task:
+            await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
+            return
+
+        status = str(task.status or "")
+        terminal_statuses = {
+            WorkerJobStatus.SUCCESS.value,
+            WorkerJobStatus.FAILED.value,
+            WorkerJobStatus.RETRY_SCHEDULED.value,
+        }
+        if status in terminal_statuses:
+            await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
+            return
+
+        if status == WorkerJobStatus.QUEUED.value:
+            await redis.lpush(settings.WORKER_QUEUE_KEY, task_id)
+            await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
+            return
+
+        is_stale_running = status == WorkerJobStatus.RUNNING.value and task.started_at and task.started_at < stale_before
+        if is_stale_running:
+            await self._fail_task(db, task, "Worker lease timeout: recovered stale RUNNING task")
+            await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
+
+    async def _recover_stale_running_tasks(self) -> None:
+        now = datetime.now(timezone.utc)
+        lease_seconds = max(10, int(settings.WORKER_RUNNING_LEASE_SECONDS))
+        stale_before = now - timedelta(seconds=lease_seconds)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(WorkerTask).where(
+                    WorkerTask.status == WorkerJobStatus.RUNNING.value,
+                    WorkerTask.started_at.is_not(None),
+                    WorkerTask.started_at < stale_before,
+                )
+            )
+            rows = result.scalars().all()
+            for row in rows:
+                await self._fail_task(db, row, "Worker lease timeout: recovered stale RUNNING task")
 
     @staticmethod
     def _retry_delay_seconds(attempt_count: int) -> int:
@@ -344,7 +439,7 @@ class WorkerService:
             result=job.result,
             error_message=job.error,
         )
-        worker_result_service.push(user_id=user_id, payload=payload)
+        await worker_result_service.push(user_id=user_id, payload=payload)
         await connection_manager.send_to_user(user_id=user_id, payload=payload)
 
 

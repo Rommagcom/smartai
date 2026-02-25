@@ -1,0 +1,42 @@
+groups:
+  - name: assistant_observability_alerts
+    rules:
+      - alert: AssistantWorkerFailureSpike
+        expr: assistant:worker_process_task_failed:rate5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "Worker failure rate is elevated"
+          description: "Worker failed tasks rate > 0.05/sec for 10m"
+
+      - alert: AssistantSchedulerExecutionFailures
+        expr: assistant:scheduler_execute_failed:rate5m > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          component: scheduler
+        annotations:
+          summary: "Scheduler action failures detected"
+          description: "Scheduler execute_action failures persist for 10m"
+
+      - alert: AssistantTelegramBridgePollFailures
+        expr: assistant:telegram_bridge_poll_failed:rate5m > 0.02
+        for: 10m
+        labels:
+          severity: warning
+          component: telegram_bridge
+        annotations:
+          summary: "Telegram bridge polling failures detected"
+          description: "Poll failures to backend worker-results API persist for 10m"
+
+      - alert: AssistantCriticalAlertsEmitted
+        expr: increase(assistant_alerts_worker_critical[10m]) + increase(assistant_alerts_scheduler_critical[10m]) + increase(assistant_alerts_telegram_bridge_critical[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: observability
+        annotations:
+          summary: "Critical alert event emitted by backend"
+          description: "At least one critical in-app alert was emitted in last 10m"

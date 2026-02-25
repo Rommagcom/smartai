@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 from app.api.types import CurrentUser
 from app.services.alerting_service import alerting_service
@@ -16,6 +17,12 @@ def _require_admin(current_user: CurrentUser) -> None:
 async def observability_metrics(current_user: CurrentUser) -> dict:
     _require_admin(current_user)
     return observability_metrics_service.snapshot()
+
+
+@router.get("/metrics/prometheus", response_class=PlainTextResponse)
+async def observability_metrics_prometheus(current_user: CurrentUser) -> str:
+    _require_admin(current_user)
+    return observability_metrics_service.to_prometheus()
 
 
 @router.get("/alerts")

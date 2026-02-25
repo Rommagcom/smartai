@@ -1,8 +1,7 @@
 from typing import AsyncGenerator
 
-import httpx
-
 from app.core.config import settings
+from app.services.http_client_service import http_client_service
 
 
 class OllamaClient:
@@ -13,11 +12,15 @@ class OllamaClient:
             "stream": stream,
             "options": options or {},
         }
-        async with httpx.AsyncClient(timeout=settings.OLLAMA_TIMEOUT_SECONDS) as client:
-            response = await client.post(f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload)
-            response.raise_for_status()
-            data = response.json()
-            return data.get("message", {}).get("content", "")
+        client = http_client_service.get()
+        response = await client.post(
+            f"{settings.OLLAMA_BASE_URL}/api/chat",
+            json=payload,
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("message", {}).get("content", "")
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
         payload = {
@@ -26,23 +29,32 @@ class OllamaClient:
             "stream": True,
             "options": options or {},
         }
-        async with httpx.AsyncClient(timeout=settings.OLLAMA_TIMEOUT_SECONDS) as client:
-            async with client.stream("POST", f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    yield line
+        client = http_client_service.get()
+        async with client.stream(
+            "POST",
+            f"{settings.OLLAMA_BASE_URL}/api/chat",
+            json=payload,
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                yield line
 
     async def embeddings(self, text: str) -> list[float]:
         payload = {
             "model": "nomic-embed-text",
             "prompt": text,
         }
-        async with httpx.AsyncClient(timeout=settings.OLLAMA_TIMEOUT_SECONDS) as client:
-            response = await client.post(f"{settings.OLLAMA_BASE_URL}/api/embeddings", json=payload)
-            response.raise_for_status()
-            return response.json().get("embedding", [])
+        client = http_client_service.get()
+        response = await client.post(
+            f"{settings.OLLAMA_BASE_URL}/api/embeddings",
+            json=payload,
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json().get("embedding", [])
 
 
 ollama_client = OllamaClient()
