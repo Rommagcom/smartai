@@ -72,9 +72,11 @@ class ToolOrchestratorService:
     ) -> list[dict]:
         handlers = self._handlers()
         results: list[dict] = []
+        context: dict[str, dict] = {}
         for step in (steps or [])[:max_steps]:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+            arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
             if tool not in handlers:
                 results.append(
                     {
@@ -100,6 +102,7 @@ class ToolOrchestratorService:
 
             try:
                 result = await handlers[tool](db, user, arguments)
+                self._update_chain_context(tool=tool, result=result, context=context)
                 results.append(
                     {
                         "tool": tool,
@@ -118,6 +121,40 @@ class ToolOrchestratorService:
                     }
                 )
         return results
+
+    @staticmethod
+    def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
+        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
+            return dict(arguments)
+
+        merged = dict(arguments)
+        onboarding = context.get("integration_onboarding") or {}
+        if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
+            merged["draft"] = onboarding["draft"]
+        if not merged.get("draft_id") and onboarding.get("draft_id"):
+            merged["draft_id"] = onboarding["draft_id"]
+        return merged
+
+    @staticmethod
+    def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
+        if tool not in {
+            "integration_onboarding_connect",
+            "integration_onboarding_test",
+            "integration_onboarding_save",
+        }:
+            return
+
+        if not isinstance(result, dict):
+            return
+
+        onboarding = dict(context.get("integration_onboarding") or {})
+        draft = result.get("draft") if isinstance(result.get("draft"), dict) else None
+        draft_id = str(result.get("draft_id") or "").strip()
+        if draft is not None:
+            onboarding["draft"] = draft
+        if draft_id:
+            onboarding["draft_id"] = draft_id
+        context["integration_onboarding"] = onboarding
 
     async def compose_final_answer(
         self,

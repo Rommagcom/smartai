@@ -62,6 +62,15 @@
 				"scripts/smoke_worker_queue.py"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "just smoke-all",
+			"type": "shell",
+			"command": "just",
+			"args": [
+				"smoke-all"
+			],
+			"isBackground": false
 		}
 	]
 }

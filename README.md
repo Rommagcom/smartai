@@ -354,6 +354,42 @@ Telegram polling soak (backend-side, без Telegram API):
 - `just multi-check`
 - `just smoke-all`
 
+Ubuntu prerequisites (22.04/24.04):
+- Установить базовые инструменты:
+   - `sudo apt update`
+   - `sudo apt install -y python3 python3-venv python3-pip make curl ca-certificates gnupg`
+- Установить Docker Engine + Compose plugin (официальный репозиторий Docker):
+   - `sudo install -m 0755 -d /etc/apt/keyrings`
+   - `curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg`
+   - `sudo chmod a+r /etc/apt/keyrings/docker.gpg`
+   - `echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null`
+   - `sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
+   - `sudo usermod -aG docker $USER` (после этого перелогиниться)
+- Установить `just`:
+   - `sudo apt install -y just` (если пакет доступен в вашем репозитории)
+   - или через cargo: `cargo install just`
+- Установить `k6`:
+   - через Docker (без установки бинарника):
+      - `docker run --rm grafana/k6 version`
+   - или нативно через репозиторий Grafana:
+      - `sudo gpg -k`
+      - `sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69`
+      - `echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list`
+      - `sudo apt update && sudo apt install -y k6`
+- Проверка окружения:
+   - `docker --version`
+   - `docker compose version`
+   - `just --version` (опционально)
+   - `k6 version` (если установлен нативно)
+
+Быстрый старт на Ubuntu:
+- `cd backend`
+- `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`
+- `python3 -m venv .venv && source .venv/bin/activate`
+- `pip install -r requirements.txt`
+- `python -m scripts.smoke_all` (или `make smoke-all`, `just smoke-all`)
+- `k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_chat_worker_burst.js`
+
 Что смотреть в метриках/логах:
 - `assistant_worker_process_task_failed`, `assistant_worker_process_task_success`.
 - `assistant_telegram_bridge_poll_results_failed`.

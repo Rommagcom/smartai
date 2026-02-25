@@ -28,6 +28,7 @@ from app.services.pdf_service import pdf_service
 from app.services.skills_registry_service import skills_registry_service
 from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
+from app.services.soul_service import soul_service
 from app.services.web_tools_service import web_tools_service
 from app.services.worker_result_service import worker_result_service
 
@@ -60,15 +61,32 @@ async def chat(
     current_user: CurrentUser,
 ) -> ChatResponse:
     if not current_user.soul_configured:
-        raise HTTPException(
-            status_code=428,
-            detail={
-                "message": "SOUL initial setup is required before first chat",
-                "setup_endpoint": "/api/v1/users/me/soul/setup",
-                "status_endpoint": "/api/v1/users/me/soul/status",
-                "first_question": "Кто ты и чем занимаемся?",
-            },
-        )
+        user_description = str(payload.message or "").strip()
+        if not user_description:
+            user_description = "Пользователь начал self-service чат без явного описания профиля"
+        try:
+            soul_service.setup_user_soul(
+                user=current_user,
+                user_description=user_description,
+                assistant_name="SOUL",
+                emoji="🧠",
+                style="direct",
+                tone_modifier="Коротко и по делу",
+                task_mode="other",
+            )
+            db.add(current_user)
+            await db.flush()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=428,
+                detail={
+                    "message": "SOUL initial setup failed",
+                    "setup_endpoint": "/api/v1/users/me/soul/setup",
+                    "status_endpoint": "/api/v1/users/me/soul/status",
+                    "first_question": "Кто ты и чем занимаемся?",
+                    "error": str(exc),
+                },
+            ) from exc
 
     session = await memory_service.get_or_create_session(db, current_user.id, payload.session_id)
     await memory_service.append_message(db, current_user.id, session.id, "user", payload.message)

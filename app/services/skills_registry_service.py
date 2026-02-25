@@ -337,8 +337,11 @@ class SkillsRegistryService:
                     "type": "object",
                     "properties": {
                         "service_name": {"type": "string"},
+                        "token": {"type": "string"},
                         "token_optional": {"type": "string"},
+                        "base_url": {"type": "string"},
                         "base_url_optional": {"type": "string"},
+                        "endpoints": {"type": "array"},
                         "endpoints_optional": {"type": "array"},
                     },
                     "required": ["service_name"],
