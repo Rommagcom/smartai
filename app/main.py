@@ -51,8 +51,26 @@ async def lifespan(app: FastAPI):
         worker_task.cancel()
         with suppress(asyncio.CancelledError):
             await worker_task
-    await connection_manager.stop()
-    await http_client_service.close()
+    try:
+        await connection_manager.stop()
+    except Exception as exc:
+        logger.warning("websocket manager stop failed", extra={"context": {"error": str(exc)}})
+        alerting_service.emit(
+            component="startup",
+            severity="warning",
+            message="Websocket manager stop failed",
+            details={"error": str(exc)},
+        )
+    try:
+        await http_client_service.close()
+    except Exception as exc:
+        logger.warning("http client close failed", extra={"context": {"error": str(exc)}})
+        alerting_service.emit(
+            component="startup",
+            severity="warning",
+            message="HTTP client close failed",
+            details={"error": str(exc)},
+        )
     logger.info("application stopped", extra={"context": {"component": "app", "event": "shutdown"}})
 
 

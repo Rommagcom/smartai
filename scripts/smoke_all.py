@@ -6,6 +6,7 @@ from app.services.scheduler_service import scheduler_service
 from scripts.smoke_api_flow import run as run_api_flow
 from scripts.smoke_admin_access import run as run_admin_access
 from scripts.smoke_chat_tools_reminders import run as run_chat_tools_reminders
+from scripts.smoke_chat_self_service import run as run_chat_self_service
 from scripts.smoke_integrations import run as run_integrations
 from scripts.smoke_memory_docs import run as run_memory_docs
 from scripts.smoke_onboarding_step import run as run_onboarding_step
@@ -44,6 +45,11 @@ async def run() -> None:
 
     print("RUN_SMOKE_CHAT_TOOLS_REMINDERS")
     await run_chat_tools_reminders()
+
+    reset_scheduler()
+
+    print("RUN_SMOKE_CHAT_SELF_SERVICE")
+    await run_chat_self_service()
 
     reset_scheduler()
 
