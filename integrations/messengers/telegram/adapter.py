@@ -11,7 +11,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
-from telegram import InputFile, Update
+from telegram import Bot, InputFile, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -402,25 +402,64 @@ class TelegramAdapter(MessengerAdapter):
         context.user_data.pop("soul_setup_auto", None)
         return False
 
-    async def _chat_backend_request(
+    async def _deliver_chat_result(self, bot: Bot, chat_id: int, res: dict[str, Any]) -> None:
+        if res.get("status") == 200:
+            payload = res.get("payload") or {}
+            response_text = str(payload.get("response") or "").strip()
+            if not response_text:
+                response_text = "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
+            await bot.send_message(chat_id=chat_id, text=response_text)
+            for artifact in payload.get("artifacts", []):
+                file_base64 = artifact.get("file_base64")
+                if not file_base64:
+                    continue
+                file_bytes = base64.b64decode(file_base64)
+                file_name = artifact.get("file_name", "artifact.bin")
+                bio = BytesIO(file_bytes)
+                bio.name = file_name
+                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+            return
+
+        if res.get("status") == 428:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
+            )
+            return
+
+        payload = self._sanitize_reply_payload(res.get("payload"))
+        await bot.send_message(chat_id=chat_id, text=f"Error {res.get('status')}: {_safe_json(payload)}")
+
+    async def _chat_background_task(
         self,
-        update: Update,
+        bot: Bot,
+        chat_id: int,
         token: str,
         telegram_user_id: int,
         text: str,
-    ) -> dict[str, Any] | None:
+    ) -> None:
         try:
-            return await self.client.chat(token, telegram_user_id, text)
+            res = await self.client.chat(token, telegram_user_id, text)
         except httpx.TimeoutException:
-            await update.effective_message.reply_text(
-                "Сервер отвечает слишком долго. Попробуйте ещё раз через несколько секунд."
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
             )
-            return None
+            return
         except httpx.HTTPError:
-            await update.effective_message.reply_text(
-                "Временная ошибка связи с backend. Попробуйте ещё раз."
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Временная ошибка связи с backend. Попробуйте ещё раз.",
             )
-            return None
+            return
+        except Exception:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
+            )
+            return
+
+        await self._deliver_chat_result(bot=bot, chat_id=chat_id, res=res)
 
     async def _reply_api_result(self, update: Update, result: dict) -> None:
         payload = self._sanitize_reply_payload(result.get("payload"))
@@ -563,31 +602,20 @@ class TelegramAdapter(MessengerAdapter):
         if not soul_ready:
             return
         telegram_user_id = update.effective_user.id if update.effective_user else 0
-        res = await self._chat_backend_request(update, token, telegram_user_id, text)
-        if not res:
+        if not update.effective_chat or context is None:
+            await update.effective_message.reply_text("Не удалось запустить фоновую обработку. Повторите запрос.")
             return
-        if res["status"] == 200:
-            payload = res.get("payload") or {}
-            response_text = str(payload.get("response") or "").strip()
-            if not response_text:
-                response_text = "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
-            await update.effective_message.reply_text(response_text)
-            for artifact in payload.get("artifacts", []):
-                file_base64 = artifact.get("file_base64")
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = artifact.get("file_name", "artifact.bin")
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await update.effective_message.reply_document(document=InputFile(bio, filename=file_name))
-            return
-        if res["status"] == 428:
-            await update.effective_message.reply_text(
-                "Нужна SOUL-настройка перед первым чатом. Используй /soul_setup"
+
+        await update.effective_message.reply_text("Принял запрос. Обрабатываю и пришлю результат следующим сообщением…")
+        asyncio.create_task(
+            self._chat_background_task(
+                bot=context.bot,
+                chat_id=update.effective_chat.id,
+                token=token,
+                telegram_user_id=telegram_user_id,
+                text=text,
             )
-            return
-        await self._reply_api_result(update, res)
+        )
 
     async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
