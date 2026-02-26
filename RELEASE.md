@@ -9,6 +9,7 @@
    - Host: `OLLAMA_BASE_URL=http://127.0.0.1:11434`
 3. Проверить модель в Ollama:
    - `docker compose exec ollama ollama pull kimi-k2.5:cloud`
+   - `docker compose exec ollama ollama pull nomic-embed-text`
    - `docker compose exec ollama ollama list`
 4. Проверить доступность Ollama из API-контейнера:
    - `docker compose exec api sh -lc "wget -qO- http://ollama:11434/api/tags | head"`
