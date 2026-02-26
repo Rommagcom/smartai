@@ -10,6 +10,7 @@ from io import BytesIO
 from time import perf_counter
 from typing import Any
 
+import httpx
 from telegram import InputFile, Update
 from telegram.ext import (
     Application,
@@ -401,6 +402,26 @@ class TelegramAdapter(MessengerAdapter):
         context.user_data.pop("soul_setup_auto", None)
         return False
 
+    async def _chat_backend_request(
+        self,
+        update: Update,
+        token: str,
+        telegram_user_id: int,
+        text: str,
+    ) -> dict[str, Any] | None:
+        try:
+            return await self.client.chat(token, telegram_user_id, text)
+        except httpx.TimeoutException:
+            await update.effective_message.reply_text(
+                "Сервер отвечает слишком долго. Попробуйте ещё раз через несколько секунд."
+            )
+            return None
+        except httpx.HTTPError:
+            await update.effective_message.reply_text(
+                "Временная ошибка связи с backend. Попробуйте ещё раз."
+            )
+            return None
+
     async def _reply_api_result(self, update: Update, result: dict) -> None:
         payload = self._sanitize_reply_payload(result.get("payload"))
         if result["status"] == 200:
@@ -542,7 +563,9 @@ class TelegramAdapter(MessengerAdapter):
         if not soul_ready:
             return
         telegram_user_id = update.effective_user.id if update.effective_user else 0
-        res = await self.client.chat(token, telegram_user_id, text)
+        res = await self._chat_backend_request(update, token, telegram_user_id, text)
+        if not res:
+            return
         if res["status"] == 200:
             payload = res.get("payload") or {}
             response_text = str(payload.get("response") or "").strip()
