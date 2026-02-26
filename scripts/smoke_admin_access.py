@@ -67,6 +67,9 @@ async def run() -> None:
         list_by_non_admin = client.get("/api/v1/users/admin/users", headers=user_headers)
         ensure(list_by_non_admin.status_code == 403, f"non-admin should be denied: {list_by_non_admin.text}")
 
+        non_admin_metrics = client.get("/api/v1/observability/metrics", headers=user_headers)
+        ensure(non_admin_metrics.status_code == 403, f"non-admin metrics should be denied: {non_admin_metrics.text}")
+
         list_by_admin = client.get("/api/v1/users/admin/users", headers=admin_headers)
         ensure(list_by_admin.status_code == 200, f"admin list failed: {list_by_admin.text}")
         users = list_by_admin.json()
@@ -101,9 +104,6 @@ async def run() -> None:
             json={"is_admin": False},
         )
         ensure(revoke_last_remaining.status_code == 400, f"should protect last remaining admin: {revoke_last_remaining.text}")
-
-        non_admin_metrics = client.get("/api/v1/observability/metrics", headers=user_headers)
-        ensure(non_admin_metrics.status_code == 403, f"non-admin metrics should be denied: {non_admin_metrics.text}")
 
         admin_metrics = client.get("/api/v1/observability/metrics", headers=admin_headers)
         ensure(admin_metrics.status_code == 200, f"admin metrics failed: {admin_metrics.text}")
