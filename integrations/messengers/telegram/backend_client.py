@@ -87,7 +87,20 @@ class BackendApiClient:
         session_id = self._session_ids.get(telegram_user_id)
         if session_id:
             body["session_id"] = session_id
-        response = await self._request("POST", "/chat", token=token, json=body)
+        client = http_client_service.get()
+        response_raw = await client.request(
+            method="POST",
+            url=f"{self.base_url}/chat",
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=180,
+        )
+        payload: Any
+        try:
+            payload = response_raw.json()
+        except Exception:
+            payload = {"raw": response_raw.text}
+        response = {"status": response_raw.status_code, "payload": payload}
         if response["status"] == 200 and response["payload"].get("session_id"):
             self._session_ids[telegram_user_id] = response["payload"]["session_id"]
         return response
