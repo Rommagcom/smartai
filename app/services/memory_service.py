@@ -298,13 +298,17 @@ class MemoryService:
             "Формат ответа строго по строкам: fact_type|content|importance(0..1). "
             "fact_type только: preference, fact, goal, constraint."
         )
-        response = await ollama_client.chat(
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"User: {user_text}\nAssistant: {assistant_text}"},
-            ],
-            stream=False,
-        )
+        try:
+            response = await ollama_client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"User: {user_text}\nAssistant: {assistant_text}"},
+                ],
+                stream=False,
+            )
+        except Exception:
+            return
+        failed_writes = 0
         for line in response.splitlines():
             parts = [part.strip() for part in line.split("|")]
             if len(parts) != 3:
@@ -316,13 +320,17 @@ class MemoryService:
                 importance = max(0.0, min(1.0, float(importance_raw)))
             except ValueError:
                 importance = 0.5
-            await self.create_long_term_memory(
-                db=db,
-                user_id=user_id,
-                fact_type=fact_type,
-                content=content,
-                importance_score=importance,
-            )
+            try:
+                await self.create_long_term_memory(
+                    db=db,
+                    user_id=user_id,
+                    fact_type=fact_type,
+                    content=content,
+                    importance_score=importance,
+                )
+            except Exception:
+                failed_writes += 1
+        _ = failed_writes
 
 
 memory_service = MemoryService()

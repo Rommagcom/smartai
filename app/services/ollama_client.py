@@ -1,84 +1,69 @@
 from typing import AsyncGenerator
 
-from httpx import HTTPStatusError
+from ollama import AsyncClient  # type: ignore[import-not-found]
 
 from app.core.config import settings
-from app.services.http_client_service import http_client_service
 
 
 class OllamaClient:
+    def __init__(self) -> None:
+        self._client = AsyncClient(host=settings.OLLAMA_BASE_URL)
+
+    @staticmethod
+    def _normalize_embedding_dim(vector: list[float]) -> list[float]:
+        target_dim = int(settings.EMBEDDING_DIM)
+        if target_dim <= 0:
+            return vector
+        current_dim = len(vector)
+        if current_dim == target_dim:
+            return vector
+        if current_dim > target_dim:
+            return vector[:target_dim]
+        return [*vector, *([0.0] * (target_dim - current_dim))]
+
     async def chat(self, messages: list[dict], stream: bool = False, options: dict | None = None) -> str:
-        payload = {
-            "model": settings.OLLAMA_MODEL_NAME,
-            "messages": messages,
-            "stream": stream,
-            "options": options or {},
-        }
-        client = http_client_service.get()
-        response = await client.post(
-            f"{settings.OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        response = await self._client.chat(
+            model=settings.OLLAMA_MODEL_NAME,
+            messages=messages,
+            stream=stream,
+            options=options or {},
         )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("message", {}).get("content", "")
+        message = response.get("message") if isinstance(response, dict) else None
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return ""
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
-        payload = {
-            "model": settings.OLLAMA_MODEL_NAME,
-            "messages": messages,
-            "stream": True,
-            "options": options or {},
-        }
-        client = http_client_service.get()
-        async with client.stream(
-            "POST",
-            f"{settings.OLLAMA_BASE_URL}/api/chat",
-            json=payload,
-            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                yield line
+        stream = await self._client.chat(
+            model=settings.OLLAMA_MODEL_NAME,
+            messages=messages,
+            stream=True,
+            options=options or {},
+        )
+        async for chunk in stream:
+            if not isinstance(chunk, dict):
+                continue
+            message = chunk.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if content:
+                yield str(content)
 
     async def embeddings(self, text: str) -> list[float]:
-        client = http_client_service.get()
-        try:
-            response = await client.post(
-                f"{settings.OLLAMA_BASE_URL}/api/embed",
-                json={
-                    "model": "nomic-embed-text",
-                    "input": text,
-                },
-                timeout=settings.OLLAMA_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            data = response.json()
-            embeddings = data.get("embeddings")
-            if isinstance(embeddings, list) and embeddings:
-                first = embeddings[0]
-                if isinstance(first, list):
-                    return first
-                if isinstance(first, (int, float)):
-                    return embeddings  # type: ignore[return-value]
-            return []
-        except HTTPStatusError as exc:
-            if exc.response is None or exc.response.status_code != 404:
-                raise
-
-        response = await client.post(
-            f"{settings.OLLAMA_BASE_URL}/api/embeddings",
-            json={
-                "model": "nomic-embed-text",
-                "prompt": text,
-            },
-            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+        response = await self._client.embed(
+            model="nomic-embed-text",
+            input=[text],
         )
-        response.raise_for_status()
-        return response.json().get("embedding", [])
+        embeddings = response.get("embeddings") if isinstance(response, dict) else None
+        if isinstance(embeddings, list) and embeddings:
+            first = embeddings[0]
+            if isinstance(first, list):
+                return self._normalize_embedding_dim([float(value) for value in first])
+            if isinstance(first, (int, float)):
+                flat = [float(value) for value in embeddings if isinstance(value, (int, float))]
+                return self._normalize_embedding_dim(flat)
+        return self._normalize_embedding_dim([])
 
 
 ollama_client = OllamaClient()
