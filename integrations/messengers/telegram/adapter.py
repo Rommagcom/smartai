@@ -296,13 +296,129 @@ class TelegramAdapter(MessengerAdapter):
             "(выполнение пойдёт сразу и вернёт артефакт)."
         )
 
-    async def _reply_api_result(self, update: Update, result: dict) -> None:
-        if result["status"] == 200:
-            await update.effective_message.reply_text(_safe_json(result["payload"]))
-            return
-        await update.effective_message.reply_text(f"Error {result['status']}: {_safe_json(result['payload'])}")
+    @staticmethod
+    def _sanitize_reply_payload(payload: Any) -> Any:
+        if not isinstance(payload, dict):
+            return payload
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key == "system_prompt_template":
+                continue
+            sanitized[key] = value
+        return sanitized
 
-    async def _ensure_soul_ready_for_chat(self, update: Update, token: str) -> bool:
+    @staticmethod
+    def _format_soul_setup_success(payload: dict[str, Any]) -> str | None:
+        if not bool(payload.get("configured")):
+            return None
+        assistant_name = str(payload.get("assistant_name") or "ассистент")
+        emoji = str(payload.get("emoji") or "🧠")
+        style = str(payload.get("style") or "direct")
+        task_mode = str(payload.get("task_mode") or "other")
+        return (
+            "SOUL setup завершён ✅\n"
+            f"Ассистент: {assistant_name} {emoji}\n"
+            f"Стиль: {style}\n"
+            f"Профиль: {task_mode}\n\n"
+            "Готов к работе. Напиши сообщение или используй /chat <message>."
+        )
+
+    async def _begin_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data["soul_setup_auto"] = {"step": "name", "data": {}}
+        await update.effective_message.reply_text(
+            "Нужна первичная SOUL-настройка. Запускаю setup автоматически.\n"
+            "Шаг 1/6: выберите имя ассистента (например: SOUL)"
+        )
+
+    async def _handle_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        state = context.user_data.get("soul_setup_auto")
+        if not isinstance(state, dict):
+            return False
+
+        message = update.effective_message
+        if not message or not message.text:
+            return True
+
+        text = message.text.strip()
+        if not text:
+            await message.reply_text("Нужен текстовый ответ для продолжения SOUL setup.")
+            return True
+
+        step = str(state.get("step") or "")
+        data = state.get("data") if isinstance(state.get("data"), dict) else {}
+
+        if step == "name":
+            data["assistant_name"] = text
+            state["step"] = "emoji"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text("Шаг 2/6: эмодзи ассистента? (например: 🧠)")
+            return True
+
+        if step == "emoji":
+            data["emoji"] = text
+            state["step"] = "style"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text("Шаг 3/6: стиль? one of: direct, business, sarcastic, friendly")
+            return True
+
+        if step == "style":
+            data["style"] = text
+            state["step"] = "tone"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text("Шаг 4/6: тональность (свободный текст), например: Прямой, без воды")
+            return True
+
+        if step == "tone":
+            data["tone_modifier"] = text
+            state["step"] = "task"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text("Шаг 5/6: профиль задач? one of: business-analysis, devops, creativity, coding, other")
+            return True
+
+        if step == "task":
+            data["task_mode"] = text
+            state["step"] = "desc"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text("Шаг 6/6: кто ты и чем занимаемся?")
+            return True
+
+        if step == "desc":
+            data["user_description"] = text
+            auth = await self._auth_or_reject(update)
+            if not auth:
+                return True
+            token, _ = auth
+            res = await self.client.soul_setup(token, data)
+            await self._reply_api_result(update, res)
+            context.user_data.pop("soul_setup_auto", None)
+            return True
+
+        context.user_data.pop("soul_setup_auto", None)
+        return False
+
+    async def _reply_api_result(self, update: Update, result: dict) -> None:
+        payload = self._sanitize_reply_payload(result.get("payload"))
+        if result["status"] == 200:
+            if isinstance(payload, dict):
+                soul_setup_text = self._format_soul_setup_success(payload)
+                if soul_setup_text:
+                    await update.effective_message.reply_text(soul_setup_text)
+                    return
+            await update.effective_message.reply_text(_safe_json(payload))
+            return
+        await update.effective_message.reply_text(f"Error {result['status']}: {_safe_json(payload)}")
+
+    async def _ensure_soul_ready_for_chat(
+        self,
+        update: Update,
+        token: str,
+        context: ContextTypes.DEFAULT_TYPE | None = None,
+    ) -> bool:
         me = await self.client.get_me(token)
         if me.get("status") != 200:
             await self._reply_api_result(update, me)
@@ -310,12 +426,15 @@ class TelegramAdapter(MessengerAdapter):
 
         payload = me.get("payload", {})
         if payload.get("requires_soul_setup"):
-            first_question = payload.get("soul_onboarding", {}).get("first_question") or "Кто ты и чем занимаемся?"
-            await update.effective_message.reply_text(
-                "Перед первым использованием нужно один раз выполнить SOUL setup.\n"
-                "Запусти /soul_setup\n"
-                f"Первый вопрос: {first_question}"
-            )
+            if context is not None:
+                await self._begin_auto_soul_setup(update, context)
+            else:
+                first_question = payload.get("soul_onboarding", {}).get("first_question") or "Кто ты и чем занимаемся?"
+                await update.effective_message.reply_text(
+                    "Перед первым использованием нужно один раз выполнить SOUL setup.\n"
+                    "Запусти /soul_setup\n"
+                    f"Первый вопрос: {first_question}"
+                )
             return False
 
         return True
@@ -332,10 +451,8 @@ class TelegramAdapter(MessengerAdapter):
 
         payload = me["payload"]
         if payload.get("requires_soul_setup"):
-            await update.effective_message.reply_text(
-                f"Привет, {username}. Нужна первичная SOUL-настройка. Запусти /soul_setup\n"
-                f"Первый вопрос: Кто ты и чем занимаемся?"
-            )
+            await update.effective_message.reply_text(f"Привет, {username}.")
+            await self._begin_auto_soul_setup(update, context)
             return
 
         await update.effective_message.reply_text("Ассистент готов. Пиши сообщение или /help")
@@ -405,19 +522,23 @@ class TelegramAdapter(MessengerAdapter):
         if not text:
             await update.effective_message.reply_text("Использование: /chat <message>")
             return
-        await self._chat(update, text)
+        if await self._handle_auto_soul_setup(update, context):
+            return
+        await self._chat(update, text, context)
 
     async def chat_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message or not update.effective_message.text:
             return
-        await self._chat(update, update.effective_message.text)
+        if await self._handle_auto_soul_setup(update, context):
+            return
+        await self._chat(update, update.effective_message.text, context)
 
-    async def _chat(self, update: Update, text: str) -> None:
+    async def _chat(self, update: Update, text: str, context: ContextTypes.DEFAULT_TYPE | None = None) -> None:
         auth = await self._auth_or_reject(update)
         if not auth:
             return
         token, _ = auth
-        soul_ready = await self._ensure_soul_ready_for_chat(update, token)
+        soul_ready = await self._ensure_soul_ready_for_chat(update, token, context)
         if not soul_ready:
             return
         telegram_user_id = update.effective_user.id if update.effective_user else 0
