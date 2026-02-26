@@ -423,8 +423,11 @@ class TelegramAdapter(MessengerAdapter):
         telegram_user_id = update.effective_user.id if update.effective_user else 0
         res = await self.client.chat(token, telegram_user_id, text)
         if res["status"] == 200:
-            payload = res["payload"]
-            await update.effective_message.reply_text(payload.get("response", ""))
+            payload = res.get("payload") or {}
+            response_text = str(payload.get("response") or "").strip()
+            if not response_text:
+                response_text = "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
+            await update.effective_message.reply_text(response_text)
             for artifact in payload.get("artifacts", []):
                 file_base64 = artifact.get("file_base64")
                 if not file_base64:

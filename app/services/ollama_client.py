@@ -10,6 +10,19 @@ class OllamaClient:
         self._client = AsyncClient(host=settings.OLLAMA_BASE_URL)
 
     @staticmethod
+    def _field(obj: object, name: str) -> object | None:
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    def _extract_message_content(self, response: object) -> str:
+        message = self._field(response, "message")
+        if message is None:
+            return ""
+        content = self._field(message, "content")
+        return str(content or "")
+
+    @staticmethod
     def _normalize_embedding_dim(vector: list[float]) -> list[float]:
         target_dim = int(settings.EMBEDDING_DIM)
         if target_dim <= 0:
@@ -28,10 +41,7 @@ class OllamaClient:
             stream=stream,
             options=options or {},
         )
-        message = response.get("message") if isinstance(response, dict) else None
-        if isinstance(message, dict):
-            return str(message.get("content") or "")
-        return ""
+        return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
         stream = await self._client.chat(
@@ -41,21 +51,16 @@ class OllamaClient:
             options=options or {},
         )
         async for chunk in stream:
-            if not isinstance(chunk, dict):
-                continue
-            message = chunk.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
+            content = self._extract_message_content(chunk)
             if content:
-                yield str(content)
+                yield content
 
     async def embeddings(self, text: str) -> list[float]:
         response = await self._client.embed(
             model="nomic-embed-text",
             input=[text],
         )
-        embeddings = response.get("embeddings") if isinstance(response, dict) else None
+        embeddings = self._field(response, "embeddings")
         if isinstance(embeddings, list) and embeddings:
             first = embeddings[0]
             if isinstance(first, list):
