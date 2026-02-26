@@ -18,7 +18,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-services_output="$(docker compose "${COMPOSE_FILES[@]}" --profile multi ps --status running --services 2>/dev/null || true)"
+services_output="$(docker compose "${COMPOSE_FILES[@]}" --profile multi ps --status running --format '{{.Service}}' 2>/dev/null || true)"
+services_output="$(echo "$services_output" | tr -d '\r')"
 if [[ -z "$services_output" ]]; then
   echo "ERROR: no running services found for multi profile"
   exit 1
