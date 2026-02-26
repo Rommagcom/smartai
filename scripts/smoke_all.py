@@ -2,6 +2,7 @@ import asyncio
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.core.config import settings
 from app.services.scheduler_service import scheduler_service
 from scripts.smoke_api_flow import run as run_api_flow
 from scripts.smoke_admin_access import run as run_admin_access
@@ -23,56 +24,69 @@ def reset_scheduler() -> None:
 
 
 async def run() -> None:
-    print("RUN_SMOKE_API_FLOW")
-    await run_api_flow()
+    original_scheduler_enabled = settings.SCHEDULER_ENABLED
+    original_worker_enabled = settings.WORKER_ENABLED
+    original_ws_fanout_enabled = settings.WS_FANOUT_REDIS_ENABLED
 
-    reset_scheduler()
+    settings.SCHEDULER_ENABLED = False
+    settings.WORKER_ENABLED = False
+    settings.WS_FANOUT_REDIS_ENABLED = False
 
-    print("RUN_SMOKE_ADMIN_ACCESS")
-    await run_admin_access()
+    try:
+        print("RUN_SMOKE_API_FLOW")
+        await run_api_flow()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_WS_CRON")
-    await run_ws_cron()
+        print("RUN_SMOKE_ADMIN_ACCESS")
+        await run_admin_access()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_MEMORY_DOCS")
-    await run_memory_docs()
+        print("RUN_SMOKE_WS_CRON")
+        await run_ws_cron()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_CHAT_TOOLS_REMINDERS")
-    await run_chat_tools_reminders()
+        print("RUN_SMOKE_MEMORY_DOCS")
+        await run_memory_docs()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_CHAT_SELF_SERVICE")
-    await run_chat_self_service()
+        print("RUN_SMOKE_CHAT_TOOLS_REMINDERS")
+        await run_chat_tools_reminders()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_INTEGRATIONS")
-    await run_integrations()
+        print("RUN_SMOKE_CHAT_SELF_SERVICE")
+        await run_chat_self_service()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_ONBOARDING_STEP")
-    await run_onboarding_step()
+        print("RUN_SMOKE_INTEGRATIONS")
+        await run_integrations()
 
-    reset_scheduler()
+        reset_scheduler()
 
-    print("RUN_SMOKE_TELEGRAM_BRIDGE")
-    await run_telegram_bridge()
+        print("RUN_SMOKE_ONBOARDING_STEP")
+        await run_onboarding_step()
 
-    print("RUN_SMOKE_WORKER_QUEUE")
-    await run_worker_queue()
+        reset_scheduler()
 
-    print("RUN_SMOKE_WORKER_CHAT_FLOW")
-    await run_worker_chat_flow()
+        print("RUN_SMOKE_TELEGRAM_BRIDGE")
+        await run_telegram_bridge()
 
-    print("SMOKE_ALL_OK")
+        print("RUN_SMOKE_WORKER_QUEUE")
+        await run_worker_queue()
+
+        print("RUN_SMOKE_WORKER_CHAT_FLOW")
+        await run_worker_chat_flow()
+
+        print("SMOKE_ALL_OK")
+    finally:
+        settings.SCHEDULER_ENABLED = original_scheduler_enabled
+        settings.WORKER_ENABLED = original_worker_enabled
+        settings.WS_FANOUT_REDIS_ENABLED = original_ws_fanout_enabled
 
 
 if __name__ == "__main__":

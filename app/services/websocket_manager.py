@@ -31,6 +31,7 @@ class ConnectionManager:
             return
         if self._pubsub_task and not self._pubsub_task.done():
             return
+        self._redis = None
         self._pubsub_task = asyncio.create_task(self._fanout_listener())
 
     async def stop(self) -> None:
@@ -151,7 +152,8 @@ class ConnectionManager:
                 details={"error": str(exc)},
             )
         finally:
-            await pubsub.close()
+            with contextlib.suppress(Exception):
+                await pubsub.close()
 
     def connected_user_ids(self) -> list[str]:
         return list(self.active_connections.keys())
