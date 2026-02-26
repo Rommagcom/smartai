@@ -12,6 +12,13 @@ from app.services.tool_orchestrator_service import tool_orchestrator_service
 
 class ChatService:
     @staticmethod
+    def _llm_unavailable_fallback() -> str:
+        return (
+            "Сервис генерации ответа сейчас временно недоступен. "
+            "Повторите запрос через 10–30 секунд."
+        )
+
+    @staticmethod
     def _is_timezone_query(user_message: str) -> bool:
         lowered = user_message.strip().lower()
         patterns = [
@@ -176,8 +183,14 @@ class ChatService:
 
     async def build_context(self, db: AsyncSession, user: User, session_id: UUID, current_message: str) -> tuple[list[dict], list[str], list[str]]:
         recent = await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=12)
-        facts = await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
-        rag_chunks = await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
+        try:
+            facts = await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
+        except Exception:
+            facts = []
+        try:
+            rag_chunks = await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
+        except Exception:
+            rag_chunks = []
 
         memory_lines = [f"- [{f.fact_type}] {f.content}" for f in facts]
         rag_lines = [f"- ({c['source_doc']}) {c['chunk_text']}" for c in rag_chunks]
@@ -236,15 +249,21 @@ class ChatService:
                 safe_tool_calls.append(safe_call)
 
             if safe_tool_calls:
-                answer = await tool_orchestrator_service.compose_final_answer(
-                    system_prompt=user.system_prompt_template,
-                    user_message=user_message,
-                    tool_calls=safe_tool_calls,
-                    response_hint=response_hint,
-                )
+                try:
+                    answer = await tool_orchestrator_service.compose_final_answer(
+                        system_prompt=user.system_prompt_template,
+                        user_message=user_message,
+                        tool_calls=safe_tool_calls,
+                        response_hint=response_hint,
+                    )
+                except Exception:
+                    answer = self._llm_unavailable_fallback()
                 return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
-        answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
+        try:
+            answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
+        except Exception:
+            answer = self._llm_unavailable_fallback()
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
 

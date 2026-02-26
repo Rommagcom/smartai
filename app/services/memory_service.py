@@ -198,7 +198,10 @@ class MemoryService:
     async def retrieve_relevant_memories(self, db: AsyncSession, user_id: UUID, query: str, top_k: int = 5) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
         await self.apply_importance_decay(db, user_id)
-        query_embedding = await ollama_client.embeddings(query)
+        try:
+            query_embedding = await ollama_client.embeddings(query)
+        except Exception:
+            return []
         result = await db.execute(
             select(LongTermMemory)
             .where(LongTermMemory.user_id == user_id, self._active_filter(now))
