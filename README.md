@@ -1,54 +1,33 @@
 # AI Personal Assistant Backend (FastAPI)
 
-Backend-only система персонального AI ассистента на стеке:
+Backend-сервис персонального AI ассистента на стеке:
 - FastAPI + WebSockets
 - PostgreSQL (+pgvector)
 - Milvus
-- Ollama (`kimi-k2.5`)
+- Ollama (`kimi-k2.5:cloud`)
 - APScheduler (cron)
 
 ## Оглавление
-- [1) Обзор возможностей](#1-обзор-возможностей)
-- [2) Запуск и окружения](#2-запуск-и-окружения)
+- [1) Быстрый старт в Docker](#1-быстрый-старт-в-docker)
+- [2) Развертывание на VDS](#2-развертывание-на-vds)
 - [3) Тестирование и релизный контроль](#3-тестирование-и-релизный-контроль)
-- [4) API и product-flow](#4-api-и-product-flow)
-- [5) Безопасность](#5-безопасность)
-- [6) Наблюдаемость и масштабирование](#6-наблюдаемость-и-масштабирование)
-- [7) Пользовательские сценарии](#7-пользовательские-сценарии)
-- [8) Telegram Bot (модуль мессенджера)](#8-telegram-bot-модуль-мессенджера)
-- [9) Web tools и мессенджеры](#9-web-tools-и-мессенджеры)
-- [10) Production security checklist](#10-production-security-checklist)
+- [4) Обзор возможностей](#4-обзор-возможностей)
+- [5) API и product-flow](#5-api-и-product-flow)
+- [6) Безопасность](#6-безопасность)
+- [7) Наблюдаемость и масштабирование](#7-наблюдаемость-и-масштабирование)
+- [8) Пользовательские сценарии](#8-пользовательские-сценарии)
+- [9) Telegram Bot (модуль мессенджера)](#9-telegram-bot-модуль-мессенджера)
+- [10) Web tools и мессенджеры](#10-web-tools-и-мессенджеры)
+- [11) Локальный запуск без Docker](#11-локальный-запуск-без-docker)
+- [12) Production security checklist](#12-production-security-checklist)
 
-## 1) Обзор возможностей
-- Неголосовой чат-ассистент (REST + WebSocket, Telegram)
-- Локальная интеграция с Ollama
-- Short-term memory (история сессии)
-- Long-term memory (таблица `long_term_memory` + embeddings)
-- Векторная БД Milvus для документов (upload/search)
-- Планировщик cron (создание/удаление/исполнение задач)
-- Самоадаптация по feedback (`/chat/self-improve`)
-- Самоулучшение: авто-извлечение фактов из диалога в long-term memory
-- Исполнение Python кода в Docker sandbox
-- Бесплатные web tools: `web_search` (DuckDuckGo HTML / SearxNG), `web_fetch` (HTTP fetch)
-- Browser automation через Chromium/Playwright (extract text, screenshot, page PDF)
-- Генерация PDF-документов (base64 artifact + Telegram отправка файлом)
-- Интеграции с внешними API (универсальный executor)
-- Мультипользовательская изоляция через `user_id` во всех сущностях
-- Регистрация/логин пользователей (JWT access/refresh)
-- SOUL onboarding (обязательная первичная настройка перед первым чатом)
-- Проактивные сообщения (периодические и по cron)
-- Единая точка входа через `POST /api/v1/chat`: ассистент сам выбирает и вызывает нужный инструмент
+## 1) Быстрый старт в Docker
+Рекомендуемый минимальный путь запуска:
+1. `cp .env.example .env`
+2. `docker compose up -d --build`
+3. `docker compose exec api alembic upgrade head`
+4. открыть `http://localhost:8000/docs`
 
-### Структура проекта
-- `app/api/v1/endpoints` — HTTP и WebSocket endpoints
-- `app/services` — Ollama, RAG, память, планировщик, sandbox, API executor
-- `app/workers` — базовый модуль фоновых worker-задач (queue/runner/handlers)
-- `app/models` — SQLAlchemy модели
-- `alembic` — миграции
-- `integrations/messengers` — модульные интеграции мессенджеров (Telegram + база для новых модулей)
-
-## 2) Запуск и окружения
-### Быстрый старт (Docker)
 1. Создайте `.env` из `.env.example`:
    - `cp .env.example .env`
 2. Поднимите стек:
@@ -58,7 +37,22 @@ Backend-only система персонального AI ассистента �
 4. Откройте Swagger:
    - `http://localhost:8000/docs`
 
-### VDS: API/бот на хосте, базы в Docker
+### Ollama (обязательно перед smoke/k6)
+- Для Docker-режима backend должен ходить в Ollama по внутреннему имени сервиса:
+   - `OLLAMA_BASE_URL=http://ollama:11434`
+- Для запуска API на хосте (вне Docker) используйте:
+   - `OLLAMA_BASE_URL=http://127.0.0.1:11434`
+- Убедитесь, что модель загружена:
+   - `docker compose exec ollama ollama pull kimi-k2.5:cloud`
+   - `docker compose exec ollama ollama list`
+- Быстрая проверка доступности Ollama из контейнера API:
+   - `docker compose exec api sh -lc "wget -qO- http://ollama:11434/api/tags | head"`
+
+Если в `k6` высокий `http_req_failed` и `POST /chat` часто не `200`, первым делом проверьте корректность `OLLAMA_BASE_URL` в рабочем `.env` (а не только в `.env.example`) и перезапустите сервисы:
+- `docker compose up -d --build api scheduler-leader worker telegram-bot ollama`
+
+## 2) Развертывание на VDS
+### API/бот на хосте, базы в Docker
 1. Поднимите только базы:
    - `docker compose -f docker-compose.db.yml up -d`
 2. Примените миграции на хосте:
@@ -86,17 +80,9 @@ Backend-only система персонального AI ассистента �
 - `deploy/systemd/assistant-telegram-bot.service` — systemd unit для Telegram-бота
 - `deploy/systemd/INSTALL.md` — пошаговая установка
 
-### Локальный запуск без Docker
-1. Установите зависимости:
-   - `pip install -r requirements.txt`
-2. Поднимите PostgreSQL + Milvus + Ollama
-3. Сконфигурируйте `.env`
-4. Примените миграции:
-   - `alembic upgrade head`
-5. Запустите API:
-   - `uvicorn app.main:app --reload`
-6. (Опционально) запустите worker:
-   - `python -m app.workers.run`
+Короткая проверка после запуска:
+- `curl -f http://127.0.0.1:8000/health`
+- `sudo systemctl status assistant-api assistant-scheduler-leader assistant-worker assistant-telegram-bot --no-pager`
 
 ## 3) Тестирование и релизный контроль
 ### Smoke-проверки
@@ -123,8 +109,44 @@ Backend-only система персонального AI ассистента �
 - Chat tools + reminders E2E (`tool chain + cron_add via /chat`):
    - `python scripts/smoke_chat_tools_reminders.py`
 
-## 4) API и product-flow
-### Ключевые endpoint'ы
+### Быстрые команды релизной проверки
+- Базовый pre-release (multi + topology + smoke):
+   - `make pre-release WORKERS=3`
+- Pre-release с нагрузкой k6 через Docker:
+   - `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker`
+- Альтернатива через `just`:
+   - `just pre-release` (переменные: `WORKERS`, `BASE_URL`, `RUN_K6`, `K6_MODE`, `SMOKE_MODE`)
+
+## 4) Обзор возможностей
+- Неголосовой чат-ассистент (REST + WebSocket, Telegram)
+- Локальная интеграция с Ollama
+- Short-term memory (история сессии)
+- Long-term memory (таблица `long_term_memory` + embeddings)
+- Векторная БД Milvus для документов (upload/search)
+- Планировщик cron (создание/удаление/исполнение задач)
+- Самоадаптация по feedback (`/chat/self-improve`)
+- Самоулучшение: авто-извлечение фактов из диалога в long-term memory
+- Исполнение Python кода в Docker sandbox
+- Бесплатные web tools: `web_search` (DuckDuckGo HTML / SearxNG), `web_fetch` (HTTP fetch)
+- Browser automation через Chromium/Playwright (extract text, screenshot, page PDF)
+- Генерация PDF-документов (base64 artifact + Telegram отправка файлом)
+- Интеграции с внешними API (универсальный executor)
+- Мультипользовательская изоляция через `user_id` во всех сущностях
+- Регистрация/логин пользователей (JWT access/refresh)
+- SOUL onboarding (обязательная первичная настройка перед первым чатом)
+- Проактивные сообщения (периодические и по cron)
+- Единая точка входа через `POST /api/v1/chat`: ассистент сам выбирает и вызывает нужный инструмент
+
+### Структура проекта
+- `app/api/v1/endpoints` — HTTP и WebSocket endpoints
+- `app/services` — Ollama, RAG, память, планировщик, sandbox, API executor
+- `app/workers` — базовый модуль фоновых worker-задач (queue/runner/handlers)
+- `app/models` — SQLAlchemy модели
+- `alembic` — миграции
+- `integrations/messengers` — модульные интеграции мессенджеров (Telegram + база для новых модулей)
+
+## 5) API и product-flow
+### Ключевые эндпоинты
 - `POST /api/v1/auth/register`
 - `POST /api/v1/auth/login`
 - `GET /api/v1/users/me`
@@ -217,7 +239,7 @@ Backend-only система персонального AI ассистента �
 - `save` сохраняет интеграцию (опционально с обязательным успешным test).
 - `GET /api/v1/integrations/{integration_id}/health` выполняет health-check для уже сохранённой интеграции.
 
-## 5) Безопасность
+## 6) Безопасность
 ### Security hardening
 - `auth_data` интеграций шифруется в БД (Fernet) перед сохранением.
 - Ротация ключей поддерживается через keyring: `AUTH_DATA_ENCRYPTION_KEYS` (формат `kid:key,kid:key`) и `AUTH_DATA_ACTIVE_KEY_ID`.
@@ -248,7 +270,7 @@ Backend-only система персонального AI ассистента �
 - На период ротации всегда держите минимум 2 ключа в keyring (старый + новый).
 - Убедитесь, что интеграционные smoke/health-check проходят до удаления старого ключа.
 
-## 6) Наблюдаемость и масштабирование
+## 7) Наблюдаемость и масштабирование
 ### Observability
 - Structured logs: backend пишет JSON-логи (`ts`, `level`, `logger`, `message`, контекстные поля).
 - Метрики собираются in-memory с latency/success/failure по ключевым операциям (`worker.*`, `scheduler.*`, `telegram_bridge.*`).
@@ -357,67 +379,43 @@ Telegram polling soak (backend-side, без Telegram API):
    - `docker run --rm -i --network host -v "$PWD:/work" -w /work grafana/k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_telegram_polling_soak.js`
 - Сценарий делает длительный `worker-results/poll` + фоновую генерацию результатов через очередь (`POST /chat` с worker enqueue intent).
 
-Упрощённый запуск через Makefile:
-- `make load-chat BASE_URL=http://localhost:8000/api/v1`
-- `make load-telegram-soak BASE_URL=http://localhost:8000/api/v1`
-- `make multi-up WORKERS=3`
-- `make multi-check WORKERS=3`
-- `make smoke-all`
-- `make pre-release WORKERS=3` (поднять multi + проверить топологию + прогнать smoke)
-- `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker` (дополнительно прогнать k6)
-- По умолчанию smoke запускается внутри контейнера `api` (`SMOKE_MODE=container`); хостовый режим: `SMOKE_MODE=host`.
+Команды для smoke/pre-release и варианты через `make`/`just` см. в разделе `3) Тестирование и релизный контроль`.
 
-Альтернатива через justfile:
-- `just load-chat` (или `BASE_URL=http://localhost:8000/api/v1 just load-chat`)
-- `just load-telegram-soak`
-- `just multi-up` (или `WORKERS=3 just multi-up`)
-- `just multi-check`
-- `just smoke-all`
-- `just pre-release` (переменные: `WORKERS`, `BASE_URL`, `RUN_K6`, `K6_MODE`, `SMOKE_MODE`)
+Подготовку Ubuntu и VDS-инструкции см. в разделе `2) Развертывание на VDS`.
 
-Ubuntu prerequisites (22.04/24.04):
-- Установить базовые инструменты:
-   - `sudo apt update`
-   - `sudo apt install -y python3 python3-venv python3-pip make curl ca-certificates gnupg`
-- Установить Docker Engine + Compose plugin (официальный репозиторий Docker):
-   - `sudo install -m 0755 -d /etc/apt/keyrings`
-   - `curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg`
-   - `sudo chmod a+r /etc/apt/keyrings/docker.gpg`
-   - `echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null`
-   - `sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
-   - `sudo usermod -aG docker $USER` (после этого перелогиниться)
-- Установить `just`:
-   - `sudo apt install -y just` (если пакет доступен в вашем репозитории)
-   - или через cargo: `cargo install just`
-- Установить `k6`:
-   - через Docker (без установки бинарника):
-      - `docker run --rm grafana/k6 version`
-   - или нативно через репозиторий Grafana:
-      - `sudo gpg -k`
-      - `sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69`
-      - `echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list`
-      - `sudo apt update && sudo apt install -y k6`
-- Проверка окружения:
-   - `docker --version`
-   - `docker compose version`
-   - `just --version` (опционально)
-   - `k6 version` (если установлен нативно)
-
-Быстрый старт на Ubuntu:
-- `cd backend`
-- `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`
-- `python3 -m venv .venv && source .venv/bin/activate`
-- `pip install -r requirements.txt`
-- `python -m scripts.smoke_all` (или `make smoke-all`, `just smoke-all`)
-- `k6 run -e BASE_URL=http://localhost:8000/api/v1 scripts/load/k6_chat_worker_burst.js`
-
-Pre-release в одну команду (Ubuntu):
-- `cd backend`
-- `chmod +x scripts/pre_release_check.sh`
-- `make pre-release WORKERS=3`
-- С k6: `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=native`
-- С k6 через Docker: `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker`
-- Если нужен запуск smoke на хосте (не в контейнере): `make pre-release WORKERS=3 SMOKE_MODE=host`
+Production go-live checklist:
+1. Секреты и доступ:
+   - Ротировать `TELEGRAM_BOT_TOKEN`, `JWT_SECRET_KEY`, `TELEGRAM_BACKEND_BRIDGE_SECRET`.
+   - Проверить, что секреты не хранятся в git и `.env.example` содержит только placeholder-значения.
+2. Бэкап перед выкатом:
+   - Сделать `pg_dump` рабочей БД и проверить, что файл бэкапа читается.
+3. Подготовка образов:
+   - `docker compose build --no-cache api scheduler-leader worker telegram-bot`.
+4. Проверка Ollama:
+   - Убедиться, что в рабочем `.env` для Docker указано `OLLAMA_BASE_URL=http://ollama:11434`.
+   - Проверить наличие модели: `docker compose exec ollama ollama pull kimi-k2.5:cloud` и `docker compose exec ollama ollama list`.
+   - Проверить доступность Ollama из API-контейнера: `docker compose exec api sh -lc "wget -qO- http://ollama:11434/api/tags | head"`.
+5. Запуск multi-instance:
+   - `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`.
+6. Миграции:
+   - `docker compose exec -T api alembic upgrade head`.
+7. Предрелизная проверка:
+   - `make pre-release WORKERS=3`.
+8. Нагрузочная валидация (рекомендуется):
+   - `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker`.
+9. Runtime-валидация:
+   - `GET /health` возвращает `200`.
+   - `GET /api/v1/observability/metrics/prometheus` доступен для admin.
+10. Функциональная sanity-проверка:
+   - Чат: `setup -> tools -> integrations -> reminders`.
+   - Worker delivery: результат приходит в poll/WebSocket/Telegram.
+11. Мониторинг после релиза (первые 24 часа):
+   - Контролировать `assistant_worker_process_task_failed`, `assistant_telegram_bridge_poll_results_failed`, `assistant_scheduler_execute_action_failed`.
+   - Проверять `GET /api/v1/observability/alerts?limit=200` на аномальный рост.
+12. План отката:
+   - Зафиксировать шаги rollback (предыдущие образы + restore из бэкапа).
+13. Релизная фиксация:
+   - Обновить changelog/тег релиза и сохранить ссылки на smoke/k6 логи.
 
 Что смотреть в метриках/логах:
 - `assistant_worker_process_task_failed`, `assistant_worker_process_task_success`.
@@ -555,7 +553,7 @@ services:
 4. Быстрая проверка метрик:
    - открой `http://localhost:9090/graph` и выполни запрос `assistant_observability_up`.
 
-## 7) Пользовательские сценарии
+## 8) Пользовательские сценарии
 ### Напоминания на естественном языке
 - В чате можно писать без cron-формата: `запиши на 25 февраля на 9:00 к врачу`, `на завтра на 9:00`, `сегодня на 23:00`.
 - Повторяющиеся задачи тоже поддержаны: `каждый день в 9:00 курс валют и погода`, `каждую пятницу в 9:00 отчёт`.
@@ -575,7 +573,7 @@ services:
 - Cleanup: `POST /api/v1/memory/cleanup` физически удаляет просроченные неприкреплённые/неблокированные факты пользователя.
 - При создании напоминаний из естественного языка timezone берётся из `preferences.timezone` (если не задано — `Europe/Moscow`).
 
-## 8) Telegram Bot (модуль мессенджера)
+## 9) Telegram Bot (модуль мессенджера)
 - Запуск (локально):
    - `python -m integrations.messengers.telegram.run`
 - Запуск (docker):
@@ -607,7 +605,7 @@ services:
    - `GET /api/v1/telegram/access/check/{telegram_user_id}` с заголовком `X-Telegram-Bridge-Secret`.
 - Первый зарегистрированный пользователь backend автоматически получает `is_admin=true`.
 
-## 9) Web tools и мессенджеры
+## 10) Web tools и мессенджеры
 ### Web tools без платных сервисов
 - По умолчанию `web_search` использует бесплатный DuckDuckGo HTML endpoint.
 - Можно подключить self-hosted SearxNG (тоже бесплатно) через `SEARXNG_BASE_URL`.
@@ -619,7 +617,19 @@ services:
 - Telegram-реализация: `integrations/messengers/telegram`
 - Для нового мессенджера: создать новый модуль рядом с Telegram и реализовать `MessengerAdapter`.
 
-## 10) Production security checklist
+## 11) Локальный запуск без Docker
+1. Установите зависимости:
+   - `pip install -r requirements.txt`
+2. Поднимите PostgreSQL + Milvus + Ollama
+3. Сконфигурируйте `.env`
+4. Примените миграции:
+   - `alembic upgrade head`
+5. Запустите API:
+   - `uvicorn app.main:app --reload`
+6. (Опционально) запустите worker:
+   - `python -m app.workers.run`
+
+## 12) Production security checklist
 - Для production обязательно:
   - сменить `JWT_SECRET_KEY`
   - включить RLS политики (`scripts/rls.sql`)
