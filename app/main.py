@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.db.session import close_engine
 from app.services.alerting_service import alerting_service
 from app.services.http_client_service import http_client_service
 from app.services.milvus_service import milvus_service
@@ -69,6 +70,16 @@ async def lifespan(app: FastAPI):
             component="startup",
             severity="warning",
             message="HTTP client close failed",
+            details={"error": str(exc)},
+        )
+    try:
+        await close_engine()
+    except Exception as exc:
+        logger.warning("db engine close failed", extra={"context": {"error": str(exc)}})
+        alerting_service.emit(
+            component="startup",
+            severity="warning",
+            message="DB engine close failed",
             details={"error": str(exc)},
         )
     logger.info("application stopped", extra={"context": {"component": "app", "event": "shutdown"}})

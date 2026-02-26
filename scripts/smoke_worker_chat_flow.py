@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import json
 import os
+from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -128,6 +129,7 @@ async def fake_build_context(db, user, session_id, current_message):
 
 async def run() -> None:
     session_factory, engine = await init_db()
+    local_result_queues: dict[str, deque[dict]] = defaultdict(deque)
 
     original_session_local = worker_module.AsyncSessionLocal
     original_redis = worker_service._redis
@@ -138,6 +140,27 @@ async def run() -> None:
     original_chat = ollama_client.chat
     original_embeddings = ollama_client.embeddings
     original_retrieve_context = rag_service.retrieve_context
+    original_result_push = worker_result_service.push
+    original_result_pop_many = worker_result_service.pop_many
+
+    async def fake_result_push(user_id: str, payload: dict) -> None:
+        await asyncio.sleep(0)
+        local_result_queues[user_id].append(payload)
+
+    async def fake_result_pop_many(user_id: str, limit: int = 20) -> list[dict]:
+        await asyncio.sleep(0)
+        count = max(1, min(limit, 100))
+        queue = local_result_queues.get(user_id)
+        if not queue:
+            return []
+        items: list[dict] = []
+        for _ in range(count):
+            if not queue:
+                break
+            items.append(queue.popleft())
+        if not queue:
+            local_result_queues.pop(user_id, None)
+        return items
 
     worker_module.AsyncSessionLocal = session_factory
     worker_service._redis = MockRedis()
@@ -151,6 +174,8 @@ async def run() -> None:
     ollama_client.embeddings = fake_embeddings
     rag_service.retrieve_context = fake_retrieve_context
     worker_service.register_handler(WorkerJobType.WEB_FETCH, fake_worker_web_fetch)
+    worker_result_service.push = fake_result_push
+    worker_result_service.pop_many = fake_result_pop_many
 
     async def override_get_db():
         async with session_factory() as session:
@@ -227,6 +252,8 @@ async def run() -> None:
         ollama_client.chat = original_chat
         ollama_client.embeddings = original_embeddings
         rag_service.retrieve_context = original_retrieve_context
+        worker_result_service.push = original_result_push
+        worker_result_service.pop_many = original_result_pop_many
 
         await engine.dispose()
         if DB_PATH.exists():
