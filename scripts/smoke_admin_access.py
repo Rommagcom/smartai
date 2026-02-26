@@ -91,6 +91,19 @@ async def run() -> None:
         ensure(grant_user_admin.status_code == 200, f"grant admin failed: {grant_user_admin.text}")
         ensure(grant_user_admin.json().get("is_admin") is True, "regular user should become admin")
 
+        admin_metrics = client.get("/api/v1/observability/metrics", headers=user_headers)
+        ensure(admin_metrics.status_code == 200, f"admin metrics failed: {admin_metrics.text}")
+        metrics_payload = admin_metrics.json()
+        ensure("counters" in metrics_payload and "latency" in metrics_payload, f"invalid metrics payload: {metrics_payload}")
+
+        admin_alerts = client.get("/api/v1/observability/alerts?limit=50", headers=user_headers)
+        ensure(admin_alerts.status_code == 200, f"admin alerts failed: {admin_alerts.text}")
+        ensure(isinstance(admin_alerts.json().get("items"), list), f"invalid alerts payload: {admin_alerts.text}")
+
+        admin_prom = client.get("/api/v1/observability/metrics/prometheus", headers=user_headers)
+        ensure(admin_prom.status_code == 200, f"admin prometheus metrics failed: {admin_prom.text}")
+        ensure("assistant_observability_up" in admin_prom.text, "prometheus payload should contain exporter metric")
+
         revoke_initial_admin = client.patch(
             f"/api/v1/users/admin/users/{admin_id}/admin-access",
             headers=user_headers,
@@ -104,19 +117,6 @@ async def run() -> None:
             json={"is_admin": False},
         )
         ensure(revoke_last_remaining.status_code == 400, f"should protect last remaining admin: {revoke_last_remaining.text}")
-
-        admin_metrics = client.get("/api/v1/observability/metrics", headers=admin_headers)
-        ensure(admin_metrics.status_code == 200, f"admin metrics failed: {admin_metrics.text}")
-        metrics_payload = admin_metrics.json()
-        ensure("counters" in metrics_payload and "latency" in metrics_payload, f"invalid metrics payload: {metrics_payload}")
-
-        admin_alerts = client.get("/api/v1/observability/alerts?limit=50", headers=admin_headers)
-        ensure(admin_alerts.status_code == 200, f"admin alerts failed: {admin_alerts.text}")
-        ensure(isinstance(admin_alerts.json().get("items"), list), f"invalid alerts payload: {admin_alerts.text}")
-
-        admin_prom = client.get("/api/v1/observability/metrics/prometheus", headers=admin_headers)
-        ensure(admin_prom.status_code == 200, f"admin prometheus metrics failed: {admin_prom.text}")
-        ensure("assistant_observability_up" in admin_prom.text, "prometheus payload should contain exporter metric")
 
     await engine.dispose()
     if DB_PATH.exists():
