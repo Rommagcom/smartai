@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
 
     DATABASE_URL: str = "postgresql+asyncpg://assistant:${POSTGRES_PASSWORD}@localhost:5432/assistant"
+    DB_POOL_SIZE: int = 25
+    DB_MAX_OVERFLOW: int = 50
+    DB_POOL_TIMEOUT_SECONDS: int = 10
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     JWT_SECRET_KEY: str = "change-me"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
