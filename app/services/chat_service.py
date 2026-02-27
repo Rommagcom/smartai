@@ -31,6 +31,19 @@ class ChatService:
         return any(re.search(pattern, lowered) for pattern in patterns)
 
     @staticmethod
+    def _sanitize_llm_answer(text: str) -> str:
+        cleaned = str(text or "")
+        cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.strip()
+        if cleaned:
+            return cleaned
+        return (
+            "Не удалось сформировать итоговый текст ответа. "
+            "Попробуйте уточнить запрос (например: укажите город и период)."
+        )
+
+    @staticmethod
     def _timezone_answer(user: User) -> str:
         timezone_value = str((user.preferences or {}).get("timezone") or "").strip()
         if timezone_value:
@@ -258,12 +271,14 @@ class ChatService:
                     )
                 except Exception:
                     answer = self._llm_unavailable_fallback()
+                answer = self._sanitize_llm_answer(answer)
                 return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
         try:
             answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
         except Exception:
             answer = self._llm_unavailable_fallback()
+        answer = self._sanitize_llm_answer(answer)
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
 

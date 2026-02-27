@@ -34,16 +34,22 @@ class FakeContext:
     def __init__(self, args: list[str] | None = None) -> None:
         self.args = args or []
         self.user_data: dict = {}
-        self.bot = None
+        self.bot = FakeBot()
 
 
 class FakeBot:
     def __init__(self) -> None:
         self.sent_messages: list[tuple[int, str]] = []
+        self.sent_documents: list[tuple[int, str]] = []
 
     async def send_message(self, chat_id: int, text: str) -> None:
         await asyncio.sleep(0)
         self.sent_messages.append((chat_id, text))
+
+    async def send_document(self, chat_id: int, document) -> None:
+        await asyncio.sleep(0)
+        filename = str(getattr(document, "filename", "document.bin"))
+        self.sent_documents.append((chat_id, filename))
 
 
 class FakeApplication:
@@ -92,7 +98,18 @@ async def run() -> None:
     adapter.client.chat = chat_precondition
     update_chat = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat, context)
-    ensure(any("SOUL-настройка" in text for text in update_chat.effective_message.replies), "chat should ask for soul setup on 428")
+    ensure(
+        any("Обрабатываю" in text for text in update_chat.effective_message.replies),
+        "chat should send immediate async ack",
+    )
+    await asyncio.sleep(0.05)
+    ensure(
+        any(
+            "SOUL-настройка" in text or "запустил setup автоматически" in text
+            for _, text in context.bot.sent_messages
+        ),
+        "chat should notify about soul setup on 428",
+    )
 
     async def chat_ok(token: str, user_id: int, message: str):
         await asyncio.sleep(0)
@@ -101,7 +118,15 @@ async def run() -> None:
     adapter.client.chat = chat_ok
     update_chat_ok = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat_ok, context)
-    ensure(any("ok-from-backend" in text for text in update_chat_ok.effective_message.replies), "chat should return backend response")
+    ensure(
+        any("Обрабатываю" in text for text in update_chat_ok.effective_message.replies),
+        "chat should send immediate async ack",
+    )
+    await asyncio.sleep(0.05)
+    ensure(
+        any("ok-from-backend" in text for _, text in context.bot.sent_messages),
+        "chat should deliver backend response asynchronously",
+    )
 
     memory_args = ["preference|любит краткие ответы|0.8"]
     context_memory = FakeContext(args=memory_args)
