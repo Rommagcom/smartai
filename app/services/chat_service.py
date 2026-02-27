@@ -25,6 +25,7 @@ class ChatService:
             r"\bнапомин|напомни|календар|расписан",
             r"\bcron\b",
             r"\bпогод|курс|новост|поиск|найди\b",
+            r"\bинтернет|в\s+интернете|на\s+сайте|проверь\s+в\s+сети|по\s+сети\b",
             r"\bweb[_\s-]?search|web[_\s-]?fetch\b",
             r"\bbrowser|screenshot|pdf\b",
             r"\bintegration|api\b",
@@ -86,6 +87,57 @@ class ChatService:
             message = str(result.get("message") or "").strip()
             return bool(message)
         return bool(result)
+
+    @staticmethod
+    def _service_unavailable_tool_failure(tool_calls: list[dict]) -> bool:
+        service_tools = {
+            "integration_call",
+            "integrations_list",
+            "integration_health",
+            "integration_onboarding_connect",
+            "integration_onboarding_test",
+            "integration_onboarding_save",
+            "integration_add",
+        }
+        for call in tool_calls:
+            tool = str(call.get("tool") or "").strip().lower()
+            if tool not in service_tools:
+                continue
+            if bool(call.get("success")):
+                continue
+            error = str(call.get("error") or "").lower()
+            if (
+                "not found" in error
+                or "unavailable" in error
+                or "timeout" in error
+                or "connection" in error
+                or "healthcheck" in error
+                or "invalid" in error
+                or "unsupported" in error
+            ):
+                return True
+        return False
+
+    async def _append_web_search_fallback_if_needed(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        tool_calls: list[dict],
+    ) -> list[dict]:
+        if not self._service_unavailable_tool_failure(tool_calls):
+            return tool_calls
+
+        try:
+            fallback_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=[{"tool": "web_search", "arguments": {"query": user_message, "limit": 5}}],
+                max_steps=1,
+            )
+            return [*tool_calls, *fallback_calls]
+        except Exception:
+            return tool_calls
 
     @classmethod
     def _has_meaningful_tool_output(cls, tool_calls: list[dict]) -> bool:
@@ -299,6 +351,12 @@ class ChatService:
 
         planned_calls, response_hint = planned_result
         tool_calls = [*manual_tool_calls, *planned_calls]
+        tool_calls = await self._append_web_search_fallback_if_needed(
+            db=db,
+            user=user,
+            user_message=user_message,
+            tool_calls=tool_calls,
+        )
         artifacts = self._extract_artifacts(tool_calls)
 
         safe_tool_calls: list[dict] = []

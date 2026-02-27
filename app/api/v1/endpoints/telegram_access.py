@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Header, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.types import CurrentUser, DBSession
 from app.core.config import settings
 from app.models.telegram_allowed_user import TelegramAllowedUser
 from app.models.user import User
 from app.schemas.telegram_access import TelegramAccessCheck, TelegramAllowedUserCreate, TelegramAllowedUserOut
+from app.services.milvus_service import milvus_service
+from app.services.scheduler_service import scheduler_service
+from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
 
@@ -86,3 +89,67 @@ async def disable_allowed_user(
     db.add(item)
     await db.commit()
     return {"status": "disabled", "telegram_user_id": telegram_user_id}
+
+
+@router.delete("/admin/users/{telegram_user_id}")
+async def admin_delete_telegram_user_fully(
+    telegram_user_id: int,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    _require_admin(current_user)
+
+    username = f"tg_{telegram_user_id}"
+
+    allowed_result = await db.execute(select(TelegramAllowedUser).where(TelegramAllowedUser.telegram_user_id == telegram_user_id))
+    allowed_item = allowed_result.scalar_one_or_none()
+
+    user_result = await db.execute(select(User).where(User.username == username))
+    target_user = user_result.scalar_one_or_none()
+
+    if not allowed_item and not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Telegram user id not found")
+
+    if target_user and target_user.is_admin:
+        admin_count_result = await db.execute(select(func.count()).select_from(User).where(User.is_admin.is_(True)))
+        admin_count = int(admin_count_result.scalar() or 0)
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete the last admin",
+            )
+
+    if target_user:
+        user_id_str = str(target_user.id)
+        scheduler_jobs_removed = scheduler_service.remove_jobs_for_user(user_id=user_id_str)
+        try:
+            milvus_chunks_deleted = milvus_service.delete_user_chunks(user_id=user_id_str)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Telegram user deletion blocked: document storage unavailable ({exc})",
+            ) from exc
+        await worker_result_service.clear_user_results(user_id=user_id_str)
+        await db.delete(target_user)
+    else:
+        user_id_str = None
+        scheduler_jobs_removed = 0
+        milvus_chunks_deleted = 0
+
+    if allowed_item:
+        await db.delete(allowed_item)
+
+    await db.commit()
+
+    return {
+        "status": "deleted",
+        "telegram_user_id": telegram_user_id,
+        "username": username,
+        "user_id": user_id_str,
+        "cleanup": {
+            "telegram_whitelist_deleted": bool(allowed_item),
+            "scheduler_jobs_removed": scheduler_jobs_removed,
+            "milvus_chunks_deleted": milvus_chunks_deleted,
+            "worker_results_cleared": bool(target_user),
+        },
+    }

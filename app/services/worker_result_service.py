@@ -70,6 +70,15 @@ class WorkerResultService:
             self._results.pop(user_id, None)
         return items
 
+    async def clear_user_results(self, user_id: str) -> None:
+        try:
+            redis = self._get_redis()
+            await asyncio.wait_for(redis.delete(self._key(user_id)), timeout=0.5)
+        except Exception:
+            self._results.pop(user_id, None)
+            return
+        self._results.pop(user_id, None)
+
     def _pop_many_in_memory(self, user_id: str, limit: int) -> list[dict]:
         queue = self._results.get(user_id)
         if not queue:

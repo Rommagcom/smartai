@@ -117,6 +117,8 @@ Backend использует официальный Python SDK `ollama` для �
    - `python scripts/smoke_onboarding_step.py`
 - Telegram bridge flow (хендлеры `start/chat/memory_add` без real Telegram API):
    - `python scripts/smoke_telegram_bridge.py`
+- Telegram admin full-delete flow (`DELETE /telegram/admin/users/{telegram_user_id}`):
+   - `python scripts/smoke_telegram_admin_delete.py`
 - Worker queue flow (Redis-backed enqueue/dedup/retry/success/fail + poll):
    - `python scripts/smoke_worker_queue.py`
 - Worker chat API flow (`POST /chat` -> `worker_enqueue` -> worker run -> `worker-results/poll`):
@@ -616,6 +618,7 @@ services:
    - `GET /api/v1/telegram/admin/access`
    - `POST /api/v1/telegram/admin/access`
    - `DELETE /api/v1/telegram/admin/access/{telegram_user_id}`
+   - `DELETE /api/v1/telegram/admin/users/{telegram_user_id}` (admin, full delete)
 - Проверка доступа для bridge:
    - `GET /api/v1/telegram/access/check/{telegram_user_id}` с заголовком `X-Telegram-Bridge-Secret`.
 - Первый зарегистрированный пользователь backend автоматически получает `is_admin=true`.

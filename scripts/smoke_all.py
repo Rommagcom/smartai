@@ -12,6 +12,7 @@ from scripts.smoke_integrations import run as run_integrations
 from scripts.smoke_memory_docs import run as run_memory_docs
 from scripts.smoke_onboarding_step import run as run_onboarding_step
 from scripts.smoke_telegram_bridge import run as run_telegram_bridge
+from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
 from scripts.smoke_worker_chat_flow import run as run_worker_chat_flow
 from scripts.smoke_worker_queue import run as run_worker_queue
 from scripts.smoke_ws_cron import run as run_ws_cron
@@ -75,6 +76,11 @@ async def run() -> None:
 
         print("RUN_SMOKE_TELEGRAM_BRIDGE")
         await run_telegram_bridge()
+
+        reset_scheduler()
+
+        print("RUN_SMOKE_TELEGRAM_ADMIN_DELETE")
+        await run_telegram_admin_delete()
 
         print("RUN_SMOKE_WORKER_QUEUE")
         await run_worker_queue()

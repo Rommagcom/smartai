@@ -16,6 +16,17 @@ from app.services.ollama_client import ollama_client
 
 class MemoryService:
     @staticmethod
+    def _zero_embedding() -> list[float]:
+        dim = max(1, int(settings.EMBEDDING_DIM))
+        return [0.0] * dim
+
+    @staticmethod
+    def _is_zero_vector(vector: list[float]) -> bool:
+        if not vector:
+            return True
+        return all(abs(float(value)) < 1e-12 for value in vector)
+
+    @staticmethod
     def _normalized_content(content: str) -> str:
         text = re.sub(r"\s+", " ", str(content or "").strip().lower())
         return text
@@ -177,7 +188,10 @@ class MemoryService:
             await db.flush()
             return existing
 
-        vector = await ollama_client.embeddings(content)
+        try:
+            vector = await ollama_client.embeddings(content)
+        except Exception:
+            vector = self._zero_embedding()
         memory = LongTermMemory(
             user_id=user_id,
             fact_type=fact_type,
@@ -201,14 +215,35 @@ class MemoryService:
         try:
             query_embedding = await ollama_client.embeddings(query)
         except Exception:
-            return []
-        result = await db.execute(
-            select(LongTermMemory)
-            .where(LongTermMemory.user_id == user_id, self._active_filter(now))
-            .order_by(LongTermMemory.embedding.cosine_distance(query_embedding), LongTermMemory.importance_score.desc())
-            .limit(max(1, min(top_k * 4, 80)))
-        )
-        rows = result.scalars().all()
+            query_embedding = self._zero_embedding()
+
+        if self._is_zero_vector(query_embedding):
+            result = await db.execute(
+                select(LongTermMemory)
+                .where(LongTermMemory.user_id == user_id, self._active_filter(now))
+                .order_by(LongTermMemory.importance_score.desc(), LongTermMemory.created_at.desc())
+                .limit(max(1, min(top_k * 4, 80)))
+            )
+            rows = result.scalars().all()
+            rows.sort(key=lambda row: self._effective_importance(row, now), reverse=True)
+            return rows[: max(1, top_k)]
+
+        try:
+            result = await db.execute(
+                select(LongTermMemory)
+                .where(LongTermMemory.user_id == user_id, self._active_filter(now))
+                .order_by(LongTermMemory.embedding.cosine_distance(query_embedding), LongTermMemory.importance_score.desc())
+                .limit(max(1, min(top_k * 4, 80)))
+            )
+            rows = result.scalars().all()
+        except Exception:
+            result = await db.execute(
+                select(LongTermMemory)
+                .where(LongTermMemory.user_id == user_id, self._active_filter(now))
+                .order_by(LongTermMemory.importance_score.desc(), LongTermMemory.created_at.desc())
+                .limit(max(1, min(top_k * 4, 80)))
+            )
+            rows = result.scalars().all()
         rows.sort(key=lambda row: self._effective_importance(row, now), reverse=True)
         return rows[: max(1, top_k)]
 
