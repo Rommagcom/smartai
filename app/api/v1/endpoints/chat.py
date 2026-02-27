@@ -1,9 +1,12 @@
+import asyncio
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from app.api.types import CurrentUser, DBSession
+from app.db.session import AsyncSessionLocal
 from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
 from app.models.user import User
@@ -33,6 +36,8 @@ from app.services.web_tools_service import web_tools_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_background_tasks: set[asyncio.Task] = set()
 
 
 def _safe_task_payload(payload: dict | None) -> dict:
@@ -52,6 +57,18 @@ def _safe_task_result(result: dict | None) -> dict | None:
         preview.pop("file_base64", None)
         preview["artifact_ready"] = True
     return preview
+
+
+async def _extract_facts_background(user_id: UUID, user_text: str, assistant_text: str) -> None:
+    try:
+        async with AsyncSessionLocal() as bg_db:
+            await asyncio.wait_for(
+                memory_service.extract_and_store_facts(bg_db, user_id, user_text, assistant_text),
+                timeout=8,
+            )
+            await bg_db.commit()
+    except Exception as exc:
+        logger.warning("background fact extraction skipped: %s", exc)
 
 
 @router.post("")
@@ -90,6 +107,7 @@ async def chat(
 
     session = await memory_service.get_or_create_session(db, current_user.id, payload.session_id)
     await memory_service.append_message(db, current_user.id, session.id, "user", payload.message)
+    await db.commit()
 
     response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond(
         db,
@@ -109,9 +127,17 @@ async def chat(
             "tool_calls": tool_calls,
         },
     )
-    await memory_service.extract_and_store_facts(db, current_user.id, payload.message, response_text)
 
     await db.commit()
+    task = asyncio.create_task(
+        _extract_facts_background(
+            user_id=current_user.id,
+            user_text=payload.message,
+            assistant_text=response_text,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return ChatResponse(
         session_id=session.id,
         response=response_text,
