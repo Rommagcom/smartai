@@ -1,3 +1,4 @@
+import asyncio
 from typing import AsyncGenerator
 
 from ollama import AsyncClient  # type: ignore[import-not-found]
@@ -35,20 +36,26 @@ class OllamaClient:
         return [*vector, *([0.0] * (target_dim - current_dim))]
 
     async def chat(self, messages: list[dict], stream: bool = False, options: dict | None = None) -> str:
-        response = await self._client.chat(
-            model=settings.OLLAMA_MODEL_NAME,
-            messages=messages,
-            stream=stream,
-            options=options or {},
+        response = await asyncio.wait_for(
+            self._client.chat(
+                model=settings.OLLAMA_MODEL_NAME,
+                messages=messages,
+                stream=stream,
+                options=options or {},
+            ),
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
         )
         return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
-        stream = await self._client.chat(
-            model=settings.OLLAMA_MODEL_NAME,
-            messages=messages,
-            stream=True,
-            options=options or {},
+        stream = await asyncio.wait_for(
+            self._client.chat(
+                model=settings.OLLAMA_MODEL_NAME,
+                messages=messages,
+                stream=True,
+                options=options or {},
+            ),
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
         )
         async for chunk in stream:
             content = self._extract_message_content(chunk)
@@ -56,9 +63,12 @@ class OllamaClient:
                 yield content
 
     async def embeddings(self, text: str) -> list[float]:
-        response = await self._client.embed(
-            model="nomic-embed-text",
-            input=[text],
+        response = await asyncio.wait_for(
+            self._client.embed(
+                model="nomic-embed-text",
+                input=[text],
+            ),
+            timeout=settings.OLLAMA_TIMEOUT_SECONDS,
         )
         embeddings = self._field(response, "embeddings")
         if isinstance(embeddings, list) and embeddings:
