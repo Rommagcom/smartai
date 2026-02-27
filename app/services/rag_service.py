@@ -23,6 +23,12 @@ def chunk_text(text: str, chunk_size: int = 1800, overlap: int = 300) -> list[st
 
 
 class RagService:
+    @staticmethod
+    def _is_zero_vector(vector: list[float]) -> bool:
+        if not vector:
+            return True
+        return all(abs(float(value)) < 1e-12 for value in vector)
+
     def parse_document(self, filename: str, content: bytes) -> str:
         lower = filename.lower()
         if lower.endswith(".txt") or lower.endswith(".md"):
@@ -48,17 +54,24 @@ class RagService:
 
         embedded = await asyncio.gather(*(embed_one(index, chunk) for index, chunk in enumerate(chunks)))
         embedded.sort(key=lambda item: item[0])
-        vectors = [vector for _, vector in embedded]
-        milvus_service.insert_chunks(user_id=user_id, chunks=chunks, vectors=vectors, source_doc=filename)
-        return len(chunks)
+        valid_pairs = [(chunks[index], vector) for index, vector in embedded if not self._is_zero_vector(vector)]
+        if not valid_pairs:
+            raise RuntimeError("Document embedding is temporarily unavailable")
+
+        valid_chunks = [chunk for chunk, _ in valid_pairs]
+        vectors = [vector for _, vector in valid_pairs]
+        milvus_service.insert_chunks(user_id=user_id, chunks=valid_chunks, vectors=vectors, source_doc=filename)
+        return len(valid_chunks)
 
     async def retrieve_context(self, user_id: str, query: str, top_k: int = 5) -> list[dict]:
         try:
             query_embedding = await ollama_client.embeddings(query)
+            if self._is_zero_vector(query_embedding):
+                raise RuntimeError("Document search embedding is temporarily unavailable")
             return milvus_service.search(user_id=user_id, query_embedding=query_embedding, top_k=top_k)
         except Exception as exc:
             logger.warning("rag retrieve_context skipped: %s", exc)
-            return []
+            raise
 
 
 rag_service = RagService()

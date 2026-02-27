@@ -804,7 +804,31 @@ class TelegramAdapter(MessengerAdapter):
         tg_file = await context.bot.get_file(doc.file_id)
         content = await tg_file.download_as_bytearray()
         res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
-        await self._reply_api_result(update, res)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        chunks = int(payload.get("chunks") or 0)
+        if chunks <= 0:
+            await update.effective_message.reply_text(
+                "Документ принят, но индексировать содержимое не удалось. Попробуйте загрузить позже."
+            )
+            return
+        await update.effective_message.reply_text(f"Документ проиндексирован ✅ Чанков: {chunks}")
+
+    @staticmethod
+    def _format_doc_search_lines(items: list[Any]) -> list[str]:
+        lines: list[str] = []
+        for index, item in enumerate(items[:3], start=1):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source_doc") or "document")
+            chunk = str(item.get("chunk_text") or "").strip()
+            snippet = (chunk[:220] + "…") if len(chunk) > 220 else chunk
+            if snippet:
+                lines.append(f"{index}) [{source}] {snippet}")
+        return lines
 
     async def doc_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = " ".join(context.args).strip()
@@ -816,7 +840,22 @@ class TelegramAdapter(MessengerAdapter):
             return
         token, _ = auth
         res = await self.client.documents_search(token, query)
-        await self._reply_api_result(update, res)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            await update.effective_message.reply_text("По документам ничего не найдено. Уточните запрос или перезагрузите документ.")
+            return
+
+        lines = self._format_doc_search_lines(items)
+        if not lines:
+            await update.effective_message.reply_text("Найдены записи, но без читаемого текста. Попробуйте другой запрос.")
+            return
+
+        await update.effective_message.reply_text("Результаты поиска по документам:\n" + "\n\n".join(lines))
 
     async def cron_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(context.args).strip()

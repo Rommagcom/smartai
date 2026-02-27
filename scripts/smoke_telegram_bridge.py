@@ -3,9 +3,13 @@ import asyncio
 from integrations.messengers.telegram.adapter import TelegramAdapter
 
 
+DOCUMENT_FILENAME = "rates.pdf"
+
+
 class FakeMessage:
-    def __init__(self, text: str | None = None) -> None:
+    def __init__(self, text: str | None = None, document=None) -> None:
         self.text = text
+        self.document = document
         self.replies: list[str] = []
 
     async def reply_text(self, text: str) -> None:
@@ -24,10 +28,10 @@ class FakeChat:
 
 
 class FakeUpdate:
-    def __init__(self, user_id: int, text: str | None = None) -> None:
+    def __init__(self, user_id: int, text: str | None = None, document=None) -> None:
         self.effective_user = FakeUser(user_id)
         self.effective_chat = FakeChat(user_id)
-        self.effective_message = FakeMessage(text=text)
+        self.effective_message = FakeMessage(text=text, document=document)
 
 
 class FakeContext:
@@ -37,10 +41,26 @@ class FakeContext:
         self.bot = FakeBot()
 
 
+class FakeTelegramDocument:
+    def __init__(self, file_id: str, file_name: str) -> None:
+        self.file_id = file_id
+        self.file_name = file_name
+
+
+class FakeTelegramFile:
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def download_as_bytearray(self) -> bytearray:
+        await asyncio.sleep(0)
+        return bytearray(self._content)
+
+
 class FakeBot:
     def __init__(self) -> None:
         self.sent_messages: list[tuple[int, str]] = []
         self.sent_documents: list[tuple[int, str]] = []
+        self.files_by_id: dict[str, bytes] = {}
 
     async def send_message(self, chat_id: int, text: str) -> None:
         await asyncio.sleep(0)
@@ -50,6 +70,10 @@ class FakeBot:
         await asyncio.sleep(0)
         filename = str(getattr(document, "filename", "document.bin"))
         self.sent_documents.append((chat_id, filename))
+
+    async def get_file(self, file_id: str) -> FakeTelegramFile:
+        await asyncio.sleep(0)
+        return FakeTelegramFile(self.files_by_id.get(file_id, b""))
 
 
 class FakeApplication:
@@ -99,10 +123,7 @@ async def run() -> None:
     context.user_data.clear()
     update_chat = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat, context)
-    ensure(
-        any("Обрабатываю" in text for text in update_chat.effective_message.replies),
-        "chat should send immediate async ack",
-    )
+    ensure(len(update_chat.effective_message.replies) == 0, "chat should not send intermediate ack")
     await asyncio.sleep(0.05)
     ensure(
         any(
@@ -120,10 +141,7 @@ async def run() -> None:
     context.user_data.clear()
     update_chat_ok = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat_ok, context)
-    ensure(
-        any("Обрабатываю" in text for text in update_chat_ok.effective_message.replies),
-        "chat should send immediate async ack",
-    )
+    ensure(len(update_chat_ok.effective_message.replies) == 0, "chat should not send intermediate ack")
     await asyncio.sleep(0.05)
     ensure(
         any("ok-from-backend" in text for _, text in context.bot.sent_messages),
@@ -141,7 +159,87 @@ async def run() -> None:
     update_memory = FakeUpdate(user_id=123)
     await adapter.memory_add(update_memory, context_memory)
     ensure(len(update_memory.effective_message.replies) > 0, "memory_add should produce reply")
-    ensure("любит краткие ответы" in update_memory.effective_message.replies[-1], "memory_add reply should contain payload")
+    ensure("Готово" in update_memory.effective_message.replies[-1], "memory_add reply should be compact")
+
+    async def documents_upload_ok(token: str, filename: str, content: bytes):
+        del token
+        await asyncio.sleep(0)
+        ensure(filename == DOCUMENT_FILENAME, f"unexpected filename: {filename}")
+        ensure(len(content) > 0, "uploaded content should not be empty")
+        return {"status": 200, "payload": {"status": "ok", "chunks": 3}}
+
+    adapter.client.documents_upload = documents_upload_ok
+    doc_context = FakeContext()
+    doc_context.bot.files_by_id["file-1"] = b"fake pdf bytes"
+    update_doc_upload = FakeUpdate(
+        user_id=123,
+        document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
+    )
+    await adapter.document_upload(update_doc_upload, doc_context)
+    ensure(
+        any("проиндексирован" in text for text in update_doc_upload.effective_message.replies),
+        "document_upload should confirm indexed chunks",
+    )
+
+    async def documents_search_ok(token: str, query: str, top_k: int = 5):
+        del token, top_k
+        await asyncio.sleep(0)
+        ensure(query == "USD KZT", f"unexpected query: {query}")
+        return {
+            "status": 200,
+            "payload": {
+                "items": [
+                    {
+                        "source_doc": DOCUMENT_FILENAME,
+                        "chunk_text": "Курс USD/KZT на сегодня: 501.25. Курс EUR/KZT: 542.10.",
+                    }
+                ]
+            },
+        }
+
+    adapter.client.documents_search = documents_search_ok
+    update_doc_search = FakeUpdate(user_id=123)
+    await adapter.doc_search(update_doc_search, FakeContext(args=["USD", "KZT"]))
+    ensure(len(update_doc_search.effective_message.replies) > 0, "doc_search should produce reply")
+    ensure(
+        "Результаты поиска по документам" in update_doc_search.effective_message.replies[-1],
+        "doc_search should show readable document snippets",
+    )
+    ensure(
+        DOCUMENT_FILENAME in update_doc_search.effective_message.replies[-1],
+        "doc_search reply should include source document",
+    )
+
+    async def documents_upload_unavailable(token: str, filename: str, content: bytes):
+        del token, filename, content
+        await asyncio.sleep(0)
+        return {"status": 503, "payload": {"detail": "Document embedding is temporarily unavailable"}}
+
+    adapter.client.documents_upload = documents_upload_unavailable
+    update_doc_upload_503 = FakeUpdate(
+        user_id=123,
+        document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
+    )
+    await adapter.document_upload(update_doc_upload_503, doc_context)
+    ensure(len(update_doc_upload_503.effective_message.replies) > 0, "document_upload 503 should produce reply")
+    ensure(
+        "HTTP 503" in update_doc_upload_503.effective_message.replies[-1],
+        "document_upload 503 should return user-friendly error",
+    )
+
+    async def documents_search_unavailable(token: str, query: str, top_k: int = 5):
+        del token, query, top_k
+        await asyncio.sleep(0)
+        return {"status": 503, "payload": {"detail": "Document search embedding is temporarily unavailable"}}
+
+    adapter.client.documents_search = documents_search_unavailable
+    update_doc_search_503 = FakeUpdate(user_id=123)
+    await adapter.doc_search(update_doc_search_503, FakeContext(args=["USD", "KZT"]))
+    ensure(len(update_doc_search_503.effective_message.replies) > 0, "doc_search 503 should produce reply")
+    ensure(
+        "HTTP 503" in update_doc_search_503.effective_message.replies[-1],
+        "doc_search 503 should return user-friendly error",
+    )
 
     async def worker_results_poll_ok(token: str, limit: int = 20):
         del token, limit
