@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from urllib.parse import quote_plus
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -13,6 +14,50 @@ from app.services.http_client_service import http_client_service
 
 
 class WebToolsService:
+    @staticmethod
+    def _is_weather_query(query: str) -> bool:
+        q = str(query or "").lower()
+        tokens = (
+            "погод",
+            "weather",
+            "температур",
+            "осадки",
+            "ветер",
+            "прогноз",
+        )
+        return any(token in q for token in tokens)
+
+    @staticmethod
+    def _weather_fallback_results(query: str, limit: int) -> list[dict]:
+        encoded_query = quote_plus(query)
+        candidates = [
+            {
+                "title": "Yandex Погода",
+                "url": "https://yandex.kz/pogoda/almaty",
+                "snippet": "Почасовой и недельный прогноз.",
+                "engine": "fallback-weather",
+            },
+            {
+                "title": "Sinoptik Алматы",
+                "url": "https://sinoptik.ua/погода-алматы",
+                "snippet": "Подробный прогноз погоды и осадков.",
+                "engine": "fallback-weather",
+            },
+            {
+                "title": "Gismeteo Алматы",
+                "url": "https://www.gismeteo.kz/weather-almaty-5205/",
+                "snippet": "Температура, ветер, осадки.",
+                "engine": "fallback-weather",
+            },
+            {
+                "title": "DuckDuckGo weather query",
+                "url": f"https://duckduckgo.com/?q={encoded_query}",
+                "snippet": "Результаты поиска погоды по запросу.",
+                "engine": "fallback-weather",
+            },
+        ]
+        return candidates[: max(1, min(limit, len(candidates)))]
+
     @staticmethod
     def _validate_url(url: str) -> str:
         parsed = urlparse(url)
@@ -52,8 +97,20 @@ class WebToolsService:
 
     async def web_search(self, query: str, limit: int = 5) -> dict:
         if settings.SEARXNG_BASE_URL:
-            return await self._searxng_search(query, limit)
-        return await self._duckduckgo_search(query, limit)
+            result = await self._searxng_search(query, limit)
+        else:
+            result = await self._duckduckgo_search(query, limit)
+
+        results = result.get("results") if isinstance(result, dict) else None
+        if isinstance(results, list) and results:
+            return result
+        if self._is_weather_query(query):
+            return {
+                "query": query,
+                "results": self._weather_fallback_results(query, limit),
+                "provider": f"{result.get('provider', 'unknown')}+fallback-weather",
+            }
+        return result
 
     async def _searxng_search(self, query: str, limit: int) -> dict:
         client = http_client_service.get()
@@ -82,6 +139,12 @@ class WebToolsService:
         response = await client.get(
             "https://html.duckduckgo.com/html/",
             params={"q": query},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                )
+            },
             timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS,
             follow_redirects=True,
         )
