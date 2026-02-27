@@ -96,6 +96,7 @@ async def run() -> None:
         return {"status": 428, "payload": {"detail": "setup required"}}
 
     adapter.client.chat = chat_precondition
+    context.user_data.clear()
     update_chat = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat, context)
     ensure(
@@ -116,6 +117,7 @@ async def run() -> None:
         return {"status": 200, "payload": {"response": "ok-from-backend"}}
 
     adapter.client.chat = chat_ok
+    context.user_data.clear()
     update_chat_ok = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat_ok, context)
     ensure(
