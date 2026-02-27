@@ -59,6 +59,31 @@ class WebToolsService:
         return candidates[: max(1, min(limit, len(candidates)))]
 
     @staticmethod
+    def _generic_fallback_results(query: str, limit: int) -> list[dict]:
+        encoded_query = quote_plus(query)
+        candidates = [
+            {
+                "title": "DuckDuckGo search",
+                "url": f"https://duckduckgo.com/?q={encoded_query}",
+                "snippet": "Откройте результаты DuckDuckGo по запросу.",
+                "engine": "fallback-generic",
+            },
+            {
+                "title": "Google search",
+                "url": f"https://www.google.com/search?q={encoded_query}",
+                "snippet": "Откройте результаты Google по запросу.",
+                "engine": "fallback-generic",
+            },
+            {
+                "title": "Yandex search",
+                "url": f"https://yandex.kz/search/?text={encoded_query}",
+                "snippet": "Откройте результаты Yandex по запросу.",
+                "engine": "fallback-generic",
+            },
+        ]
+        return candidates[: max(1, min(limit, len(candidates)))]
+
+    @staticmethod
     def _validate_url(url: str) -> str:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
@@ -96,10 +121,20 @@ class WebToolsService:
         }
 
     async def web_search(self, query: str, limit: int = 5) -> dict:
-        if settings.SEARXNG_BASE_URL:
-            result = await self._searxng_search(query, limit)
-        else:
-            result = await self._duckduckgo_search(query, limit)
+        provider_error = ""
+        try:
+            if settings.SEARXNG_BASE_URL:
+                result = await self._searxng_search(query, limit)
+            else:
+                result = await self._duckduckgo_search(query, limit)
+        except Exception as exc:
+            provider_error = str(exc)
+            result = {
+                "query": query,
+                "results": [],
+                "provider": "search-provider-error",
+                "error": provider_error,
+            }
 
         results = result.get("results") if isinstance(result, dict) else None
         if isinstance(results, list) and results:
@@ -109,8 +144,14 @@ class WebToolsService:
                 "query": query,
                 "results": self._weather_fallback_results(query, limit),
                 "provider": f"{result.get('provider', 'unknown')}+fallback-weather",
+                "error": provider_error or result.get("error", ""),
             }
-        return result
+        return {
+            "query": query,
+            "results": self._generic_fallback_results(query, limit),
+            "provider": f"{result.get('provider', 'unknown')}+fallback-generic",
+            "error": provider_error or result.get("error", ""),
+        }
 
     async def _searxng_search(self, query: str, limit: int) -> dict:
         client = http_client_service.get()

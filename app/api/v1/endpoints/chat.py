@@ -64,7 +64,7 @@ async def _extract_facts_background(user_id: UUID, user_text: str, assistant_tex
         async with AsyncSessionLocal() as bg_db:
             await asyncio.wait_for(
                 memory_service.extract_and_store_facts(bg_db, user_id, user_text, assistant_text),
-                timeout=8,
+                timeout=15,
             )
             await bg_db.commit()
     except Exception as exc:

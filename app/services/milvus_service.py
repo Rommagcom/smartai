@@ -59,5 +59,11 @@ class MilvusService:
             )
         return items
 
+    def delete_user_chunks(self, user_id: str) -> int:
+        collection = self.ensure_collection()
+        result = collection.delete(expr=f'user_id == "{user_id}"')
+        collection.flush()
+        return int(getattr(result, "delete_count", 0) or 0)
+
 
 milvus_service = MilvusService()

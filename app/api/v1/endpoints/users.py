@@ -7,7 +7,10 @@ from app.api.types import CurrentUser, DBSession
 from app.models.user import User
 from app.schemas.soul import SoulAdaptTaskRequest, SoulOnboardingStep, SoulSetupRequest, SoulSetupResponse, SoulStatus
 from app.schemas.user import UserAdminAccessUpdate, UserOut, UserPreferencesUpdate
+from app.services.milvus_service import milvus_service
+from app.services.scheduler_service import scheduler_service
 from app.services.soul_service import soul_service
+from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
 
@@ -88,6 +91,55 @@ async def admin_set_user_admin_access(
     await db.commit()
     await db.refresh(target_user)
     return _to_user_out(target_user)
+
+
+@router.delete("/admin/users/{user_id}", responses={404: {"description": "User not found"}})
+async def admin_delete_user(
+    user_id: UUID,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    _require_admin(current_user)
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    target_user = result.scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if target_user.is_admin:
+        admin_count_result = await db.execute(select(func.count()).select_from(User).where(User.is_admin.is_(True)))
+        admin_count = int(admin_count_result.scalar() or 0)
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete the last admin",
+            )
+
+    user_id_str = str(target_user.id)
+    scheduler_jobs_removed = scheduler_service.remove_jobs_for_user(user_id=user_id_str)
+
+    try:
+        milvus_deleted_chunks = milvus_service.delete_user_chunks(user_id=user_id_str)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"User deletion blocked: document storage unavailable ({exc})",
+        ) from exc
+
+    await worker_result_service.clear_user_results(user_id=user_id_str)
+
+    await db.delete(target_user)
+    await db.commit()
+
+    return {
+        "status": "deleted",
+        "user_id": user_id_str,
+        "cleanup": {
+            "scheduler_jobs_removed": scheduler_jobs_removed,
+            "milvus_chunks_deleted": milvus_deleted_chunks,
+            "worker_results_cleared": True,
+        },
+    }
 
 
 @router.get("/me/soul/status", response_model=SoulStatus)

@@ -212,5 +212,15 @@ class SchedulerService:
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
 
+    def remove_jobs_for_user(self, user_id: str) -> int:
+        removed = 0
+        for job in self.scheduler.get_jobs():
+            kwargs = getattr(job, "kwargs", None) or {}
+            if str(kwargs.get("user_id", "")) != str(user_id):
+                continue
+            self.scheduler.remove_job(job.id)
+            removed += 1
+        return removed
+
 
 scheduler_service = SchedulerService()
