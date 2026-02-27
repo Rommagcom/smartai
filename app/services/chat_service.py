@@ -41,6 +41,74 @@ class ChatService:
         )
 
     @staticmethod
+    def _live_data_unavailable_fallback() -> str:
+        return (
+            "Не удалось получить актуальные данные прямо сейчас. "
+            "Повторите запрос через 10–30 секунд или уточните источник (например: Нацбанк РК, KASE)."
+        )
+
+    @staticmethod
+    def _is_live_data_intent(user_message: str) -> bool:
+        lowered = str(user_message or "").strip().lower()
+        if not lowered:
+            return False
+        patterns = [
+            r"\bкурс\b|\busd\b|\bkzt\b|\beur\b|\brub\b|\bвалют",
+            r"\bакци|котиров|kase|нацбанк|рынок|бирж",
+            r"\bпогод|новост|цена|стоимост|сегодня\b",
+            r"\bпосмотрел\b|\bглянул\b|\bну\s+что\b|\bтак\s+и\s+не\s+",
+        ]
+        return any(re.search(pattern, lowered) for pattern in patterns)
+
+    @staticmethod
+    def _is_progress_placeholder_answer(answer: str) -> bool:
+        lowered = str(answer or "").strip().lower()
+        if not lowered:
+            return True
+        patterns = [
+            r"^сейчас\b",
+            r"\bпосмотрю\b",
+            r"\bгляну\b",
+            r"\bдостаю\b",
+            r"\bпроверяю\b",
+        ]
+        return any(re.search(pattern, lowered) for pattern in patterns)
+
+    @staticmethod
+    def _tool_result_has_signal(result: object) -> bool:
+        if isinstance(result, dict):
+            items = result.get("results") if isinstance(result.get("results"), list) else None
+            if items:
+                return True
+            text = str(result.get("text") or "").strip()
+            if len(text) >= 80:
+                return True
+            message = str(result.get("message") or "").strip()
+            return bool(message)
+        return bool(result)
+
+    @classmethod
+    def _has_meaningful_tool_output(cls, tool_calls: list[dict]) -> bool:
+        for call in tool_calls:
+            if not call.get("success"):
+                continue
+            if cls._tool_result_has_signal(call.get("result")):
+                return True
+        return False
+
+    def _live_data_fallback_if_needed(
+        self,
+        user_message: str,
+        tool_calls: list[dict],
+        artifacts: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not self._is_live_data_intent(user_message):
+            return None
+        if self._has_meaningful_tool_output(tool_calls):
+            return None
+        return self._live_data_unavailable_fallback(), tool_calls, artifacts
+
+    @staticmethod
     def _is_timezone_query(user_message: str) -> bool:
         lowered = user_message.strip().lower()
         patterns = [
@@ -225,6 +293,8 @@ class ChatService:
 
         planned_result = await self._run_planned_tools(db, user, user_message)
         if not planned_result:
+            if self._is_live_data_intent(user_message):
+                return self._live_data_unavailable_fallback(), manual_tool_calls, []
             return None
 
         planned_calls, response_hint = planned_result
@@ -239,7 +309,17 @@ class ChatService:
             safe_tool_calls.append(safe_call)
 
         if not safe_tool_calls:
+            if self._is_live_data_intent(user_message):
+                return self._live_data_unavailable_fallback(), tool_calls, artifacts
             return None
+
+        live_data_fallback = self._live_data_fallback_if_needed(
+            user_message=user_message,
+            tool_calls=tool_calls,
+            artifacts=artifacts,
+        )
+        if live_data_fallback:
+            return live_data_fallback
 
         try:
             answer = await tool_orchestrator_service.compose_final_answer(
@@ -250,6 +330,8 @@ class ChatService:
             )
         except Exception:
             answer = self._llm_unavailable_fallback()
+        if self._is_live_data_intent(user_message) and self._is_progress_placeholder_answer(answer):
+            answer = self._live_data_unavailable_fallback()
         return self._sanitize_llm_answer(answer), tool_calls, artifacts
 
     @staticmethod

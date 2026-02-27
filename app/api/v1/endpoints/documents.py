@@ -19,9 +19,14 @@ async def upload_document(
         return {"status": "ok", "chunks": chunks}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/search")
 async def search_document(query: str, current_user: CurrentUser, top_k: int = 5) -> dict:
-    items = await rag_service.retrieve_context(str(current_user.id), query, top_k=top_k)
-    return {"items": items}
+    try:
+        items = await rag_service.retrieve_context(str(current_user.id), query, top_k=top_k)
+        return {"items": items}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
