@@ -28,6 +28,7 @@ from integrations.messengers.telegram.backend_client import BackendApiClient
 from integrations.messengers.telegram.settings import get_telegram_settings
 
 logger = logging.getLogger(__name__)
+SUCCESS_REPLY = "Готово ✅"
 
 (
     SOUL_NAME,
@@ -59,6 +60,7 @@ class TelegramAdapter(MessengerAdapter):
             bridge_secret=self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
         )
         self._known_users: dict[int, dict[str, Any]] = {}
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         if not self.settings.TELEGRAM_BOT_TOKEN:
@@ -263,17 +265,15 @@ class TelegramAdapter(MessengerAdapter):
             preview = item.get("result_preview")
             if preview is None:
                 preview = item.get("result", {})
+            logger.debug("telegram worker success job_type=%s preview=%s", job_type, _safe_json(preview, max_len=4000))
             artifact_hint = str(item.get("next_action_hint") or "").strip()
             if not artifact_hint:
                 artifact_hint = TelegramAdapter._artifact_ready_hint(job_type=job_type, preview=preview)
             suffix = f"\n\n{artifact_hint}" if artifact_hint else ""
-            return (
-                f"✅ Фоновая задача выполнена ({job_type})\n"
-                f"Результат:\n{_safe_json(preview, max_len=3200)}"
-                f"{suffix}"
-            )
+            return f"✅ Фоновая задача выполнена ({job_type}){suffix}"
         error_obj = item.get("error")
         error_message = error_obj.get("message") if isinstance(error_obj, dict) else error_obj
+        logger.warning("telegram worker failed job_type=%s error=%s", job_type, error_message)
         return (
             f"❌ Фоновая задача завершилась с ошибкой ({job_type})\n"
             f"Ошибка: {error_message or 'unknown error'}"
@@ -323,6 +323,35 @@ class TelegramAdapter(MessengerAdapter):
             f"Профиль: {task_mode}\n\n"
             "Готов к работе. Напиши сообщение или используй /chat <message>."
         )
+
+    @staticmethod
+    def _format_compact_success_dict(payload: dict[str, Any]) -> str:
+        if isinstance(payload.get("items"), list):
+            return f"{SUCCESS_REPLY} Найдено: {len(payload.get('items') or [])}"
+        if payload.get("status") == "ok" or payload.get("ok") is True:
+            return SUCCESS_REPLY
+        if "analysis" in payload:
+            return f"{SUCCESS_REPLY} Анализ обновлён."
+        if "id" in payload:
+            return f"{SUCCESS_REPLY} ID: {payload.get('id')}"
+        if "message" in payload and isinstance(payload.get("message"), str):
+            text = str(payload.get("message") or "").strip()
+            return text or SUCCESS_REPLY
+        return SUCCESS_REPLY
+
+    @staticmethod
+    def _format_compact_success(payload: Any) -> str:
+        if payload is None:
+            return SUCCESS_REPLY
+        if isinstance(payload, dict):
+            return TelegramAdapter._format_compact_success_dict(payload)
+        if isinstance(payload, list):
+            return f"{SUCCESS_REPLY} Получено: {len(payload)}"
+
+        text = str(payload).strip()
+        if not text:
+            return SUCCESS_REPLY
+        return text if len(text) <= 400 else f"{text[:400]}…"
 
     async def _begin_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["soul_setup_auto"] = {"step": "name", "data": {}}
@@ -427,8 +456,10 @@ class TelegramAdapter(MessengerAdapter):
             )
             return
 
-        payload = self._sanitize_reply_payload(res.get("payload"))
-        await bot.send_message(chat_id=chat_id, text=f"Error {res.get('status')}: {_safe_json(payload)}")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Не удалось обработать запрос (HTTP {res.get('status')}). Попробуйте ещё раз.",
+        )
 
     async def _chat_background_task(
         self,
@@ -469,9 +500,17 @@ class TelegramAdapter(MessengerAdapter):
                 if soul_setup_text:
                     await update.effective_message.reply_text(soul_setup_text)
                     return
-            await update.effective_message.reply_text(_safe_json(payload))
+            logger.debug("telegram api success payload: %s", _safe_json(payload, max_len=4000))
+            await update.effective_message.reply_text(self._format_compact_success(payload))
             return
-        await update.effective_message.reply_text(f"Error {result['status']}: {_safe_json(payload)}")
+        logger.warning(
+            "telegram api error status=%s payload=%s",
+            result.get("status"),
+            _safe_json(payload, max_len=4000),
+        )
+        await update.effective_message.reply_text(
+            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз."
+        )
 
     async def _ensure_soul_ready_for_chat(
         self,
@@ -606,8 +645,7 @@ class TelegramAdapter(MessengerAdapter):
             await update.effective_message.reply_text("Не удалось запустить фоновую обработку. Повторите запрос.")
             return
 
-        await update.effective_message.reply_text("Принял запрос. Обрабатываю и пришлю результат следующим сообщением…")
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._chat_background_task(
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
@@ -616,6 +654,8 @@ class TelegramAdapter(MessengerAdapter):
                 text=text,
             )
         )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:

@@ -3,6 +3,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.user import User
 from app.services.memory_service import memory_service
 from app.services.ollama_client import ollama_client
@@ -73,6 +74,109 @@ class ChatService:
             "Timezone пока не задана. Сейчас используется fallback: Europe/Moscow. "
             "Напишите, например: 'моя зона UTC+3'."
         )
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        normalized = str(text or "")
+        if not normalized:
+            return 0
+        return max(1, (len(normalized) + 3) // 4)
+
+    @staticmethod
+    def _normalize_whitespace(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "")).strip()
+
+    @classmethod
+    def _truncate_text(cls, text: str, max_chars: int) -> str:
+        cleaned = cls._normalize_whitespace(text)
+        if max_chars <= 0 or len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[: max(1, max_chars - 1)].rstrip() + "…"
+
+    def _normalize_history_messages(self, history_messages: list[dict], msg_max_chars: int) -> list[dict]:
+        normalized_history: list[dict] = []
+        for msg in history_messages:
+            role = str(msg.get("role") or "assistant").strip() or "assistant"
+            content = self._truncate_text(str(msg.get("content") or ""), msg_max_chars)
+            if not content:
+                continue
+            normalized_history.append({"role": role, "content": content})
+        return normalized_history
+
+    def _partition_history_by_budget(
+        self,
+        normalized_history: list[dict],
+        history_budget_tokens: int,
+        always_keep_last: int,
+    ) -> tuple[list[dict], list[dict]]:
+        kept_reversed: list[dict] = []
+        dropped_reversed: list[dict] = []
+        consumed_tokens = 0
+
+        for index, msg in enumerate(reversed(normalized_history)):
+            msg_tokens = self._estimate_tokens(msg["content"]) + 8
+            force_keep = index < always_keep_last
+            if not force_keep and consumed_tokens + msg_tokens > history_budget_tokens:
+                dropped_reversed.append(msg)
+                continue
+            kept_reversed.append(msg)
+            consumed_tokens += msg_tokens
+
+        return list(reversed(kept_reversed)), list(reversed(dropped_reversed))
+
+    def _build_dropped_history_summary(
+        self,
+        dropped_history: list[dict],
+        summary_max_items: int,
+        summary_item_max_chars: int,
+    ) -> str | None:
+        if not dropped_history:
+            return None
+
+        summary_slice = dropped_history[-summary_max_items:]
+        summary_lines: list[str] = []
+        for item in summary_slice:
+            role = "Пользователь" if item.get("role") == "user" else "Ассистент"
+            snippet = self._truncate_text(str(item.get("content") or ""), summary_item_max_chars)
+            if snippet:
+                summary_lines.append(f"- {role}: {snippet}")
+
+        if not summary_lines:
+            return None
+
+        return (
+            "Сжатый контекст предыдущего диалога (автоматически для защиты от переполнения окна):\n"
+            + "\n".join(summary_lines)
+        )
+
+    def _compact_history_for_budget(
+        self,
+        history_messages: list[dict],
+        system_prompt: str,
+        current_message: str,
+    ) -> tuple[list[dict], str | None]:
+        max_prompt_tokens = max(256, int(settings.CONTEXT_MAX_PROMPT_TOKENS))
+        always_keep_last = max(0, int(settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES))
+        msg_max_chars = max(100, int(settings.CONTEXT_MESSAGE_MAX_CHARS))
+        summary_max_items = max(1, int(settings.CONTEXT_SUMMARY_MAX_ITEMS))
+        summary_item_max_chars = max(40, int(settings.CONTEXT_SUMMARY_ITEM_MAX_CHARS))
+
+        normalized_history = self._normalize_history_messages(history_messages, msg_max_chars)
+
+        base_tokens = self._estimate_tokens(system_prompt) + self._estimate_tokens(current_message) + 64
+        history_budget_tokens = max(0, max_prompt_tokens - base_tokens)
+
+        kept_history, dropped_history = self._partition_history_by_budget(
+            normalized_history=normalized_history,
+            history_budget_tokens=history_budget_tokens,
+            always_keep_last=always_keep_last,
+        )
+        summary = self._build_dropped_history_summary(
+            dropped_history=dropped_history,
+            summary_max_items=summary_max_items,
+            summary_item_max_chars=summary_item_max_chars,
+        )
+        return kept_history, summary
 
     async def _collect_manual_memory_calls(self, db: AsyncSession, user: User, user_message: str) -> list[dict]:
         calls: list[dict] = []
@@ -274,9 +378,22 @@ class ChatService:
             f"Контекст документов:\n{chr(10).join(rag_lines) if rag_lines else '- нет данных'}"
         )
 
+        history_messages = [{"role": msg.role, "content": msg.content} for msg in recent]
+        if history_messages:
+            last = history_messages[-1]
+            if str(last.get("role") or "") == "user" and self._normalize_whitespace(str(last.get("content") or "")) == self._normalize_whitespace(current_message):
+                history_messages = history_messages[:-1]
+
+        compacted_history, dropped_summary = self._compact_history_for_budget(
+            history_messages=history_messages,
+            system_prompt=system_prompt,
+            current_message=current_message,
+        )
+
         messages = [{"role": "system", "content": system_prompt}]
-        for msg in recent:
-            messages.append({"role": msg.role, "content": msg.content})
+        if dropped_summary:
+            messages.append({"role": "system", "content": dropped_summary})
+        messages.extend(compacted_history)
         messages.append({"role": "user", "content": current_message})
 
         return messages, [str(f.id) for f in facts], [c.get("source_doc", "") for c in rag_chunks]
