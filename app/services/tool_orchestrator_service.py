@@ -525,13 +525,14 @@ class ToolOrchestratorService:
         )
         db.add(cron)
         await db.flush()
-        scheduler_service.add_or_replace_job(
-            job_id=str(cron.id),
-            cron_expression=cron.cron_expression,
-            user_id=str(user.id),
-            action_type=cron.action_type,
-            payload=cron.payload,
-        )
+        if scheduler_service.scheduler.running:
+            scheduler_service.add_or_replace_job(
+                job_id=str(cron.id),
+                cron_expression=cron.cron_expression,
+                user_id=str(user.id),
+                action_type=cron.action_type,
+                payload=cron.payload,
+            )
         return {
             "id": str(cron.id),
             "name": cron.name,
@@ -566,7 +567,7 @@ class ToolOrchestratorService:
         job = result.scalar_one_or_none()
         if not job:
             raise ValueError("Cron job not found")
-        if scheduler_service.scheduler.get_job(str(job.id)):
+        if scheduler_service.scheduler.running and scheduler_service.scheduler.get_job(str(job.id)):
             scheduler_service.scheduler.remove_job(str(job.id))
         await db.delete(job)
         await db.flush()
