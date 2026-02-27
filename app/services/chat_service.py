@@ -12,6 +12,27 @@ from app.services.tool_orchestrator_service import tool_orchestrator_service
 
 class ChatService:
     @staticmethod
+    def _should_attempt_tool_planning(user_message: str) -> bool:
+        lowered = str(user_message or "").strip().lower()
+        if not lowered:
+            return False
+
+        tool_intent_patterns = [
+            r"\bв\s+очеред[ьи]\b",
+            r"\bв\s+фоне\b",
+            r"\bпостав[ьт].*очеред",
+            r"\bнапомин|напомни|календар|расписан",
+            r"\bcron\b",
+            r"\bпогод|курс|новост|поиск|найди\b",
+            r"\bweb[_\s-]?search|web[_\s-]?fetch\b",
+            r"\bbrowser|screenshot|pdf\b",
+            r"\bintegration|api\b",
+            r"\bdoc[_\s-]?search|документ\b",
+            r"\bexecute[_\s-]?python|python\b",
+        ]
+        return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
+
+    @staticmethod
     def _llm_unavailable_fallback() -> str:
         return (
             "Сервис генерации ответа сейчас временно недоступен. "
@@ -87,6 +108,45 @@ class ChatService:
             return tool_calls, response_hint
         except Exception:
             return None
+
+    async def _maybe_tool_answer(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not self._should_attempt_tool_planning(user_message):
+            return None
+
+        planned_result = await self._run_planned_tools(db, user, user_message)
+        if not planned_result:
+            return None
+
+        planned_calls, response_hint = planned_result
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+
+        safe_tool_calls: list[dict] = []
+        for call in tool_calls:
+            safe_call = dict(call)
+            if safe_call.get("success") and isinstance(safe_call.get("result"), dict):
+                safe_call["result"] = self._sanitize_tool_result_for_llm(safe_call["result"])
+            safe_tool_calls.append(safe_call)
+
+        if not safe_tool_calls:
+            return None
+
+        try:
+            answer = await tool_orchestrator_service.compose_final_answer(
+                system_prompt=user.system_prompt_template,
+                user_message=user_message,
+                tool_calls=safe_tool_calls,
+                response_hint=response_hint,
+            )
+        except Exception:
+            answer = self._llm_unavailable_fallback()
+        return self._sanitize_llm_answer(answer), tool_calls, artifacts
 
     @staticmethod
     def _extract_timezone_offset(text: str) -> str | None:
@@ -247,32 +307,10 @@ class ChatService:
             answer = self._timezone_answer(user)
             return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
-        planned_result = await self._run_planned_tools(db, user, user_message)
-
-        if planned_result:
-            planned_calls, response_hint = planned_result
-            tool_calls = [*manual_tool_calls, *planned_calls]
-            artifacts = self._extract_artifacts(tool_calls)
-
-            safe_tool_calls: list[dict] = []
-            for call in tool_calls:
-                safe_call = dict(call)
-                if safe_call.get("success") and isinstance(safe_call.get("result"), dict):
-                    safe_call["result"] = self._sanitize_tool_result_for_llm(safe_call["result"])
-                safe_tool_calls.append(safe_call)
-
-            if safe_tool_calls:
-                try:
-                    answer = await tool_orchestrator_service.compose_final_answer(
-                        system_prompt=user.system_prompt_template,
-                        user_message=user_message,
-                        tool_calls=safe_tool_calls,
-                        response_hint=response_hint,
-                    )
-                except Exception:
-                    answer = self._llm_unavailable_fallback()
-                answer = self._sanitize_llm_answer(answer)
-                return answer, used_memory_ids, rag_sources, tool_calls, artifacts
+        tool_answer = await self._maybe_tool_answer(db, user, user_message, manual_tool_calls)
+        if tool_answer:
+            answer, tool_calls, artifacts = tool_answer
+            return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
         try:
             answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
