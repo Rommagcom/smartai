@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL_NAME: str = "kimi-k2.5:cloud"
     OLLAMA_TIMEOUT_SECONDS: int = 120
+    OLLAMA_RETRY_ATTEMPTS: int = 3
+    OLLAMA_RETRY_BASE_DELAY_SECONDS: float = 0.2
+    OLLAMA_MAX_CONCURRENCY: int = 8
 
     MILVUS_HOST: str = "localhost"
     MILVUS_PORT: int = 19530

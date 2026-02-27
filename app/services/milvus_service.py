@@ -43,7 +43,7 @@ class MilvusService:
             anns_field="embedding",
             param={"metric_type": "COSINE", "params": {"ef": 64}},
             limit=top_k,
-            output_fields=["user_id", "chunk_text", "source_doc", "metadata"],
+            output_fields=["user_id", "chunk_text", "source_doc"],
             expr=f'user_id == "{user_id}"',
         )
         items: list[dict] = []
@@ -54,7 +54,7 @@ class MilvusService:
                     "score": float(hit.distance),
                     "chunk_text": entity.get("chunk_text"),
                     "source_doc": entity.get("source_doc"),
-                    "metadata": entity.get("metadata"),
+                    "metadata": None,
                 }
             )
         return items
