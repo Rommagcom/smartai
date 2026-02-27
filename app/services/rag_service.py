@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from io import BytesIO
 
 from pypdf import PdfReader
@@ -6,6 +7,9 @@ from pypdf import PdfReader
 from app.core.config import settings
 from app.services.milvus_service import milvus_service
 from app.services.ollama_client import ollama_client
+
+
+logger = logging.getLogger(__name__)
 
 
 def chunk_text(text: str, chunk_size: int = 1800, overlap: int = 300) -> list[str]:
@@ -49,8 +53,12 @@ class RagService:
         return len(chunks)
 
     async def retrieve_context(self, user_id: str, query: str, top_k: int = 5) -> list[dict]:
-        query_embedding = await ollama_client.embeddings(query)
-        return milvus_service.search(user_id=user_id, query_embedding=query_embedding, top_k=top_k)
+        try:
+            query_embedding = await ollama_client.embeddings(query)
+            return milvus_service.search(user_id=user_id, query_embedding=query_embedding, top_k=top_k)
+        except Exception as exc:
+            logger.warning("rag retrieve_context skipped: %s", exc)
+            return []
 
 
 rag_service = RagService()
