@@ -11,8 +11,10 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from app.services.alerting_service import alerting_service
+from app.services.delivery_format_service import build_worker_delivery_payload
 from app.services.observability_metrics_service import observability_metrics_service
 from app.services.websocket_manager import connection_manager
+from app.services.worker_result_service import worker_result_service
 
 logger = logging.getLogger(__name__)
 
@@ -143,14 +145,25 @@ class SchedulerService:
         now = datetime.now(timezone.utc).isoformat()
         try:
             if action_type == "send_message":
+                message_text = payload.get("message", "Напоминание от ассистента")
                 await connection_manager.send_to_user(
                     user_id,
                     {
                         "type": "proactive_message",
-                        "message": payload.get("message", "Напоминание от ассистента"),
+                        "message": message_text,
                         "timestamp": now,
                     },
                 )
+                delivery_payload = build_worker_delivery_payload(
+                    job_type="cron_reminder",
+                    is_success=True,
+                    result={
+                        "message": str(message_text),
+                        "source": "scheduler",
+                        "timestamp": now,
+                    },
+                )
+                await worker_result_service.push(user_id=user_id, payload=delivery_payload)
             success = True
         except Exception as exc:
             alerting_service.emit(
