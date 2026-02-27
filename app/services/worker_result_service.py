@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 import json
 
@@ -27,9 +28,9 @@ class WorkerResultService:
             redis = self._get_redis()
             key = self._key(user_id)
             max_items = max(10, int(settings.WORKER_RESULT_QUEUE_MAX_ITEMS))
-            await redis.rpush(key, json.dumps(payload, ensure_ascii=False))
-            await redis.ltrim(key, -max_items, -1)
-            await redis.expire(key, max(60, int(settings.WORKER_RESULT_TTL_SECONDS)))
+            await asyncio.wait_for(redis.rpush(key, json.dumps(payload, ensure_ascii=False)), timeout=0.5)
+            await asyncio.wait_for(redis.ltrim(key, -max_items, -1), timeout=0.5)
+            await asyncio.wait_for(redis.expire(key, max(60, int(settings.WORKER_RESULT_TTL_SECONDS))), timeout=0.5)
             return
         except Exception:
             self._results[user_id].append(payload)
@@ -39,9 +40,9 @@ class WorkerResultService:
         try:
             redis = self._get_redis()
             key = self._key(user_id)
-            raw_items = await redis.lrange(key, 0, count - 1)
+            raw_items = await asyncio.wait_for(redis.lrange(key, 0, count - 1), timeout=0.5)
             if raw_items:
-                await redis.ltrim(key, count, -1)
+                await asyncio.wait_for(redis.ltrim(key, count, -1), timeout=0.5)
                 items: list[dict] = []
                 for raw in raw_items:
                     try:
