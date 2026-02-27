@@ -222,8 +222,16 @@ class SchedulerService:
         success = False
         now = datetime.now(timezone.utc).isoformat()
         try:
-            if action_type == "send_message":
-                message_text = payload.get("message", "Напоминание от ассистента")
+            normalized_action_type = str(action_type or "").strip().lower()
+            message_action_types = {"send_message", "reminder", "notification", "daily_briefing"}
+
+            if normalized_action_type in message_action_types:
+                message_text = (
+                    payload.get("message")
+                    or payload.get("task_text")
+                    or payload.get("text")
+                    or "Напоминание от ассистента"
+                )
                 await connection_manager.send_to_user(
                     user_id,
                     {
@@ -242,6 +250,8 @@ class SchedulerService:
                     },
                 )
                 await worker_result_service.push(user_id=user_id, payload=delivery_payload)
+            else:
+                raise ValueError(f"Unsupported scheduler action_type: {action_type}")
             success = True
         except Exception as exc:
             alerting_service.emit(

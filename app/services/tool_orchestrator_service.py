@@ -31,6 +31,13 @@ TOOL_NAMES = skills_registry_service.tool_names()
 
 
 class ToolOrchestratorService:
+    @staticmethod
+    def _normalize_cron_action_type(action_type: str) -> str:
+        normalized = str(action_type or "send_message").strip().lower()
+        if normalized in {"reminder", "notification", "daily_briefing"}:
+            return "send_message"
+        return normalized
+
     async def plan_tool_calls(self, user_message: str, system_prompt: str) -> dict:
         planner_prompt = (
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
@@ -488,7 +495,7 @@ class ToolOrchestratorService:
     async def _cron_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         cron_name = str(arguments.get("name") or "chat-reminder")
         cron_expression = str(arguments.get("cron_expression") or "").strip()
-        action_type = str(arguments.get("action_type") or "send_message").strip()
+        action_type = self._normalize_cron_action_type(str(arguments.get("action_type") or "send_message"))
         payload = arguments.get("payload") if isinstance(arguments.get("payload"), dict) else {}
 
         task_text = str(arguments.get("task_text") or payload.get("message") or "").strip()

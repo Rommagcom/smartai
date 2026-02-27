@@ -18,11 +18,15 @@ async def create_cron_job(
     db: DBSession,
     current_user: CurrentUser,
 ) -> CronJob:
+    normalized_action_type = str(payload.action_type or "send_message").strip().lower()
+    if normalized_action_type in {"reminder", "notification", "daily_briefing"}:
+        normalized_action_type = "send_message"
+
     cron = CronJob(
         user_id=current_user.id,
         name=payload.name,
         cron_expression=payload.cron_expression,
-        action_type=payload.action_type,
+        action_type=normalized_action_type,
         payload=payload.payload,
         is_active=payload.is_active,
     )
