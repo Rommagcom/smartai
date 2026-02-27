@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from app.api.types import CurrentUser, DBSession
+from app.api.types import CurrentUser, CurrentUserId, DBSession
 from app.db.session import AsyncSessionLocal
 from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
@@ -285,10 +285,10 @@ async def pdf_create(
 
 @router.get("/worker-results/poll", response_model=WorkerResultsPollResponse)
 async def poll_worker_results(
-    current_user: CurrentUser,
+    current_user_id: CurrentUserId,
     limit: int = 20,
 ) -> WorkerResultsPollResponse:
-    items = await worker_result_service.pop_many(user_id=str(current_user.id), limit=limit)
+    items = await worker_result_service.pop_many(user_id=str(current_user_id), limit=limit)
     return WorkerResultsPollResponse(items=items)
 
 
