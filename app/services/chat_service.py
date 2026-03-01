@@ -47,6 +47,7 @@ class ChatService:
             r"\bпроанализируй|открой|проверь|скачай\b",
             r"\bпарс|scrape|fetch\b",
             r"\bудали|удалить|отмени|отключи|убери|убрать|останови|выключи\b",
+            r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 

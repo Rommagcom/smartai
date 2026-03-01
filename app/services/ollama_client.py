@@ -99,6 +99,8 @@ class OllamaClient:
             )
         except Exception as exc:
             if self._is_rate_limited_error(exc):
+                import logging as _logging
+                _logging.getLogger(__name__).warning("embedding rate-limited, returning zero vector")
                 return self._normalize_embedding_dim([])
             raise
         raw_embeddings = self._field(response, "embeddings")
