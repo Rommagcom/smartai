@@ -149,9 +149,8 @@ async def chat(
 
 @router.get("/skills", response_model=SkillsRegistryResponse)
 async def skills_registry(
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> SkillsRegistryResponse:
-    del current_user
     return SkillsRegistryResponse(
         registry_version=skills_registry_service.REGISTRY_VERSION,
         skills=skills_registry_service.list_contracts(),
@@ -226,9 +225,8 @@ async def execute_python(
 @router.post("/tools/web-search")
 async def web_search(
     payload: WebSearchRequest,
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> dict:
-    del current_user
     limit = max(1, min(payload.limit, 10))
     return await web_tools_service.web_search(query=payload.query, limit=limit)
 
@@ -236,9 +234,8 @@ async def web_search(
 @router.post("/tools/web-fetch")
 async def web_fetch(
     payload: WebFetchRequest,
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> dict:
-    del current_user
     max_chars = max(1000, min(payload.max_chars, 50000))
     return await web_tools_service.web_fetch(url=payload.url, max_chars=max_chars)
 
@@ -246,9 +243,8 @@ async def web_fetch(
 @router.post("/tools/browser")
 async def browser_action(
     payload: BrowserActionRequest,
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> dict:
-    del current_user
     action = payload.action.strip().lower()
     if action not in {"extract_text", "screenshot", "pdf"}:
         raise HTTPException(status_code=400, detail="action must be one of: extract_text, screenshot, pdf")
@@ -266,9 +262,8 @@ async def browser_action(
 @router.post("/tools/pdf-create")
 async def pdf_create(
     payload: PdfCreateRequest,
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> dict:
-    del current_user
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 

@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45
     MEMORY_DECAY_MIN_FACTOR: float = 0.35
 
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
+    RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:

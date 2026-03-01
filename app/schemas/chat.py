@@ -19,7 +19,7 @@ class ChatResponse(BaseModel):
 
 class FeedbackRequest(BaseModel):
     message_id: UUID
-    feedback_score: int
+    feedback_score: int = Field(ge=-1, le=1)
 
 
 class MessageOut(BaseModel):
@@ -89,7 +89,7 @@ class WorkerDeliveryItem(BaseModel):
     result_preview: dict | None = None
     next_action_hint: str | None = None
     error: WorkerDeliveryError | None = None
-    delivered_at: str
+    delivered_at: datetime
     result: dict | None = None
 
 
