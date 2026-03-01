@@ -32,3 +32,17 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
+
+
+def require_admin(user: User) -> User:
+    """Reusable admin guard — raises 403 if user is not an admin. Returns user for chaining."""
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
+
+
+async def get_current_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """FastAPI dependency: authenticated user who is also an admin."""
+    return require_admin(current_user)

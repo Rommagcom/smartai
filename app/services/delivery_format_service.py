@@ -33,13 +33,18 @@ def build_worker_delivery_payload(
     is_success: bool,
     result: dict | None = None,
     error_message: str | None = None,
+    human_message: str | None = None,
 ) -> dict:
     preview = _result_preview(result) if is_success else None
+    if human_message:
+        message = human_message
+    else:
+        message = "Фоновая задача выполнена." if is_success else "Фоновая задача завершилась с ошибкой."
     return {
         "type": "worker_result",
         "success": is_success,
         "job_type": job_type,
-        "message": "Фоновая задача выполнена." if is_success else "Фоновая задача завершилась с ошибкой.",
+        "message": message,
         "result_preview": preview,
         "next_action_hint": _next_action_hint(job_type=job_type, preview=preview) if is_success else None,
         "error": None if is_success else {"message": str(error_message or "unknown error")},

@@ -78,3 +78,24 @@ async def cleanup_memory(
     deleted_count = await memory_service.cleanup_expired_memories(db=db, user_id=current_user.id, limit=limit)
     await db.commit()
     return MemoryCleanupResponse(deleted_count=deleted_count)
+
+
+@router.delete("/{memory_id}", responses={404: {"description": "Memory not found"}})
+async def delete_memory(
+    memory_id: UUID,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    from sqlalchemy import select
+    from app.models.long_term_memory import LongTermMemory as LTM
+
+    result = await db.execute(
+        select(LTM).where(LTM.id == memory_id, LTM.user_id == current_user.id)
+    )
+    memory = result.scalar_one_or_none()
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    await db.delete(memory)
+    await db.commit()
+    return {"status": "deleted", "memory_id": str(memory_id)}

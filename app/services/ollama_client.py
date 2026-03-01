@@ -99,7 +99,7 @@ class OllamaClient:
             )
         except Exception as exc:
             if self._is_rate_limited_error(exc):
-                return self._normalize_embedding_dim([])
+                raise RuntimeError("Ollama embedding rate-limited — refusing to return zero-vector") from exc
             raise
         raw_embeddings = self._field(response, "embeddings")
         if not isinstance(raw_embeddings, list) or not raw_embeddings:

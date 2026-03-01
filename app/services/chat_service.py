@@ -1,3 +1,4 @@
+import logging
 import re
 from uuid import UUID
 
@@ -9,6 +10,17 @@ from app.services.ollama_client import ollama_client
 from app.services.rag_service import rag_service
 from app.services.tool_orchestrator_service import tool_orchestrator_service
 
+logger = logging.getLogger(__name__)
+
+
+# Regex that matches a bare domain / URL inside a user message.
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)"
+    r"[^\s]+"
+    r"|\b[a-z0-9][a-z0-9\-]*\.(?:com|org|net|io|dev|ru|kz|ua|by|me|info|biz|co|ai|app|cloud|pro|site|online|store|shop|tech|xyz)[/\w\-\.]*",
+    re.IGNORECASE,
+)
+
 
 class ChatService:
     @staticmethod
@@ -16,6 +28,11 @@ class ChatService:
         lowered = str(user_message or "").strip().lower()
         if not lowered:
             return False
+
+        # Fast path: if the message contains something that looks like a URL / domain,
+        # we should always try tool planning (web_fetch / browser).
+        if _URL_RE.search(lowered):
+            return True
 
         tool_intent_patterns = [
             r"\bв\s+очеред[ьи]\b",
@@ -29,6 +46,14 @@ class ChatService:
             r"\bintegration|api\b",
             r"\bdoc[_\s-]?search|документ\b",
             r"\bexecute[_\s-]?python|python\b",
+            # Website / analysis / open-site intents
+            r"\bсайт[аеуы]?\b",
+            r"\bстраниц[аеуы]?\b",
+            r"\bоткрой|открыть|зайди|зайти|перейд|перейти\b",
+            r"\bпроанализируй|анализируй|проанализировать|анализировать\b",
+            r"\bпроверь|проверить|просмотр|просмотри\b",
+            r"\bскачай|скачать|загрузи|загрузить\b",
+            r"\bспарс|парс|scrape|crawl\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 
@@ -106,7 +131,8 @@ class ChatService:
             )
             response_hint = str(planner.get("response_hint") or "")
             return tool_calls, response_hint
-        except Exception:
+        except Exception as exc:
+            logger.warning("Tool planning/execution failed, falling back to LLM: %s", exc)
             return None
 
     async def _maybe_tool_answer(

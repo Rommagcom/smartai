@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import json
+import logging
 from uuid import UUID
 
 from anyio import to_thread
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.models.api_integration import ApiIntegration
 from app.models.cron_job import CronJob
@@ -63,6 +66,10 @@ class ToolOrchestratorService:
         except Exception:
             return {"use_tools": False, "steps": [], "response_hint": ""}
 
+    # Per-step timeout (seconds).  Prevents a single slow tool (e.g. browser)
+    # from blocking the whole chain indefinitely.
+    TOOL_STEP_TIMEOUT_SECONDS: int = 90
+
     async def execute_tool_chain(
         self,
         db: AsyncSession,
@@ -101,7 +108,10 @@ class ToolOrchestratorService:
                 continue
 
             try:
-                result = await handlers[tool](db, user, arguments)
+                result = await asyncio.wait_for(
+                    handlers[tool](db, user, arguments),
+                    timeout=self.TOOL_STEP_TIMEOUT_SECONDS,
+                )
                 self._update_chain_context(tool=tool, result=result, context=context)
                 results.append(
                     {
@@ -111,7 +121,18 @@ class ToolOrchestratorService:
                         "result": result,
                     }
                 )
+            except asyncio.TimeoutError:
+                logger.warning("Tool '%s' timed out after %ds", tool, self.TOOL_STEP_TIMEOUT_SECONDS)
+                results.append(
+                    {
+                        "tool": tool,
+                        "arguments": arguments,
+                        "success": False,
+                        "error": f"Tool '{tool}' timed out after {self.TOOL_STEP_TIMEOUT_SECONDS}s",
+                    }
+                )
             except Exception as exc:
+                logger.warning("Tool '%s' failed: %s", tool, exc)
                 results.append(
                     {
                         "tool": tool,
@@ -124,27 +145,52 @@ class ToolOrchestratorService:
 
     @staticmethod
     def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
-        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
-            return dict(arguments)
-
         merged = dict(arguments)
-        onboarding = context.get("integration_onboarding") or {}
-        if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
-            merged["draft"] = onboarding["draft"]
-        if not merged.get("draft_id") and onboarding.get("draft_id"):
-            merged["draft_id"] = onboarding["draft_id"]
+
+        # Auto-fill web_fetch/browser URL from the previous web_search results
+        # when the planner left url empty (it can't know the URLs at plan time).
+        if tool in {"web_fetch", "browser"}:
+            if not merged.get("url"):
+                search_ctx = context.get("web_search") or {}
+                first_url = str(search_ctx.get("first_url") or "").strip()
+                if first_url:
+                    merged["url"] = first_url
+            return merged
+
+        if tool in {"integration_onboarding_test", "integration_onboarding_save"}:
+            onboarding = context.get("integration_onboarding") or {}
+            if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
+                merged["draft"] = onboarding["draft"]
+            if not merged.get("draft_id") and onboarding.get("draft_id"):
+                merged["draft_id"] = onboarding["draft_id"]
+            return merged
+
         return merged
 
     @staticmethod
     def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
+        if not isinstance(result, dict):
+            return
+
+        # Capture first URL from web_search so subsequent web_fetch/browser can use it.
+        if tool == "web_search":
+            items = result.get("results") if isinstance(result.get("results"), list) else []
+            first_url = ""
+            for item in items:
+                url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+                if url and "duckduckgo.com" not in url:
+                    first_url = url
+                    break
+            if not first_url and items:
+                first_url = str(items[0].get("url") or "") if isinstance(items[0], dict) else ""
+            context["web_search"] = {"first_url": first_url}
+            return
+
         if tool not in {
             "integration_onboarding_connect",
             "integration_onboarding_test",
             "integration_onboarding_save",
         }:
-            return
-
-        if not isinstance(result, dict):
             return
 
         onboarding = dict(context.get("integration_onboarding") or {})
@@ -163,11 +209,27 @@ class ToolOrchestratorService:
         tool_calls: list[dict],
         response_hint: str,
     ) -> str:
+        # Check if ALL tool_calls failed — give the LLM explicit guidance.
+        all_failed = all(not tc.get("success") for tc in tool_calls) if tool_calls else True
+
         summary_prompt = (
             "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "Если есть числовые значения (например курсы валют), дай их кратко и явно. "
-            "Если были ошибки/пустые результаты, честно сообщи и предложи следующий шаг."
+            "Если есть числовые значения (например курсы валют, температура), дай их кратко и явно. "
+            "Если web_search нашёл ссылки — упомяни их. "
+            "Если web_fetch/browser вернул текст сайта — проанализируй его и дай краткую выжимку. "
         )
+        if all_failed:
+            summary_prompt += (
+                "ВСЕ инструменты завершились с ошибкой. "
+                "Объясни пользователю, что произошло, и предложи конкретный следующий шаг "
+                "(например: попробовать позже, уточнить запрос, или дай ссылку, по которой можно посмотреть самостоятельно). "
+                "НЕ притворяйся, что данные доступны."
+            )
+        else:
+            summary_prompt += (
+                "Если были ошибки/пустые результаты, честно сообщи и предложи следующий шаг."
+            )
+
         compact = json.dumps(tool_calls, ensure_ascii=False)[:16000]
         return await ollama_client.chat(
             messages=[

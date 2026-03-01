@@ -34,8 +34,7 @@ class SelfImprovementService:
 
             user.preferences = prefs
             db.add(user)
-            await db.commit()
-            await db.refresh(user)
+            await db.flush()
 
         return {"analysis": analysis, "preferences": user.preferences}
 

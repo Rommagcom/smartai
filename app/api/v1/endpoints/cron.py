@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.api.types import CurrentUser, DBSession
 from app.models.cron_job import CronJob
 from app.models.user import User
-from app.schemas.cron import CronJobCreate, CronJobOut
+from app.schemas.cron import CronJobCreate, CronJobOut, CronJobUpdate
 from app.services.scheduler_service import scheduler_service
 
 router = APIRouter()
@@ -70,3 +70,39 @@ async def delete_cron_job(
     await db.delete(job)
     await db.commit()
     return {"status": "deleted"}
+
+
+@router.patch("/{job_id}", response_model=CronJobOut, responses={404: {"description": "Cron job not found"}})
+async def update_cron_job(
+    job_id: UUID,
+    payload: CronJobUpdate,
+    db: DBSession,
+    current_user: CurrentUser,
+) -> CronJob:
+    result = await db.execute(select(CronJob).where(CronJob.id == job_id, CronJob.user_id == current_user.id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Cron job not found")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(job, field, value)
+
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    # Re-register the job in the scheduler if schedule-related fields changed
+    if any(f in update_data for f in ("cron_expression", "action_type", "payload", "is_active")):
+        if job.is_active:
+            scheduler_service.add_or_replace_job(
+                job_id=str(job.id),
+                cron_expression=job.cron_expression,
+                user_id=str(current_user.id),
+                action_type=job.action_type,
+                payload=job.payload,
+            )
+        elif scheduler_service.scheduler.get_job(str(job.id)):
+            scheduler_service.scheduler.remove_job(str(job.id))
+
+    return job

@@ -1,5 +1,7 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
+import logging
 import math
 import re
 from uuid import UUID
@@ -8,10 +10,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.session import AsyncSessionLocal
 from app.models.long_term_memory import LongTermMemory
 from app.models.message import Message
 from app.models.session import Session
 from app.services.ollama_client import ollama_client
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:
@@ -197,7 +202,8 @@ class MemoryService:
 
     async def retrieve_relevant_memories(self, db: AsyncSession, user_id: UUID, query: str, top_k: int = 5) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
-        await self.apply_importance_decay(db, user_id)
+        # Decay runs in background — non-blocking for retrieval
+        asyncio.create_task(self._safe_decay(user_id))
         try:
             query_embedding = await ollama_client.embeddings(query)
         except Exception:
@@ -214,7 +220,8 @@ class MemoryService:
 
     async def list_memories(self, db: AsyncSession, user_id: UUID, limit: int = 200) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
-        await self.apply_importance_decay(db, user_id)
+        # Decay runs in background — non-blocking for listing
+        asyncio.create_task(self._safe_decay(user_id))
         result = await db.execute(
             select(LongTermMemory)
             .where(LongTermMemory.user_id == user_id, self._active_filter(now))
@@ -222,6 +229,15 @@ class MemoryService:
             .limit(max(1, min(limit, 500)))
         )
         return result.scalars().all()
+
+    async def _safe_decay(self, user_id: UUID) -> None:
+        """Run importance decay in an independent DB session. Fire-and-forget safe."""
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                await self.apply_importance_decay(bg_db, user_id)
+                await bg_db.commit()
+        except Exception as exc:
+            logger.debug("background decay skipped for user %s: %s", user_id, exc)
 
     async def apply_importance_decay(self, db: AsyncSession, user_id: UUID) -> None:
         now = datetime.now(timezone.utc)
