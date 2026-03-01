@@ -22,8 +22,13 @@ async def ws_chat(websocket: WebSocket, token: str = Query(...)) -> None:
     await connection_manager.connect(websocket, user_id=user_id)
     try:
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except ValueError:
+                continue
             if data.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
+        connection_manager.disconnect(websocket, user_id=user_id)
+    except Exception:
         connection_manager.disconnect(websocket, user_id=user_id)

@@ -196,7 +196,7 @@ class SkillsRegistryService:
                         "payload": {"type": "object"},
                         "task_text": {"type": "string"},
                     },
-                    "required": ["name"],
+                    "required": [],
                     "additionalProperties": False,
                 },
                 "permissions": ["schedule.write"],

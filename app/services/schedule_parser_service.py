@@ -107,7 +107,8 @@ class ScheduleParserService:
             )
 
         raise ValueError(
-            "Не удалось распознать время. Примеры: 'завтра в 9:00', '25 февраля в 9:00', 'каждый день в 9:00', 'каждую пятницу в 9:00'."
+            "Не удалось распознать время. Примеры: 'завтра в 9:00', 'через 30 минут', 'послезавтра в 10:00', "
+            "'25 февраля в 9:00', 'каждый день в 9:00', 'каждую пятницу в 9:00'."
         )
 
     @staticmethod
@@ -162,9 +163,17 @@ class ScheduleParserService:
         return None
 
     def _absolute_or_relative_datetime(self, text: str, now: datetime, hour: int, minute: int) -> datetime | None:
+        relative = self._extract_relative_offset(text, now)
+        if relative is not None:
+            return relative
+
         if "сегодня" in text:
             dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             return dt if dt > now else dt + timedelta(days=1)
+
+        if "послезавтра" in text:
+            base = now + timedelta(days=2)
+            return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         if "завтра" in text:
             base = now + timedelta(days=1)
@@ -197,6 +206,26 @@ class ScheduleParserService:
         if not match.group(3) and candidate.date() < now.date():
             candidate = candidate.replace(year=year + 1)
         return candidate
+
+    @staticmethod
+    def _extract_relative_offset(text: str, now: datetime) -> datetime | None:
+        """Parse 'через N минут/часов/дней' patterns."""
+        UNIT_MAP = {
+            "минут": "minutes", "мин": "minutes",
+            "час": "hours", "часа": "hours", "часов": "hours",
+            "день": "days", "дня": "days", "дней": "days",
+        }
+        unit_pattern = "|".join(sorted((re.escape(u) for u in UNIT_MAP), key=len, reverse=True))
+        match = re.search(rf"через\s+(\d+)\s*({unit_pattern})", text)
+        if not match:
+            return None
+        amount = int(match.group(1))
+        unit_key = match.group(2)
+        unit = UNIT_MAP.get(unit_key)
+        if not unit or amount <= 0:
+            return None
+        delta = timedelta(**{unit: amount})
+        return now + delta
 
     def _extract_weekday_once(self, text: str, now: datetime) -> datetime | None:
         for ru_name, dow in WEEKDAYS.items():
