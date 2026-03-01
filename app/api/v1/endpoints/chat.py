@@ -188,6 +188,12 @@ async def set_feedback(
     await db.commit()
 
     analysis = await self_improvement_service.analyze_feedback(db, str(current_user.id))
+
+    try:
+        await self_improvement_service.maybe_auto_adapt(db, current_user)
+    except Exception:
+        logger.warning("auto-adapt after feedback failed", exc_info=True)
+
     return {"status": "ok", "analysis": analysis}
 
 

@@ -234,6 +234,20 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "cron_delete_all",
+                    "title": "Cron Delete All",
+                    "description": "Удаление всех cron/reminder задач пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["schedule.write"],
+            },
+            {
+                "manifest": {
                     "name": "worker_enqueue",
                     "title": "Worker Enqueue",
                     "description": "Постановка задачи в фоновую очередь",

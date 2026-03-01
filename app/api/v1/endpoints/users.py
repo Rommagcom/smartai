@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
-from app.api.types import CurrentUser, DBSession
+from app.api.types import AdminUser, CurrentUser, DBSession
 from app.models.user import User
 from app.schemas.soul import SoulAdaptTaskRequest, SoulOnboardingStep, SoulSetupRequest, SoulSetupResponse, SoulStatus
 from app.schemas.user import UserAdminAccessUpdate, UserOut, UserPreferencesUpdate
@@ -13,11 +13,6 @@ from app.services.soul_service import soul_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
-
-
-def _require_admin(current_user: User) -> None:
-    if not current_user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
 
 def _to_user_out(current_user: User) -> UserOut:
@@ -56,8 +51,7 @@ async def update_preferences(
 
 
 @router.get("/admin/users", response_model=list[UserOut])
-async def admin_list_users(db: DBSession, current_user: CurrentUser) -> list[UserOut]:
-    _require_admin(current_user)
+async def admin_list_users(db: DBSession, current_user: AdminUser) -> list[UserOut]:
     result = await db.execute(select(User).order_by(User.created_at.desc()))
     users = result.scalars().all()
     return [_to_user_out(user) for user in users]
@@ -68,9 +62,8 @@ async def admin_set_user_admin_access(
     user_id: UUID,
     payload: UserAdminAccessUpdate,
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> UserOut:
-    _require_admin(current_user)
 
     result = await db.execute(select(User).where(User.id == user_id))
     target_user = result.scalar_one_or_none()
@@ -97,9 +90,8 @@ async def admin_set_user_admin_access(
 async def admin_delete_user(
     user_id: UUID,
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> dict:
-    _require_admin(current_user)
 
     result = await db.execute(select(User).where(User.id == user_id))
     target_user = result.scalar_one_or_none()

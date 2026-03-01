@@ -127,33 +127,42 @@ class ConnectionManager:
         return user_id, payload
 
     async def _fanout_listener(self) -> None:
-        redis = self._get_redis()
-        pubsub = redis.pubsub()
-        await pubsub.psubscribe(self._channel_pattern())
-        try:
-            while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if not message:
-                    await asyncio.sleep(0.05)
-                    continue
-                parsed = self._parse_envelope(message.get("data"))
-                if not parsed:
-                    continue
-                user_id, payload = parsed
-                await self._send_to_local(user_id=user_id, payload=payload)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("websocket fanout listener error")
-            alerting_service.emit(
-                component="websocket",
-                severity="warning",
-                message="ws fanout listener crashed",
-                details={"error": str(exc)},
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                await pubsub.close()
+        backoff = 1.0
+        max_backoff = 60.0
+        while True:
+            pubsub = None
+            try:
+                redis = self._get_redis()
+                pubsub = redis.pubsub()
+                await pubsub.psubscribe(self._channel_pattern())
+                backoff = 1.0
+                while True:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if not message:
+                        await asyncio.sleep(0.05)
+                        continue
+                    parsed = self._parse_envelope(message.get("data"))
+                    if not parsed:
+                        continue
+                    user_id, payload = parsed
+                    await self._send_to_local(user_id=user_id, payload=payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("websocket fanout listener error, reconnecting in %.1fs", backoff)
+                alerting_service.emit(
+                    component="websocket",
+                    severity="warning",
+                    message="ws fanout listener crashed, will reconnect",
+                    details={"error": str(exc), "backoff_seconds": backoff},
+                )
+                self._redis = None
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+            finally:
+                if pubsub is not None:
+                    with contextlib.suppress(Exception):
+                        await pubsub.close()
 
     def connected_user_ids(self) -> list[str]:
         return list(self.active_connections.keys())

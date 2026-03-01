@@ -53,7 +53,7 @@ class EgressPolicyService:
             if self._ip_is_private(host):
                 raise ValueError("Egress policy blocked private target")
             return
-        except ipaddress.ValueError:
+        except ValueError:
             pass
 
         try:

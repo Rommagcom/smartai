@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import logging
 import math
 import re
 from uuid import UUID
@@ -12,6 +13,8 @@ from app.models.long_term_memory import LongTermMemory
 from app.models.message import Message
 from app.models.session import Session
 from app.services.ollama_client import ollama_client
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:
@@ -191,6 +194,7 @@ class MemoryService:
         try:
             vector = await ollama_client.embeddings(content)
         except Exception:
+            logger.warning("embedding generation failed for memory, using zero vector", exc_info=True)
             vector = self._zero_embedding()
         memory = LongTermMemory(
             user_id=user_id,
@@ -215,6 +219,7 @@ class MemoryService:
         try:
             query_embedding = await ollama_client.embeddings(query)
         except Exception:
+            logger.warning("query embedding generation failed, falling back to importance sort", exc_info=True)
             query_embedding = self._zero_embedding()
 
         if self._is_zero_vector(query_embedding):
@@ -237,6 +242,7 @@ class MemoryService:
             )
             rows = result.scalars().all()
         except Exception:
+            logger.warning("cosine distance query failed, falling back to importance sort", exc_info=True)
             result = await db.execute(
                 select(LongTermMemory)
                 .where(LongTermMemory.user_id == user_id, self._active_filter(now))
@@ -342,8 +348,13 @@ class MemoryService:
                 stream=False,
             )
         except Exception:
+            logger.warning("LLM fact extraction call failed", exc_info=True)
             return
-        failed_writes = 0
+
+        if not response or not response.strip():
+            return
+
+        stored = 0
         for line in response.splitlines():
             parts = [part.strip() for part in line.split("|")]
             if len(parts) != 3:
@@ -363,9 +374,12 @@ class MemoryService:
                     content=content,
                     importance_score=importance,
                 )
+                stored += 1
             except Exception:
-                failed_writes += 1
-        _ = failed_writes
+                logger.warning("failed to store extracted fact: %s", content, exc_info=True)
+
+        if stored:
+            logger.info("extracted and stored %d fact(s) from chat", stored)
 
 
 memory_service = MemoryService()

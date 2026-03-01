@@ -5,8 +5,10 @@ import base64
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from contextlib import suppress
 from io import BytesIO
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -53,14 +55,45 @@ def _split_pipe(text: str, expected_min: int) -> list[str]:
 
 
 class TelegramAdapter(MessengerAdapter):
+    _KNOWN_USERS_PATH = Path(
+        os.environ.get("TELEGRAM_KNOWN_USERS_FILE", "data/tg_known_users.json")
+    )
+
     def __init__(self) -> None:
         self.settings = get_telegram_settings()
         self.client = BackendApiClient(
             base_url=self.settings.BACKEND_API_BASE_URL,
             bridge_secret=self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
         )
-        self._known_users: dict[int, dict[str, Any]] = {}
+        self._known_users: dict[int, dict[str, Any]] = self._load_known_users()
         self._background_tasks: set[asyncio.Task] = set()
+
+    # ---- known-users file persistence ----
+
+    @classmethod
+    def _load_known_users(cls) -> dict[int, dict[str, Any]]:
+        """Load persisted known_users from JSON file (survives restarts)."""
+        try:
+            if cls._KNOWN_USERS_PATH.exists():
+                raw = json.loads(cls._KNOWN_USERS_PATH.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    return {int(k): v for k, v in raw.items() if isinstance(v, dict)}
+        except Exception:
+            logger.warning("Failed to load known_users from %s", cls._KNOWN_USERS_PATH, exc_info=True)
+        return {}
+
+    def _save_known_users(self) -> None:
+        """Persist current known_users to disk."""
+        try:
+            self._KNOWN_USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._KNOWN_USERS_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(
+                {str(k): v for k, v in self._known_users.items()},
+                ensure_ascii=False,
+            ), encoding="utf-8")
+            tmp.replace(self._KNOWN_USERS_PATH)
+        except Exception:
+            logger.warning("Failed to save known_users to %s", self._KNOWN_USERS_PATH, exc_info=True)
 
     async def run(self) -> None:
         if not self.settings.TELEGRAM_BOT_TOKEN:
@@ -143,6 +176,7 @@ class TelegramAdapter(MessengerAdapter):
                     "username": username,
                     "last_seen_at": datetime.now(timezone.utc).isoformat(),
                 }
+                self._save_known_users()
             return auth
         except PermissionError as exc:
             if update.effective_message:
@@ -164,10 +198,10 @@ class TelegramAdapter(MessengerAdapter):
             concurrency = max(1, int(self.settings.TELEGRAM_POLL_CONCURRENCY))
             semaphore = asyncio.Semaphore(concurrency)
 
-            async def poll_one(data: dict[str, Any]) -> None:
+            async def poll_one(tg_user_id: int, data: dict[str, Any]) -> None:
                 try:
                     async with semaphore:
-                        await self._poll_worker_results_for_user(application, data)
+                        await self._poll_worker_results_for_user(application, tg_user_id, data)
                 except Exception as exc:
                     alerting_service.emit(
                         component="telegram_bridge",
@@ -177,7 +211,7 @@ class TelegramAdapter(MessengerAdapter):
                     )
                     logger.exception("telegram polling error")
 
-            await asyncio.gather(*(poll_one(data) for _, data in users_snapshot), return_exceptions=False)
+            await asyncio.gather(*(poll_one(tg_id, data) for tg_id, data in users_snapshot), return_exceptions=False)
 
     def _cleanup_known_users(self) -> None:
         ttl_seconds = max(60, int(self.settings.TELEGRAM_KNOWN_USER_TTL_SECONDS))
@@ -199,8 +233,10 @@ class TelegramAdapter(MessengerAdapter):
 
         for tg_user_id in stale_ids:
             self._known_users.pop(tg_user_id, None)
+        if stale_ids:
+            self._save_known_users()
 
-    async def _poll_worker_results_for_user(self, application: Application, data: dict[str, Any]) -> None:
+    async def _poll_worker_results_for_user(self, application: Application, tg_user_id: int, data: dict[str, Any]) -> None:
         started_at = perf_counter()
         success = False
         token = str(data.get("token") or "")
@@ -215,6 +251,20 @@ class TelegramAdapter(MessengerAdapter):
             return
 
         res = await self.client.worker_results_poll(token=token, limit=20)
+
+        # Auto-refresh expired JWT token.
+        status_code = int(res.get("status") or 0)
+        if status_code == 401 and tg_user_id:
+            try:
+                new_token, username = await self.client.ensure_auth(tg_user_id)
+                data["token"] = new_token
+                if tg_user_id in self._known_users:
+                    self._known_users[tg_user_id]["token"] = new_token
+                    self._save_known_users()
+                res = await self.client.worker_results_poll(token=new_token, limit=20)
+            except Exception:
+                logger.warning("Token refresh failed for tg_user %s", tg_user_id, exc_info=True)
+
         if res.get("status") != 200:
             status = int(res.get("status") or 0)
             if status >= 500:
@@ -261,23 +311,48 @@ class TelegramAdapter(MessengerAdapter):
         if success is None:
             success = item.get("status") == "success"
         job_type = item.get("job_type", "job")
-        if bool(success):
-            preview = item.get("result_preview")
-            if preview is None:
-                preview = item.get("result", {})
-            logger.debug("telegram worker success job_type=%s preview=%s", job_type, _safe_json(preview, max_len=4000))
-            artifact_hint = str(item.get("next_action_hint") or "").strip()
-            if not artifact_hint:
-                artifact_hint = TelegramAdapter._artifact_ready_hint(job_type=job_type, preview=preview)
-            suffix = f"\n\n{artifact_hint}" if artifact_hint else ""
-            return f"✅ Фоновая задача выполнена ({job_type}){suffix}"
-        error_obj = item.get("error")
-        error_message = error_obj.get("message") if isinstance(error_obj, dict) else error_obj
-        logger.warning("telegram worker failed job_type=%s error=%s", job_type, error_message)
-        return (
-            f"❌ Фоновая задача завершилась с ошибкой ({job_type})\n"
-            f"Ошибка: {error_message or 'unknown error'}"
-        )
+
+        if not bool(success):
+            error_obj = item.get("error")
+            error_message = error_obj.get("message") if isinstance(error_obj, dict) else error_obj
+            logger.warning("telegram worker failed job_type=%s error=%s", job_type, error_message)
+            return (
+                f"❌ Фоновая задача завершилась с ошибкой ({job_type})\n"
+                f"Ошибка: {error_message or 'unknown error'}"
+            )
+
+        # Use human-readable message when present (cron_reminder, etc.).
+        human_message = str(item.get("message") or "").strip()
+
+        # For cron_reminder: display the human message directly.
+        if job_type == "cron_reminder" and human_message:
+            return human_message
+
+        preview = item.get("result_preview")
+        if preview is None:
+            preview = item.get("result", {})
+
+        # Try to extract a readable message from preview dict.
+        if isinstance(preview, dict):
+            preview_message = str(preview.get("message") or "").strip()
+            if preview_message:
+                return f"✅ Фоновая задача выполнена ({job_type})\n{preview_message}"
+
+        artifact_hint = str(item.get("next_action_hint") or "").strip()
+        if not artifact_hint:
+            artifact_hint = TelegramAdapter._artifact_ready_hint(job_type=job_type, preview=preview)
+        suffix = f"\n\n{artifact_hint}" if artifact_hint else ""
+
+        if isinstance(preview, dict) and len(preview) > 0:
+            return (
+                f"✅ Фоновая задача выполнена ({job_type})\n"
+                f"Результат:\n{_safe_json(preview, max_len=3200)}"
+                f"{suffix}"
+            )
+
+        if human_message:
+            return f"✅ {human_message}"
+        return f"✅ Фоновая задача выполнена ({job_type})"
 
     @staticmethod
     def _artifact_ready_hint(job_type: str, preview: Any) -> str:
