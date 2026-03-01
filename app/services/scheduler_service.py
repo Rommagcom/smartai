@@ -248,6 +248,7 @@ class SchedulerService:
                         "source": "scheduler",
                         "timestamp": now,
                     },
+                    human_message=f"⏰ Напоминание: {message_text}",
                 )
                 await worker_result_service.push(user_id=user_id, payload=delivery_payload)
             else:

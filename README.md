@@ -627,14 +627,35 @@ services:
 ## 10) Web tools и мессенджеры
 ### Web tools без платных сервисов
 - По умолчанию `web_search` использует бесплатный DuckDuckGo HTML endpoint.
+- Если HTML endpoint вернул 0 результатов, автоматически пробуется DuckDuckGo Lite endpoint.
 - Можно подключить self-hosted SearxNG (тоже бесплатно) через `SEARXNG_BASE_URL`.
 - Для browser automation установлены зависимости Chromium/Playwright.
 - В Docker используется `CHROME_EXECUTABLE_PATH=/usr/bin/chromium`.
+- При пустых результатах поиска автоматически подставляются fallback-ссылки: погода, валюты, общие.
+- Если URL встречается в тексте пользователя, система автоматически переключается в режим инструментов.
+
+### Цепочки инструментов (tool chains)
+- `web_search → web_fetch`: URL первого не-DuckDuckGo результата автоматически передаётся следующему шагу.
+- Каждый шаг ограничен таймаутом `TOOL_STEP_TIMEOUT_SECONDS` (по умолчанию 90 сек).
+- Если все шаги цепочки завершились ошибкой, LLM получает явное указание сообщить об этом пользователю.
 
 ### Модульная архитектура мессенджеров
 - Базовый контракт: `integrations/messengers/base/adapter.py`
 - Telegram-реализация: `integrations/messengers/telegram`
 - Для нового мессенджера: создать новый модуль рядом с Telegram и реализовать `MessengerAdapter`.
+
+### Надёжность доставки уведомлений
+- Крон-напоминания доставляются с человекочитаемым текстом: `⏰ Напоминание: {текст}`.
+- `_known_users` Telegram-бота персистятся в `data/tg_known_users.json`, TTL = 30 дней.
+- При 401 во время polling автоматически обновляется JWT.
+
+### AdminUser dependency
+- Для admin-эндпоинтов используется `AdminUser = Annotated[User, Depends(get_admin_user)]`.
+- Проверка `is_admin` вынесена в единую FastAPI-зависимость `get_admin_user`.
+
+### PDF и кириллица
+- Для корректного отображения кириллицы в PDF используется шрифт DejaVu Sans (путь: переменная `PDF_FONT_PATH`).
+- Если шрифт недоступен, система корректно деградирует к Helvetica.
 
 ## 11) Локальный запуск без Docker
 1. Установите зависимости:

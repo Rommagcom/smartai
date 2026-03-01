@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException, status
 from sqlalchemy import func, select
 
-from app.api.types import CurrentUser, DBSession
+from app.api.types import AdminUser, CurrentUser, DBSession
 from app.core.config import settings
 from app.models.telegram_allowed_user import TelegramAllowedUser
 from app.models.user import User
@@ -11,11 +11,6 @@ from app.services.scheduler_service import scheduler_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
-
-
-def _require_admin(user: User) -> None:
-    if not user.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
 
 @router.get("/access/check/{telegram_user_id}", response_model=TelegramAccessCheck)
@@ -38,8 +33,7 @@ async def telegram_access_check(
 
 
 @router.get("/admin/access", response_model=list[TelegramAllowedUserOut])
-async def list_allowed_users(db: DBSession, current_user: CurrentUser) -> list[TelegramAllowedUser]:
-    _require_admin(current_user)
+async def list_allowed_users(db: DBSession, current_user: AdminUser) -> list[TelegramAllowedUser]:
     result = await db.execute(select(TelegramAllowedUser).order_by(TelegramAllowedUser.created_at.desc()))
     return result.scalars().all()
 
@@ -48,9 +42,8 @@ async def list_allowed_users(db: DBSession, current_user: CurrentUser) -> list[T
 async def add_allowed_user(
     payload: TelegramAllowedUserCreate,
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> TelegramAllowedUser:
-    _require_admin(current_user)
 
     existing = await db.execute(select(TelegramAllowedUser).where(TelegramAllowedUser.telegram_user_id == payload.telegram_user_id))
     item = existing.scalar_one_or_none()
@@ -77,9 +70,8 @@ async def add_allowed_user(
 async def disable_allowed_user(
     telegram_user_id: int,
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> dict:
-    _require_admin(current_user)
     existing = await db.execute(select(TelegramAllowedUser).where(TelegramAllowedUser.telegram_user_id == telegram_user_id))
     item = existing.scalar_one_or_none()
     if not item:
@@ -95,9 +87,8 @@ async def disable_allowed_user(
 async def admin_delete_telegram_user_fully(
     telegram_user_id: int,
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> dict:
-    _require_admin(current_user)
 
     username = f"tg_{telegram_user_id}"
 

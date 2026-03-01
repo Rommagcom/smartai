@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 import json
 from uuid import UUID
@@ -27,7 +28,11 @@ from app.services.web_tools_service import web_tools_service
 from app.workers.models import WorkerJobType
 from app.workers.worker_service import worker_service
 
+logger = logging.getLogger(__name__)
+
 TOOL_NAMES = skills_registry_service.tool_names()
+
+TOOL_STEP_TIMEOUT_SECONDS = 90
 
 
 class ToolOrchestratorService:
@@ -54,7 +59,10 @@ class ToolOrchestratorService:
             "5) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
             "6) Если пользователь просит выполнить задачу в фоне/очереди (например 'поставь в очередь', 'обработай в фоне'), используй worker_enqueue. "
             "7) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
-            "8) Не выдумывай аргументы, если их нет в сообщении."
+            "8) Не выдумывай аргументы, если их нет в сообщении. "
+            "9) Для удаления конкретного напоминания: сначала cron_list, затем cron_delete с нужным job_id из результата. "
+            "10) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
+            "11) Для просмотра списка напоминаний используй cron_list."
         )
 
         try:
@@ -108,7 +116,10 @@ class ToolOrchestratorService:
                 continue
 
             try:
-                result = await handlers[tool](db, user, arguments)
+                result = await asyncio.wait_for(
+                    handlers[tool](db, user, arguments),
+                    timeout=TOOL_STEP_TIMEOUT_SECONDS,
+                )
                 self._update_chain_context(tool=tool, result=result, context=context)
                 results.append(
                     {
@@ -116,6 +127,16 @@ class ToolOrchestratorService:
                         "arguments": arguments,
                         "success": True,
                         "result": result,
+                    }
+                )
+            except asyncio.TimeoutError:
+                logger.warning("tool step '%s' timed out after %ss", tool, TOOL_STEP_TIMEOUT_SECONDS)
+                results.append(
+                    {
+                        "tool": tool,
+                        "arguments": arguments,
+                        "success": False,
+                        "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s",
                     }
                 )
             except Exception as exc:
@@ -131,10 +152,18 @@ class ToolOrchestratorService:
 
     @staticmethod
     def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
-        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
-            return dict(arguments)
-
         merged = dict(arguments)
+
+        if tool in {"web_fetch", "browser"}:
+            if not merged.get("url"):
+                first_url = (context.get("web_search") or {}).get("first_url") or ""
+                if first_url:
+                    merged["url"] = first_url
+            return merged
+
+        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
+            return merged
+
         onboarding = context.get("integration_onboarding") or {}
         if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
             merged["draft"] = onboarding["draft"]
@@ -144,6 +173,15 @@ class ToolOrchestratorService:
 
     @staticmethod
     def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
+        if tool == "web_search" and isinstance(result, dict):
+            items = result.get("results") if isinstance(result.get("results"), list) else []
+            for item in items:
+                href = str(item.get("href") or item.get("url") or "").strip()
+                if href and "duckduckgo.com" not in href:
+                    context.setdefault("web_search", {})["first_url"] = href
+                    break
+            return
+
         if tool not in {
             "integration_onboarding_connect",
             "integration_onboarding_test",
@@ -170,10 +208,19 @@ class ToolOrchestratorService:
         tool_calls: list[dict],
         response_hint: str,
     ) -> str:
+        all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else False
+        failure_guidance = ""
+        if all_failed:
+            failure_guidance = (
+                " Все инструменты завершились с ошибкой. "
+                "Честно скажи пользователю, что получить данные не удалось. "
+                "Предложи конкретный следующий шаг: повторить через минуту, уточнить запрос, или указать альтернативный источник."
+            )
         summary_prompt = (
             "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
             "Если есть числовые значения (например курсы валют), дай их кратко и явно. "
             "Если были ошибки/пустые результаты, честно сообщи и предложи следующий шаг."
+            f"{failure_guidance}"
         )
         compact = json.dumps(tool_calls, ensure_ascii=False)[:16000]
         return await ollama_client.chat(
@@ -205,6 +252,7 @@ class ToolOrchestratorService:
             "cron_add": self._cron_add,
             "cron_list": self._cron_list,
             "cron_delete": self._cron_delete,
+            "cron_delete_all": self._cron_delete_all,
             "worker_enqueue": self._worker_enqueue,
             "integration_onboarding_connect": self._integration_onboarding_connect,
             "integration_onboarding_test": self._integration_onboarding_test,
@@ -579,6 +627,21 @@ class ToolOrchestratorService:
         await db.delete(job)
         await db.flush()
         return {"status": "deleted", "job_id": str(job_id)}
+
+    async def _cron_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del arguments
+        result = await db.execute(select(CronJob).where(CronJob.user_id == user.id))
+        jobs = result.scalars().all()
+        if not jobs:
+            return {"status": "nothing_to_delete", "deleted_count": 0}
+        deleted = 0
+        for job in jobs:
+            if scheduler_service.scheduler.running and scheduler_service.scheduler.get_job(str(job.id)):
+                scheduler_service.scheduler.remove_job(str(job.id))
+            await db.delete(job)
+            deleted += 1
+        await db.flush()
+        return {"status": "deleted_all", "deleted_count": deleted}
 
     async def _integrations_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del arguments

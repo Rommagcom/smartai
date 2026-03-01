@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import logging
+import re
 from urllib.parse import quote_plus
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -11,6 +13,13 @@ from playwright.async_api import async_playwright
 from app.core.config import settings
 from app.services.egress_policy_service import egress_policy_service
 from app.services.http_client_service import http_client_service
+
+logger = logging.getLogger(__name__)
+
+_CHROME_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 class WebToolsService:
@@ -54,6 +63,40 @@ class WebToolsService:
                 "url": f"https://duckduckgo.com/?q={encoded_query}",
                 "snippet": "Результаты поиска погоды по запросу.",
                 "engine": "fallback-weather",
+            },
+        ]
+        return candidates[: max(1, min(limit, len(candidates)))]
+
+    @staticmethod
+    def _is_currency_query(query: str) -> bool:
+        q = str(query or "").lower()
+        tokens = (
+            "курс", "валют", "usd", "eur", "rub", "kzt",
+            "тенге", "доллар", "евро", "рубл", "currency", "exchange rate",
+        )
+        return any(t in q for t in tokens)
+
+    @staticmethod
+    def _currency_fallback_results(query: str, limit: int) -> list[dict]:
+        encoded_query = quote_plus(query)
+        candidates = [
+            {
+                "title": "Нацбанк РК — Курсы валют",
+                "url": "https://nationalbank.kz/ru/exchangerates/ezhednevnye-oficialnye-rynochnye-kursy-valyut",
+                "snippet": "Ежедневные официальные рыночные курсы валют Национального Банка РК.",
+                "engine": "fallback-currency",
+            },
+            {
+                "title": "Google Finance",
+                "url": f"https://www.google.com/finance/quote/USD-KZT?q={encoded_query}",
+                "snippet": "Курсы валют в реальном времени.",
+                "engine": "fallback-currency",
+            },
+            {
+                "title": "Myfin.kz курсы",
+                "url": "https://myfin.kz/currency/almaty",
+                "snippet": "Курсы валют в обменных пунктах Алматы.",
+                "engine": "fallback-currency",
             },
         ]
         return candidates[: max(1, min(limit, len(candidates)))]
@@ -146,6 +189,13 @@ class WebToolsService:
                 "provider": f"{result.get('provider', 'unknown')}+fallback-weather",
                 "error": provider_error or result.get("error", ""),
             }
+        if self._is_currency_query(query):
+            return {
+                "query": query,
+                "results": self._currency_fallback_results(query, limit),
+                "provider": f"{result.get('provider', 'unknown')}+fallback-currency",
+                "error": provider_error or result.get("error", ""),
+            }
         return {
             "query": query,
             "results": self._generic_fallback_results(query, limit),
@@ -177,15 +227,21 @@ class WebToolsService:
 
     async def _duckduckgo_search(self, query: str, limit: int) -> dict:
         client = http_client_service.get()
+
+        # Try HTML endpoint first
+        result = await self._duckduckgo_html(client, query, limit)
+        if result.get("results"):
+            return result
+
+        # Fallback to Lite endpoint
+        logger.info("DuckDuckGo HTML returned 0 results, trying Lite for: %s", query)
+        return await self._duckduckgo_lite(client, query, limit)
+
+    async def _duckduckgo_html(self, client: httpx.AsyncClient, query: str, limit: int) -> dict:
         response = await client.get(
             "https://html.duckduckgo.com/html/",
             params={"q": query},
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                )
-            },
+            headers={"User-Agent": _CHROME_UA},
             timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS,
             follow_redirects=True,
         )
@@ -213,6 +269,35 @@ class WebToolsService:
 
         return {"query": query, "results": results, "provider": "duckduckgo-html"}
 
+    async def _duckduckgo_lite(self, client: httpx.AsyncClient, query: str, limit: int) -> dict:
+        response = await client.get(
+            "https://lite.duckduckgo.com/lite/",
+            params={"q": query},
+            headers={"User-Agent": _CHROME_UA},
+            timeout=settings.WEB_SEARCH_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        results: list[dict] = []
+        for link in soup.select("a.result-link") or soup.select("td a[href^='http']"):
+            href = str(link.get("href", "")).strip()
+            if not href or "duckduckgo.com" in href:
+                continue
+            results.append(
+                {
+                    "title": link.get_text(" ", strip=True),
+                    "url": unquote(href),
+                    "snippet": "",
+                    "engine": "duckduckgo-lite",
+                }
+            )
+            if len(results) >= limit:
+                break
+
+        return {"query": query, "results": results, "provider": "duckduckgo-lite"}
+
     @staticmethod
     def _decode_duckduckgo_redirect(url: str) -> str:
         if "/l/?" not in url:
@@ -237,47 +322,51 @@ class WebToolsService:
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(**launch_kwargs)
-            page = await browser.new_page()
-            await page.goto(safe_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                page = await browser.new_page()
+                try:
+                    await page.goto(safe_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                except Exception:
+                    logger.warning("domcontentloaded timed out for %s, retrying with commit", safe_url)
+                    await page.goto(safe_url, wait_until="commit", timeout=timeout_ms)
 
-            title = await page.title()
-            current_url = page.url
+                title = await page.title()
+                current_url = page.url
 
-            if action == "screenshot":
-                image_bytes = await page.screenshot(full_page=True, type="png")
-                await browser.close()
+                if action == "screenshot":
+                    image_bytes = await page.screenshot(full_page=True, type="png")
+                    return {
+                        "action": action,
+                        "url": current_url,
+                        "title": title,
+                        "mime_type": "image/png",
+                        "file_name": "screenshot.png",
+                        "file_base64": base64.b64encode(image_bytes).decode("utf-8"),
+                    }
+
+                if action == "pdf":
+                    pdf_bytes = await page.pdf(format="A4", print_background=True)
+                    return {
+                        "action": action,
+                        "url": current_url,
+                        "title": title,
+                        "mime_type": "application/pdf",
+                        "file_name": "page.pdf",
+                        "file_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+                    }
+
+                text = await page.evaluate("document.body ? document.body.innerText : ''")
+                normalized = "\n".join(line for line in text.splitlines() if line.strip())
+                clipped = normalized[:max_chars]
                 return {
-                    "action": action,
+                    "action": "extract_text",
                     "url": current_url,
                     "title": title,
-                    "mime_type": "image/png",
-                    "file_name": "screenshot.png",
-                    "file_base64": base64.b64encode(image_bytes).decode("utf-8"),
+                    "text": clipped,
+                    "truncated": len(normalized) > max_chars,
                 }
-
-            if action == "pdf":
-                pdf_bytes = await page.pdf(format="A4", print_background=True)
+            finally:
                 await browser.close()
-                return {
-                    "action": action,
-                    "url": current_url,
-                    "title": title,
-                    "mime_type": "application/pdf",
-                    "file_name": "page.pdf",
-                    "file_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
-                }
-
-            text = await page.evaluate("document.body ? document.body.innerText : ''")
-            await browser.close()
-            normalized = "\n".join(line for line in text.splitlines() if line.strip())
-            clipped = normalized[:max_chars]
-            return {
-                "action": "extract_text",
-                "url": current_url,
-                "title": title,
-                "text": clipped,
-                "truncated": len(normalized) > max_chars,
-            }
 
 
 web_tools_service = WebToolsService()

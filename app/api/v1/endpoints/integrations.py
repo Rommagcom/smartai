@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
-from app.api.types import CurrentUser, DBSession
+from app.api.types import AdminUser, CurrentUser, DBSession
 from app.models.api_integration import ApiIntegration
 from app.schemas.integration import (
     IntegrationAuthDataRotateResponse,
@@ -23,11 +23,6 @@ from app.services.auth_data_security_service import auth_data_security_service
 from app.services.integration_onboarding_service import integration_onboarding_service
 
 router = APIRouter()
-
-
-def _require_admin(current_user: CurrentUser) -> None:
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
 
 
 async def _resolve_integration_auth_data(*, db: DBSession, integration: ApiIntegration) -> dict:
@@ -208,9 +203,8 @@ async def integration_health(
 @router.post("/admin/rotate-auth-data", response_model=IntegrationAuthDataRotateResponse)
 async def admin_rotate_auth_data(
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> IntegrationAuthDataRotateResponse:
-    _require_admin(current_user)
 
     result = await db.execute(select(ApiIntegration).order_by(ApiIntegration.created_at.desc()))
     rows = result.scalars().all()

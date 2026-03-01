@@ -46,3 +46,11 @@ def get_current_user_id(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials") from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload") from exc
+
+
+async def get_admin_user(
+    user: User = Depends(get_current_user),
+) -> User:
+    if not getattr(user, "is_admin", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user

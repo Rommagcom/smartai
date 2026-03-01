@@ -1,3 +1,4 @@
+import logging
 import re
 from uuid import UUID
 
@@ -10,6 +11,14 @@ from app.services.ollama_client import ollama_client
 from app.services.rag_service import rag_service
 from app.services.tool_orchestrator_service import tool_orchestrator_service
 
+logger = logging.getLogger(__name__)
+
+_URL_RE = re.compile(
+    r"(?:https?://[^\s]+)"
+    r"|(?:\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.(?:com|org|net|io|dev|kz|ru|ua|uk|de|fr|me|info|biz|pro|co|app|ai|cloud)\b)",
+    re.IGNORECASE,
+)
+
 
 class ChatService:
     @staticmethod
@@ -17,6 +26,9 @@ class ChatService:
         lowered = str(user_message or "").strip().lower()
         if not lowered:
             return False
+
+        if _URL_RE.search(user_message or ""):
+            return True
 
         tool_intent_patterns = [
             r"\bв\s+очеред[ьи]\b",
@@ -31,6 +43,10 @@ class ChatService:
             r"\bintegration|api\b",
             r"\bdoc[_\s-]?search|документ\b",
             r"\bexecute[_\s-]?python|python\b",
+            r"\bсайт|страниц[ауы]|портал\b",
+            r"\bпроанализируй|открой|проверь|скачай\b",
+            r"\bпарс|scrape|fetch\b",
+            r"\bудали|удалить|отмени|отключи|убери|убрать|останови|выключи\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 
@@ -137,6 +153,7 @@ class ChatService:
             )
             return [*tool_calls, *fallback_calls]
         except Exception:
+            logger.warning("web_search fallback failed", exc_info=True)
             return tool_calls
 
     @classmethod
@@ -331,6 +348,7 @@ class ChatService:
             response_hint = str(planner.get("response_hint") or "")
             return tool_calls, response_hint
         except Exception:
+            logger.warning("tool planning/execution failed", exc_info=True)
             return None
 
     async def _maybe_tool_answer(
@@ -387,6 +405,7 @@ class ChatService:
                 response_hint=response_hint,
             )
         except Exception:
+            logger.warning("compose_final_answer failed", exc_info=True)
             answer = self._llm_unavailable_fallback()
         if self._is_live_data_intent(user_message) and self._is_progress_placeholder_answer(answer):
             answer = self._live_data_unavailable_fallback()
@@ -503,19 +522,37 @@ class ChatService:
         try:
             facts = await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
         except Exception:
+            logger.warning("memory retrieval failed", exc_info=True)
             facts = []
         try:
             rag_chunks = await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
         except Exception:
+            logger.warning("RAG retrieval failed", exc_info=True)
             rag_chunks = []
 
         memory_lines = [f"- [{f.fact_type}] {f.content}" for f in facts]
         rag_lines = [f"- ({c['source_doc']}) {c['chunk_text']}" for c in rag_chunks]
 
+        adapted_style = (user.preferences or {}).get("adapted_style", "")
+        adaptation_hint = ""
+        if adapted_style == "concise":
+            adaptation_hint = (
+                "\n\n## АДАПТАЦИЯ\n"
+                "Пользователь предпочитает краткие и конкретные ответы. "
+                "Избегай лишних слов, давай суть."
+            )
+        elif adapted_style == "balanced":
+            adaptation_hint = (
+                "\n\n## АДАПТАЦИЯ\n"
+                "Пользователь предпочитает сбалансированные ответы: "
+                "достаточно деталей, но без воды."
+            )
+
         system_prompt = (
             f"{user.system_prompt_template}\n\n"
             f"Факты о пользователе:\n{chr(10).join(memory_lines) if memory_lines else '- нет данных'}\n\n"
             f"Контекст документов:\n{chr(10).join(rag_lines) if rag_lines else '- нет данных'}"
+            f"{adaptation_hint}"
         )
 
         history_messages = [{"role": msg.role, "content": msg.content} for msg in recent]
@@ -572,6 +609,7 @@ class ChatService:
         try:
             answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
         except Exception:
+            logger.warning("LLM chat call failed", exc_info=True)
             answer = self._llm_unavailable_fallback()
         answer = self._sanitize_llm_answer(answer)
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
