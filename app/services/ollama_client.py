@@ -64,24 +64,37 @@ class OllamaClient:
             raise last_exc
         raise RuntimeError("Ollama call failed without exception")
 
+    @staticmethod
+    def _merge_options(options: dict | None, extra: dict | None = None) -> dict:
+        merged = dict(options or {})
+        if extra:
+            for key, value in extra.items():
+                if key not in merged:
+                    merged[key] = value
+        return merged
+
     async def chat(self, messages: list[dict], stream: bool = False, options: dict | None = None) -> str:
+        merged = self._merge_options(options, {"num_predict": settings.OLLAMA_NUM_PREDICT})
         response = await self._run_with_retry(
             lambda: self._client.chat(
                 model=settings.OLLAMA_MODEL_NAME,
                 messages=messages,
                 stream=stream,
-                options=options or {},
+                options=merged,
+                keep_alive=settings.OLLAMA_KEEP_ALIVE,
             )
         )
         return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
+        merged = self._merge_options(options, {"num_predict": settings.OLLAMA_NUM_PREDICT})
         stream = await self._run_with_retry(
             lambda: self._client.chat(
                 model=settings.OLLAMA_MODEL_NAME,
                 messages=messages,
                 stream=True,
-                options=options or {},
+                options=merged,
+                keep_alive=settings.OLLAMA_KEEP_ALIVE,
             )
         )
         async for chunk in stream:

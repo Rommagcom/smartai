@@ -329,12 +329,22 @@ class ChatService:
 
         return calls
 
-    async def _run_planned_tools(self, db: AsyncSession, user: User, user_message: str) -> tuple[list[dict], str] | None:
+    async def _run_planned_tools_with_plan(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        planner_task: object | None = None,
+    ) -> tuple[list[dict], str] | None:
         try:
-            planner = await tool_orchestrator_service.plan_tool_calls(
-                user_message=user_message,
-                system_prompt=user.system_prompt_template,
-            )
+            if planner_task is not None:
+                import asyncio as _aio
+                planner = await planner_task  # type: ignore[misc]
+            else:
+                planner = await tool_orchestrator_service.plan_tool_calls(
+                    user_message=user_message,
+                    system_prompt=user.system_prompt_template,
+                )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
             if not use_tools or not planned_steps:
@@ -352,17 +362,20 @@ class ChatService:
             logger.warning("tool planning/execution failed", exc_info=True)
             return None
 
-    async def _maybe_tool_answer(
+    async def _maybe_tool_answer_with_plan(
         self,
         db: AsyncSession,
         user: User,
         user_message: str,
         manual_tool_calls: list[dict],
+        planner_task: object | None = None,
     ) -> tuple[str, list[dict], list[dict]] | None:
         if not self._should_attempt_tool_planning(user_message):
+            if planner_task:
+                planner_task.cancel()  # type: ignore[union-attr]
             return None
 
-        planned_result = await self._run_planned_tools(db, user, user_message)
+        planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
         if not planned_result:
             if self._is_live_data_intent(user_message):
                 return self._live_data_unavailable_fallback(), manual_tool_calls, []
@@ -519,17 +532,27 @@ class ChatService:
         return artifacts
 
     async def build_context(self, db: AsyncSession, user: User, session_id: UUID, current_message: str) -> tuple[list[dict], list[str], list[str]]:
-        recent = await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=12)
-        try:
-            facts = await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
-        except Exception:
-            logger.warning("memory retrieval failed", exc_info=True)
-            facts = []
-        try:
-            rag_chunks = await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
-        except Exception:
-            logger.warning("RAG retrieval failed", exc_info=True)
-            rag_chunks = []
+        # Run all 3 independent context sources in parallel
+        import asyncio as _aio
+
+        async def _get_recent():
+            return await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=12)
+
+        async def _get_facts():
+            try:
+                return await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
+            except Exception:
+                logger.warning("memory retrieval failed", exc_info=True)
+                return []
+
+        async def _get_rag():
+            try:
+                return await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
+            except Exception:
+                logger.warning("RAG retrieval failed", exc_info=True)
+                return []
+
+        recent, facts, rag_chunks = await _aio.gather(_get_recent(), _get_facts(), _get_rag())
 
         memory_lines = [f"- [{f.fact_type}] {f.content}" for f in facts]
         rag_lines = [f"- ({c['source_doc']}) {c['chunk_text']}" for c in rag_chunks]
@@ -583,9 +606,25 @@ class ChatService:
         session_id: UUID,
         user_message: str,
     ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+        import asyncio as _aio
+
         manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
 
-        llm_messages, used_memory_ids, rag_sources = await self.build_context(db, user, session_id, user_message)
+        # Run build_context and tool planner in parallel when tools are likely
+        needs_tools = self._should_attempt_tool_planning(user_message)
+        if needs_tools:
+            context_task = _aio.ensure_future(self.build_context(db, user, session_id, user_message))
+            planner_task = _aio.ensure_future(
+                tool_orchestrator_service.plan_tool_calls(
+                    user_message=user_message,
+                    system_prompt=user.system_prompt_template,
+                )
+            )
+            llm_messages, used_memory_ids, rag_sources = await context_task
+        else:
+            llm_messages, used_memory_ids, rag_sources = await self.build_context(db, user, session_id, user_message)
+            planner_task = None
+
         options = {
             "temperature": user.preferences.get("temperature", 0.3),
             "top_p": user.preferences.get("top_p", 0.9),
@@ -595,14 +634,20 @@ class ChatService:
         artifacts: list[dict] = []
 
         if manual_tool_calls and self._is_memory_only_message(user_message):
+            if planner_task:
+                planner_task.cancel()
             answer = "Запомнил. Буду учитывать это в следующих ответах и задачах."
             return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
         if self._is_timezone_query(user_message):
+            if planner_task:
+                planner_task.cancel()
             answer = self._timezone_answer(user)
             return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
-        tool_answer = await self._maybe_tool_answer(db, user, user_message, manual_tool_calls)
+        tool_answer = await self._maybe_tool_answer_with_plan(
+            db, user, user_message, manual_tool_calls, planner_task,
+        )
         if tool_answer:
             answer, tool_calls, artifacts = tool_answer
             return answer, used_memory_ids, rag_sources, tool_calls, artifacts

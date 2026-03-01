@@ -68,11 +68,11 @@ class ToolOrchestratorService:
         try:
             planner_raw = await ollama_client.chat(
                 messages=[
-                    {"role": "system", "content": f"{system_prompt}\n\n{planner_prompt}"},
+                    {"role": "system", "content": planner_prompt},
                     {"role": "user", "content": user_message},
                 ],
                 stream=False,
-                options={"temperature": 0.0, "top_p": 0.1},
+                options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
             )
             return self._normalize_plan(self._parse_json(planner_raw))
         except Exception:
