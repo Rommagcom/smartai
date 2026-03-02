@@ -26,6 +26,16 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+class _PollAccessFilter(logging.Filter):
+    """Suppress noisy 200 OK lines for the worker-results/poll endpoint."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "worker-results/poll" in msg and "200" in msg:
+            return False
+        return True
+
+
 def setup_logging() -> None:
     root_logger = logging.getLogger()
     if root_logger.handlers:
@@ -39,3 +49,6 @@ def setup_logging() -> None:
 
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(handler)
+
+    # Reduce poll endpoint noise in uvicorn access log
+    logging.getLogger("uvicorn.access").addFilter(_PollAccessFilter())
