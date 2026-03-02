@@ -7,8 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.db.session import get_db
 from app.main import app
+from app.models.api_integration import ApiIntegration
+from app.models.code_snippet import CodeSnippet
+from app.models.cron_job import CronJob
+from app.models.long_term_memory import LongTermMemory
+from app.models.message import Message
+from app.models.session import Session
 from app.models.telegram_allowed_user import TelegramAllowedUser
 from app.models.user import User
+from app.models.worker_task import WorkerTask
 from app.services.milvus_service import milvus_service
 from app.services.scheduler_service import scheduler_service
 from app.services.worker_result_service import worker_result_service
@@ -31,6 +38,13 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
     async with engine.begin() as conn:
         await conn.run_sync(User.__table__.create)
         await conn.run_sync(TelegramAllowedUser.__table__.create)
+        await conn.run_sync(Session.__table__.create)
+        await conn.run_sync(Message.__table__.create)
+        await conn.run_sync(LongTermMemory.__table__.create)
+        await conn.run_sync(CronJob.__table__.create)
+        await conn.run_sync(CodeSnippet.__table__.create)
+        await conn.run_sync(ApiIntegration.__table__.create)
+        await conn.run_sync(WorkerTask.__table__.create)
 
     return async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False), engine
 
@@ -110,7 +124,10 @@ async def run() -> None:
         milvus_service.delete_user_chunks = original_delete_user_chunks
         worker_result_service.clear_user_results = original_clear_user_results
         app.dependency_overrides.pop(get_db, None)
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         if DB_PATH.exists():
             DB_PATH.unlink()
 

@@ -10,6 +10,7 @@ from time import perf_counter
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError, ReadOnlyError
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -134,12 +135,46 @@ class WorkerService:
             return None
         return await self._process_task(task_id)
 
+    def _reset_redis(self) -> None:
+        """Drop cached Redis connection so next `_get_redis()` reconnects."""
+        old = self._redis
+        self._redis = None
+        if old is not None:
+            try:
+                asyncio.get_running_loop().create_task(old.aclose())
+            except Exception:  # noqa: B110
+                pass
+
     async def run_forever(self) -> None:
+        redis_backoff = 0.0
+        _REDIS_BACKOFF_MAX = 30.0
+
         while True:
             try:
                 task = await self.run_once()
+                redis_backoff = 0.0          # healthy cycle — reset backoff
                 if task is None:
                     await asyncio.sleep(0.2)
+            except (ReadOnlyError, RedisConnectionError, OSError) as exc:
+                # Redis is unreachable or in read-only state (replica / failover).
+                # Use exponential backoff and force a fresh connection.
+                self._reset_redis()
+                redis_backoff = min(
+                    _REDIS_BACKOFF_MAX,
+                    max(1.0, redis_backoff * 2) if redis_backoff else 1.0,
+                )
+                alerting_service.emit(
+                    component="worker",
+                    severity="critical",
+                    message="Redis unavailable — retrying",
+                    details={"error": str(exc), "backoff_s": redis_backoff},
+                )
+                logger.error(
+                    "worker redis error, backoff=%.1fs: %s",
+                    redis_backoff,
+                    exc,
+                )
+                await asyncio.sleep(redis_backoff)
             except Exception as exc:
                 alerting_service.emit(
                     component="worker",
@@ -148,7 +183,7 @@ class WorkerService:
                     details={"error": str(exc)},
                 )
                 logger.exception("worker loop error")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
 
     async def _process_task(self, task_id: str) -> WorkerTask | None:
         started_at = perf_counter()

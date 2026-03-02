@@ -52,6 +52,7 @@ async def run() -> None:
             "echo": body or {},
         }
 
+    original_api_call = api_executor.call
     app.dependency_overrides[get_db] = override_get_db
     api_executor.call = fake_call
 
@@ -63,7 +64,8 @@ async def run() -> None:
             db.add(user)
             await db.commit()
 
-    with TestClient(app) as client:
+    try:
+      with TestClient(app) as client:
         credentials = {"username": "integration_user", "password": SMOKE_PASSWORD}
         register = client.post("/api/v1/auth/register", json=credentials)
         ensure(register.status_code == 200, f"register failed: {register.text}")
@@ -154,11 +156,16 @@ async def run() -> None:
         rotate_payload = rotate.json()
         ensure(int(rotate_payload.get("scanned") or 0) >= 1, f"rotation scanned should be >=1: {rotate.text}")
 
-    await engine.dispose()
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-
-    print("SMOKE_INTEGRATIONS_OK")
+        print("SMOKE_INTEGRATIONS_OK")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        api_executor.call = original_api_call
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
+        if DB_PATH.exists():
+            DB_PATH.unlink()
 
 
 if __name__ == "__main__":

@@ -82,7 +82,10 @@ async def run() -> None:
         ensure(me_after_body.get("requires_soul_setup") is False, f"expected requires_soul_setup=false after setup: {me_after_body}")
         ensure(me_after_body.get("soul_onboarding") is None, f"expected no soul_onboarding payload after setup: {me_after_body}")
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
     if DB_PATH.exists():
         DB_PATH.unlink()
 

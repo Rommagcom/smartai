@@ -164,7 +164,10 @@ async def run() -> None:
             f"search 503 detail mismatch: {search_503.text}",
         )
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
     if DB_PATH.exists():
         DB_PATH.unlink()
 
