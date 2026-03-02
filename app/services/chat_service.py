@@ -60,6 +60,66 @@ class ChatService:
         )
 
     @staticmethod
+    def _direct_route_from_message(user_message: str) -> list[dict] | None:
+        """Infer tool steps directly from user text when the planner LLM fails.
+
+        This is a deterministic fallback — it only activates for unambiguous
+        tool keywords so the user is not left with a stub response.
+        """
+        lowered = str(user_message or "").strip().lower()
+        if not lowered:
+            return None
+
+        # Explicit tool invocation: "web_search <query>"
+        web_search_match = re.match(r"web[_\s-]?search\s+(.+)", lowered)
+        if web_search_match:
+            query = web_search_match.group(1).strip()
+            return [{"tool": "web_search", "arguments": {"query": query, "limit": 5}}]
+
+        # Explicit: "web_fetch <url>"
+        web_fetch_match = re.match(r"web[_\s-]?fetch\s+(https?://\S+)", lowered)
+        if web_fetch_match:
+            return [{"tool": "web_fetch", "arguments": {"url": web_fetch_match.group(1).strip()}}]
+
+        # Explicit: "browser <url>" or "открой <url>"
+        browser_match = re.match(r"(?:browser|открой)\s+(https?://\S+)", lowered)
+        if browser_match:
+            return [{"tool": "browser", "arguments": {"url": browser_match.group(1).strip(), "action": "extract_text"}}]
+
+        # "открой сайт <domain>" / "открой <domain>"
+        open_site_match = re.match(r"(?:открой|зайди\s+на|покажи)\s+(?:сайт\s+)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", lowered)
+        if open_site_match:
+            domain = open_site_match.group(1).strip()
+            url = f"https://{domain}" if not domain.startswith("http") else domain
+            return [
+                {"tool": "web_search", "arguments": {"query": domain, "limit": 3}},
+                {"tool": "browser", "arguments": {"url": url, "action": "extract_text"}},
+            ]
+
+        # "memory_add <text>"
+        memory_add_match = re.match(r"memory[_\s-]?add\s+(.+)", lowered)
+        if memory_add_match:
+            return [{"tool": "memory_add", "arguments": {"content": memory_add_match.group(1).strip(), "fact_type": "fact"}}]
+
+        # "найди <query>" / "поиск <query>"
+        search_intent_match = re.match(r"(?:найди|поиск|поищи|нагугли|загугли)\s+(.+)", lowered)
+        if search_intent_match:
+            query = search_intent_match.group(1).strip()
+            return [{"tool": "web_search", "arguments": {"query": query, "limit": 5}}]
+
+        # URL in message — try web_fetch on it
+        url_match = _URL_RE.search(user_message or "")
+        if url_match:
+            raw_url = url_match.group(0).strip()
+            url = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
+            return [
+                {"tool": "web_search", "arguments": {"query": raw_url, "limit": 3}},
+                {"tool": "web_fetch", "arguments": {"url": url}},
+            ]
+
+        return None
+
+    @staticmethod
     def _live_data_unavailable_fallback() -> str:
         return (
             "Не удалось получить актуальные данные прямо сейчас. "
@@ -439,6 +499,20 @@ class ChatService:
             return None
 
         planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
+        if not planned_result:
+            # Planner failed or returned no tools — try deterministic direct routing
+            direct_steps = self._direct_route_from_message(user_message)
+            if direct_steps:
+                logger.info("planner returned no plan, using direct route for: %.120s", user_message)
+                try:
+                    direct_calls = await tool_orchestrator_service.execute_tool_chain(
+                        db=db, user=user, steps=direct_steps, max_steps=3,
+                    )
+                    if self._has_meaningful_tool_output(direct_calls):
+                        planned_result = direct_calls, "Используй результаты для ответа."
+                except Exception:
+                    logger.warning("direct route execution failed", exc_info=True)
+
         if not planned_result:
             if self._is_live_data_intent(user_message):
                 # Planner didn't select tools — force web_search for live data
@@ -838,7 +912,27 @@ class ChatService:
 
         # Guard: base LLM path can also produce placeholders for complex requests
         if self._is_progress_placeholder_answer(answer):
-            logger.info("base LLM produced placeholder, replacing with honest fallback")
+            logger.info("base LLM produced placeholder, attempting direct tool route")
+            direct_steps = self._direct_route_from_message(user_message)
+            if direct_steps:
+                try:
+                    direct_calls = await tool_orchestrator_service.execute_tool_chain(
+                        db=db, user=user, steps=direct_steps, max_steps=3,
+                    )
+                    if self._has_meaningful_tool_output(direct_calls):
+                        tool_calls = [*tool_calls, *direct_calls]
+                        artifacts = self._extract_artifacts(tool_calls)
+                        answer = await self._compose_answer_with_retry(
+                            system_prompt=user.system_prompt_template,
+                            user_message=user_message,
+                            tool_calls=tool_calls,
+                            response_hint="Ответь по полученным данным.",
+                        )
+                        answer = self._sanitize_llm_answer(answer)
+                        return answer, used_memory_ids, rag_sources, tool_calls, artifacts
+                except Exception:
+                    logger.warning("direct route fallback in respond failed", exc_info=True)
+
             answer = (
                 "Я могу помочь с этим запросом, но мне нужны инструменты для сбора данных. "
                 "Попробуйте переформулировать запрос — например: "

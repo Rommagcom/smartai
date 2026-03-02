@@ -16,6 +16,7 @@ from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
 from scripts.smoke_worker_chat_flow import run as run_worker_chat_flow
 from scripts.smoke_worker_queue import run as run_worker_queue
 from scripts.smoke_ws_cron import run as run_ws_cron
+from scripts.smoke_tool_routing import run as run_tool_routing
 
 
 def reset_scheduler() -> None:
@@ -87,6 +88,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_WORKER_CHAT_FLOW")
         await run_worker_chat_flow()
+
+        print("RUN_SMOKE_TOOL_ROUTING")
+        await run_tool_routing()
 
         print("SMOKE_ALL_OK")
     finally:

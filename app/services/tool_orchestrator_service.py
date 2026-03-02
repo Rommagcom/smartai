@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 import json
 from uuid import UUID
@@ -74,8 +75,21 @@ class ToolOrchestratorService:
                 stream=False,
                 options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
             )
-            return self._normalize_plan(self._parse_json(planner_raw))
-        except Exception:
+            plan = self._normalize_plan(self._parse_json(planner_raw))
+            if not plan.get("use_tools"):
+                logger.debug(
+                    "planner decided no tools for message: %.120s | raw: %.200s",
+                    user_message,
+                    planner_raw,
+                )
+            return plan
+        except Exception as exc:
+            logger.warning(
+                "plan_tool_calls failed for message: %.120s — %s: %s",
+                user_message,
+                type(exc).__name__,
+                exc,
+            )
             return {"use_tools": False, "steps": [], "response_hint": ""}
 
     async def execute_tool_chain(
@@ -804,15 +818,58 @@ class ToolOrchestratorService:
     @staticmethod
     def _parse_json(raw: str) -> dict:
         text = raw.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:].strip()
+
+        # Strip markdown fences (```json ... ```)
+        fence_match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text)
+        if fence_match:
+            text = fence_match.group(1).strip()
+
+        # Direct parse attempt
         try:
             payload = json.loads(text)
-            return payload if isinstance(payload, dict) else {}
+            if isinstance(payload, dict):
+                return payload
         except Exception:
+            pass
+
+        # Fallback: extract the first top-level JSON object from arbitrary text
+        brace_start = text.find("{")
+        if brace_start == -1:
+            logger.warning("planner output contains no JSON object: %.200s", raw)
             return {"use_tools": False, "steps": [], "response_hint": ""}
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        for idx in range(brace_start, len(text)):
+            ch = text[idx]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[brace_start : idx + 1]
+                    try:
+                        payload = json.loads(candidate)
+                        if isinstance(payload, dict):
+                            return payload
+                    except Exception:
+                        break
+                    break
+
+        logger.warning("planner output JSON parse failed: %.300s", raw)
+        return {"use_tools": False, "steps": [], "response_hint": ""}
 
 
 tool_orchestrator_service = ToolOrchestratorService()
