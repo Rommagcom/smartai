@@ -50,7 +50,7 @@ class ShortTermMemoryService:
 
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "text": str(summary).strip()[:500],  # hard cap per entry
+            "text": str(summary).strip()[:1000],  # hard cap per entry
         }
         if meta:
             entry["meta"] = meta

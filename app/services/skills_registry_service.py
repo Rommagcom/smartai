@@ -531,15 +531,19 @@ class SkillsRegistryService:
     def tool_names(self) -> set[str]:
         return {str(item.get("manifest", {}).get("name") or "").strip() for item in self._skills}
 
+    # Tools hidden from the planner to prevent misuse.
+    # worker_enqueue is auto-converted to direct calls in _normalize_steps
+    _PLANNER_HIDDEN_TOOLS: set[str] = {"worker_enqueue"}
+
     def planner_signatures(self) -> str:
         signatures: list[str] = []
         for item in self._skills:
             manifest = item.get("manifest", {})
             schema = item.get("input_schema", {})
             name = str(manifest.get("name") or "").strip()
-            props = schema.get("properties") if isinstance(schema, dict) else None
-            if not name:
+            if not name or name in self._PLANNER_HIDDEN_TOOLS:
                 continue
+            props = schema.get("properties") if isinstance(schema, dict) else None
             if not isinstance(props, dict) or not props:
                 signatures.append(f"{name}()")
                 continue

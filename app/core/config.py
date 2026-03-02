@@ -104,8 +104,8 @@ class Settings(BaseSettings):
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45
     MEMORY_DECAY_MIN_FACTOR: float = 0.35
 
-    STM_TTL_SECONDS: int = 14400          # short-term memory TTL — 4 hours
-    STM_MAX_ITEMS: int = 20               # max context snippets per user
+    STM_TTL_SECONDS: int = 86400          # short-term memory TTL — 24 hours
+    STM_MAX_ITEMS: int = 40               # max context snippets per user
     STM_REDIS_KEY_PREFIX: str = "assistant:stm"
 
 

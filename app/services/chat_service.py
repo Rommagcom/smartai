@@ -449,6 +449,22 @@ class ChatService:
         )
         artifacts = self._extract_artifacts(tool_calls)
 
+        # ---- safety-net: if all results are "queued", return a clear message ----
+        queued_only = (
+            tool_calls
+            and all(
+                isinstance(c.get("result"), dict) and c["result"].get("status") in ("queued", "deduplicated")
+                for c in tool_calls
+                if c.get("success")
+            )
+            and any(c.get("success") for c in tool_calls)
+        )
+        if queued_only:
+            return (
+                "Задача поставлена в фоновую очередь. "
+                "Результат придёт отдельным сообщением, как только обработка завершится."
+            ), tool_calls, artifacts
+
         safe_tool_calls: list[dict] = []
         for call in tool_calls:
             safe_call = dict(call)

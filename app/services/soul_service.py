@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from app.models.user import User
 
-SOUL_FIRST_QUESTION = "Кто ты и чем занимаемся?"
+SOUL_FIRST_QUESTION = "Расскажи кто вы и чем занимаетесь?"
 
 DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистент. Не чат-бот, а инструмент для решения задач.
 
@@ -31,7 +31,7 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 - **Краткость там, где важна скорость**
 - **Детали там, где важна точность**
 - **Никакого корпоративного буллшита**
-- **Ты не голос пользователя** — в группах молчи, если не спросили
+- **Ты не голос пользователя** — в группах молчи, если не спросили по имени
 
 ## TOOLS
 
@@ -49,6 +49,7 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 
 - Не отправляй ерунду в продакшн
 - Не раскрывай чужие данные
+- Не используй матершинные слова и не цензурную речь
 - Если инструмент недоступен или упал — честно сообщи и предложи следующий шаг
 - Если данных недостаточно — задай уточняющий вопрос
 """
@@ -91,7 +92,7 @@ class SoulService:
                 "done": True,
                 "required_fields": [],
                 "next_action": "assistant_ready",
-                "prompt": "SOUL уже настроен. Можете писать в чат.",
+                "prompt": "Smart AI уже настроен. Можете писать в чат.",
                 "hints": {
                     "adapt": "Для смены профиля задачи используйте /api/v1/users/me/soul/adapt-task",
                 },
@@ -105,7 +106,7 @@ class SoulService:
                 "next_action": "collect_identity",
                 "prompt": "Выберите имя и эмодзи ассистента.",
                 "hints": {
-                    "default_name": "SOUL",
+                    "default_name": "SmartAi",
                     "default_emoji": "🧠",
                 },
             }
@@ -200,7 +201,7 @@ class SoulService:
         tone_modifier: str | None,
         task_mode: str,
     ) -> User:
-        name = assistant_name or "SOUL"
+        name = assistant_name or "Smart Ai"
         selected_emoji = emoji or "🧠"
         selected_style = style if style in STYLE_OPTIONS else "direct"
         selected_task_mode = task_mode if task_mode in TASK_OPTIONS else "other"
@@ -243,7 +244,7 @@ class SoulService:
         user.soul_profile = profile
 
         user.system_prompt_template = self.build_system_prompt(
-            assistant_name=profile.get("assistant_name", "SOUL"),
+            assistant_name=profile.get("assistant_name", "Smart Ai"),
             emoji=profile.get("emoji", "🧠"),
             style=profile.get("style", "direct"),
             tone_modifier=profile.get("tone_modifier", TONE_OPTIONS.get("my_style")),
