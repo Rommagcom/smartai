@@ -69,7 +69,7 @@ async def _extract_facts_background(user_id: UUID, user_text: str, assistant_tex
             )
             await bg_db.commit()
     except Exception as exc:
-        logger.warning("background fact extraction skipped: %s", exc)
+        logger.warning("background fact extraction skipped: %s: %s", type(exc).__name__, exc)
 
 
 async def _save_stm_background(user_id: UUID, user_text: str, assistant_text: str) -> None:

@@ -184,9 +184,13 @@ class TelegramAdapter(MessengerAdapter):
             return None
 
     async def _poll_worker_results(self, application: Application) -> None:
+        _idle_streak = 0
         while True:
-            await asyncio.sleep(3)
+            # Back-off when no results are coming in: 3s → 5s → 10s (cap)
+            delay = 3 if _idle_streak < 3 else (5 if _idle_streak < 10 else 10)
+            await asyncio.sleep(delay)
             if not self._known_users:
+                _idle_streak += 1
                 continue
 
             self._cleanup_known_users()
@@ -197,11 +201,15 @@ class TelegramAdapter(MessengerAdapter):
 
             concurrency = max(1, int(self.settings.TELEGRAM_POLL_CONCURRENCY))
             semaphore = asyncio.Semaphore(concurrency)
+            _had_items = False
 
             async def poll_one(tg_user_id: int, data: dict[str, Any]) -> None:
+                nonlocal _had_items
                 try:
                     async with semaphore:
-                        await self._poll_worker_results_for_user(application, tg_user_id, data)
+                        got = await self._poll_worker_results_for_user(application, tg_user_id, data)
+                        if got:
+                            _had_items = True
                 except Exception as exc:
                     alerting_service.emit(
                         component="telegram_bridge",
@@ -212,6 +220,11 @@ class TelegramAdapter(MessengerAdapter):
                     logger.exception("telegram polling error")
 
             await asyncio.gather(*(poll_one(tg_id, data) for tg_id, data in users_snapshot), return_exceptions=False)
+
+            if _had_items:
+                _idle_streak = 0
+            else:
+                _idle_streak += 1
 
     def _cleanup_known_users(self) -> None:
         ttl_seconds = max(60, int(self.settings.TELEGRAM_KNOWN_USER_TTL_SECONDS))
@@ -236,7 +249,8 @@ class TelegramAdapter(MessengerAdapter):
         if stale_ids:
             self._save_known_users()
 
-    async def _poll_worker_results_for_user(self, application: Application, tg_user_id: int, data: dict[str, Any]) -> None:
+    async def _poll_worker_results_for_user(self, application: Application, tg_user_id: int, data: dict[str, Any]) -> bool:
+        """Poll worker results for a single user. Returns True if any items were delivered."""
         started_at = perf_counter()
         success = False
         token = str(data.get("token") or "")
@@ -248,7 +262,7 @@ class TelegramAdapter(MessengerAdapter):
                 success=False,
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
-            return
+            return False
 
         res = await self.client.worker_results_poll(token=token, limit=20)
 
@@ -280,7 +294,7 @@ class TelegramAdapter(MessengerAdapter):
                 success=False,
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
-            return
+            return False
 
         items = res.get("payload", {}).get("items", [])
         if not isinstance(items, list) or not items:
@@ -291,7 +305,7 @@ class TelegramAdapter(MessengerAdapter):
                 success=success,
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
-            return
+            return False
 
         for item in items:
             if not isinstance(item, dict):
@@ -304,6 +318,7 @@ class TelegramAdapter(MessengerAdapter):
             success=success,
             latency_ms=(perf_counter() - started_at) * 1000,
         )
+        return True
 
     @staticmethod
     def _format_worker_item(item: dict[str, Any]) -> str:
@@ -432,7 +447,7 @@ class TelegramAdapter(MessengerAdapter):
         context.user_data["soul_setup_auto"] = {"step": "name", "data": {}}
         await update.effective_message.reply_text(
             "Нужна первичная SOUL-настройка. Запускаю setup автоматически.\n"
-            "Шаг 1/6: выберите имя ассистента (например: SOUL)"
+            "Шаг 1/6: выберите имя ассистента (например: Smart Ai)"
         )
 
     async def _handle_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -605,9 +620,8 @@ class TelegramAdapter(MessengerAdapter):
             else:
                 first_question = payload.get("soul_onboarding", {}).get("first_question") or "Кто ты и чем занимаемся?"
                 await update.effective_message.reply_text(
-                    "Перед первым использованием нужно один раз выполнить SOUL setup.\n"
-                    "Запусти /soul_setup\n"
-                    f"Первый вопрос: {first_question}"
+                    "Перед первым использованием нужно один раз выполнить настройку ассистента.\n"
+                   f"Первый вопрос: {first_question}"
                 )
             return False
 
