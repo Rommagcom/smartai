@@ -9,6 +9,7 @@ from app.models.user import User
 from app.services.memory_service import memory_service
 from app.services.ollama_client import ollama_client
 from app.services.rag_service import rag_service
+from app.services.short_term_memory_service import short_term_memory_service
 from app.services.tool_orchestrator_service import tool_orchestrator_service
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class ChatService:
     def _live_data_unavailable_fallback() -> str:
         return (
             "Не удалось получить актуальные данные прямо сейчас. "
-            "Повторите запрос через 10–30 секунд или уточните источник (например: Нацбанк РК, KASE)."
+            "Повторите запрос через 10–30 секунд или уточните источник."
         )
 
     @staticmethod
@@ -156,6 +157,28 @@ class ChatService:
         except Exception:
             logger.warning("web_search fallback failed", exc_info=True)
             return tool_calls
+
+    async def _force_web_search_for_live_data(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+    ) -> tuple[list[dict], str] | None:
+        """Force a web_search + optional web_fetch when the planner didn't select tools
+        but the user is asking for live/real-time data (weather, rates, news)."""
+        try:
+            steps: list[dict] = [
+                {"tool": "web_search", "arguments": {"query": user_message, "limit": 5}},
+            ]
+            tool_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db, user=user, steps=steps, max_steps=2,
+            )
+            if self._has_meaningful_tool_output(tool_calls):
+                return tool_calls, "Используй результаты поиска для ответа."
+            return None
+        except Exception:
+            logger.warning("forced web_search for live data failed", exc_info=True)
+            return None
 
     @classmethod
     def _has_meaningful_tool_output(cls, tool_calls: list[dict]) -> bool:
@@ -378,8 +401,16 @@ class ChatService:
         planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
         if not planned_result:
             if self._is_live_data_intent(user_message):
-                return self._live_data_unavailable_fallback(), manual_tool_calls, []
-            return None
+                # Planner didn't select tools — force web_search for live data
+                forced_result = await self._force_web_search_for_live_data(
+                    db=db, user=user, user_message=user_message,
+                )
+                if forced_result is not None:
+                    planned_result = forced_result
+                else:
+                    return self._live_data_unavailable_fallback(), manual_tool_calls, []
+            else:
+                return None
 
         planned_calls, response_hint = planned_result
         tool_calls = [*manual_tool_calls, *planned_calls]
@@ -531,52 +562,61 @@ class ChatService:
             )
         return artifacts
 
-    async def build_context(self, db: AsyncSession, user: User, session_id: UUID, current_message: str) -> tuple[list[dict], list[str], list[str]]:
-        # Run all 3 independent context sources in parallel
-        import asyncio as _aio
-
-        async def _get_recent():
-            return await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=12)
-
-        async def _get_facts():
-            try:
-                return await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
-            except Exception:
-                logger.warning("memory retrieval failed", exc_info=True)
-                return []
-
-        async def _get_rag():
-            try:
-                return await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
-            except Exception:
-                logger.warning("RAG retrieval failed", exc_info=True)
-                return []
-
-        recent, facts, rag_chunks = await _aio.gather(_get_recent(), _get_facts(), _get_rag())
-
-        memory_lines = [f"- [{f.fact_type}] {f.content}" for f in facts]
-        rag_lines = [f"- ({c['source_doc']}) {c['chunk_text']}" for c in rag_chunks]
-
-        adapted_style = (user.preferences or {}).get("adapted_style", "")
-        adaptation_hint = ""
+    @staticmethod
+    def _adaptation_hint(preferences: dict | None) -> str:
+        adapted_style = (preferences or {}).get("adapted_style", "")
         if adapted_style == "concise":
-            adaptation_hint = (
+            return (
                 "\n\n## АДАПТАЦИЯ\n"
                 "Пользователь предпочитает краткие и конкретные ответы. "
                 "Избегай лишних слов, давай суть."
             )
-        elif adapted_style == "balanced":
-            adaptation_hint = (
+        if adapted_style == "balanced":
+            return (
                 "\n\n## АДАПТАЦИЯ\n"
                 "Пользователь предпочитает сбалансированные ответы: "
                 "достаточно деталей, но без воды."
             )
+        return ""
+
+    async def build_context(self, db: AsyncSession, user: User, session_id: UUID, current_message: str) -> tuple[list[dict], list[str], list[str]]:
+        import asyncio as _aio
+
+        # --- DB-bound queries (must be sequential — same session) ---
+        recent = await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=12)
+
+        try:
+            facts = await memory_service.retrieve_relevant_memories(db, user.id, current_message, top_k=5)
+        except Exception:
+            logger.warning("memory retrieval failed", exc_info=True)
+            facts = []
+
+        # --- RAG uses Milvus, not the DB session — safe to run independently ---
+        try:
+            rag_chunks = await rag_service.retrieve_context(str(user.id), current_message, top_k=4)
+        except Exception:
+            logger.warning("RAG retrieval failed", exc_info=True)
+            rag_chunks = []
+
+        # --- Short-term memory (Redis) — recent conversation context ---
+        try:
+            stm_items = await short_term_memory_service.get_recent(user.id, limit=8)
+        except Exception:
+            logger.debug("STM retrieval failed", exc_info=True)
+            stm_items = []
+        stm_block = short_term_memory_service.format_for_context(stm_items, max_lines=8)
+
+        memory_lines = [f"- [{f.fact_type}] {f.content}" for f in facts]
+        rag_lines = [f"- ({c['source_doc']}) {c['chunk_text']}" for c in rag_chunks]
+
+        stm_section = f"\n\nНедавний контекст (short-term memory):\n{stm_block}" if stm_block else ""
 
         system_prompt = (
             f"{user.system_prompt_template}\n\n"
             f"Факты о пользователе:\n{chr(10).join(memory_lines) if memory_lines else '- нет данных'}\n\n"
             f"Контекст документов:\n{chr(10).join(rag_lines) if rag_lines else '- нет данных'}"
-            f"{adaptation_hint}"
+            f"{stm_section}"
+            f"{self._adaptation_hint(user.preferences)}"
         )
 
         history_messages = [{"role": msg.role, "content": msg.content} for msg in recent]

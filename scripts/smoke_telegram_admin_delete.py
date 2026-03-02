@@ -126,7 +126,7 @@ async def run() -> None:
         app.dependency_overrides.pop(get_db, None)
         try:
             await engine.dispose()
-        except Exception:
+        except BaseException:
             pass
         if DB_PATH.exists():
             DB_PATH.unlink()

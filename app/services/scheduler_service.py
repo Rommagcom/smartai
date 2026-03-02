@@ -12,6 +12,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from app.services.alerting_service import alerting_service
 from app.services.delivery_format_service import build_worker_delivery_payload
+from app.services.memory_service import memory_service
 from app.services.observability_metrics_service import observability_metrics_service
 from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
@@ -31,6 +32,7 @@ class SchedulerService:
                 self.scheduler.start()
                 self.scheduler.add_job(self.periodic_proactive_ping, "interval", minutes=30, id="global_proactive_ping", replace_existing=True)
                 self.scheduler.add_job(self.sync_jobs_from_db, "interval", seconds=30, id="global_cron_sync", replace_existing=True)
+                self.scheduler.add_job(self._run_memory_decay, "interval", minutes=60, id="global_memory_decay", replace_existing=True)
                 logger.info("scheduler started", extra={"context": {"component": "scheduler", "event": "start"}})
             success = True
         except Exception as exc:
@@ -266,6 +268,31 @@ class SchedulerService:
             observability_metrics_service.record(
                 component="scheduler",
                 operation="execute_action",
+                success=success,
+                latency_ms=(perf_counter() - started_at) * 1000,
+            )
+
+    async def _run_memory_decay(self) -> None:
+        started_at = perf_counter()
+        success = False
+        try:
+            result = await memory_service.apply_importance_decay_all_users()
+            success = True
+            logger.info(
+                "scheduler memory decay done",
+                extra={"context": {"component": "scheduler", "event": "memory_decay", **result}},
+            )
+        except Exception as exc:
+            alerting_service.emit(
+                component="scheduler",
+                severity="warning",
+                message="scheduler memory decay failed",
+                details={"error": str(exc)},
+            )
+        finally:
+            observability_metrics_service.record(
+                component="scheduler",
+                operation="memory_decay",
                 success=success,
                 latency_ms=(perf_counter() - started_at) * 1000,
             )

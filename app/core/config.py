@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45
     MEMORY_DECAY_MIN_FACTOR: float = 0.35
 
+    STM_TTL_SECONDS: int = 14400          # short-term memory TTL — 4 hours
+    STM_MAX_ITEMS: int = 20               # max context snippets per user
+    STM_REDIS_KEY_PREFIX: str = "assistant:stm"
+
 
 @lru_cache
 def get_settings() -> Settings:

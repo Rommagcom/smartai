@@ -28,6 +28,7 @@ from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
+from app.services.short_term_memory_service import short_term_memory_service
 from app.services.skills_registry_service import skills_registry_service
 from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
@@ -69,6 +70,21 @@ async def _extract_facts_background(user_id: UUID, user_text: str, assistant_tex
             await bg_db.commit()
     except Exception as exc:
         logger.warning("background fact extraction skipped: %s", exc)
+
+
+async def _save_stm_background(user_id: UUID, user_text: str, assistant_text: str) -> None:
+    """Save a compact context snippet to short-term memory (Redis)."""
+    try:
+        user_short = (user_text or "").strip()[:200]
+        assistant_short = (assistant_text or "").strip()[:200]
+        if not user_short:
+            return
+        summary = f"Пользователь: {user_short}"
+        if assistant_short:
+            summary += f" → Ассистент: {assistant_short}"
+        await short_term_memory_service.append(str(user_id), summary)
+    except Exception as exc:
+        logger.debug("STM background save skipped: %s", exc)
 
 
 @router.post("")
@@ -138,6 +154,17 @@ async def chat(
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+    stm_task = asyncio.create_task(
+        _save_stm_background(
+            user_id=current_user.id,
+            user_text=payload.message,
+            assistant_text=response_text,
+        )
+    )
+    _background_tasks.add(stm_task)
+    stm_task.add_done_callback(_background_tasks.discard)
+
     return ChatResponse(
         session_id=session.id,
         response=response_text,

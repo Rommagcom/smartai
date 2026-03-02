@@ -288,7 +288,7 @@ async def run() -> None:
         worker_service._redis = original_redis
         try:
             await engine.dispose()
-        except Exception:
+        except BaseException:
             pass
         if DB_PATH.exists():
             DB_PATH.unlink()

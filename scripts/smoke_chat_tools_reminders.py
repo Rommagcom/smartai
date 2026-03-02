@@ -242,7 +242,7 @@ async def run() -> None:
 
         try:
             await engine.dispose()
-        except Exception:
+        except BaseException:
             pass
         if DB_PATH.exists():
             DB_PATH.unlink()
