@@ -79,6 +79,15 @@
 			"args": [
 				"scripts/smoke_all.py"
 			]
+		},
+		{
+			"label": "smoke-worker-chat-flow",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_chat_flow.py"
+			],
+			"isBackground": false
 		}
 	]
 }

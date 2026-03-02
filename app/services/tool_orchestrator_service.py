@@ -57,7 +57,7 @@ class ToolOrchestratorService:
             "3) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
             "4) Если пользователь просит 'подключить API', используй integration_add. "
             "5) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
-            "6) Если пользователь просит выполнить задачу в фоне/очереди (например 'поставь в очередь', 'обработай в фоне'), используй worker_enqueue. "
+            "6) НИКОГДА не используй worker_enqueue. Для поиска ВСЕГДА используй web_search/web_fetch напрямую. Все задачи выполняй синхронно. "
             "7) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
             "8) Не выдумывай аргументы, если их нет в сообщении. "
             "9) Для удаления конкретного напоминания: сначала cron_list, затем cron_delete с нужным job_id из результата. "
@@ -762,6 +762,32 @@ class ToolOrchestratorService:
                 continue
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+
+            # --- auto-convert worker_enqueue → direct tool execution ----
+            if tool == "worker_enqueue":
+                job_type = str(arguments.get("job_type") or "").strip().lower()
+                payload = (
+                    arguments.get("payload")
+                    if isinstance(arguments.get("payload"), dict)
+                    else {}
+                )
+                _direct = {"web_search", "web_fetch", "pdf_create"}
+                if job_type in _direct:
+                    logger.info(
+                        "auto-converted worker_enqueue(%s) → direct %s",
+                        job_type,
+                        job_type,
+                    )
+                    tool = job_type
+                    arguments = dict(payload)
+                else:
+                    logger.warning(
+                        "worker_enqueue with unknown job_type=%s, skipping",
+                        job_type,
+                    )
+                    continue
+            # --- end auto-convert -----------------------------------
+
             if tool in TOOL_NAMES:
                 normalized_steps.append({"tool": tool, "arguments": arguments})
         return normalized_steps
