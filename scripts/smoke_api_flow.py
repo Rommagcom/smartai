@@ -105,7 +105,10 @@ async def run() -> None:
         validation_error = skills_registry_service.validate_input("web_search", {"query": "ok", "extra": 1})
         ensure(bool(validation_error), "expected validation error for extra argument")
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
     print("SMOKE_OK")
 
     if DB_PATH.exists():

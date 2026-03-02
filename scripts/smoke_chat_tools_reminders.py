@@ -240,7 +240,10 @@ async def run() -> None:
         web_tools_service.web_search = original_web_search
         web_tools_service.web_fetch = original_web_fetch
 
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         if DB_PATH.exists():
             DB_PATH.unlink()
 

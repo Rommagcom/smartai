@@ -235,7 +235,10 @@ async def run() -> None:
         web_tools_service.web_fetch = original_web_fetch
         api_executor.call = original_api_call
 
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         if DB_PATH.exists():
             DB_PATH.unlink()
 

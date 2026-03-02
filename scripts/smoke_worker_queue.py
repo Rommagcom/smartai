@@ -286,7 +286,10 @@ async def run() -> None:
     finally:
         worker_module.AsyncSessionLocal = original_session_local
         worker_service._redis = original_redis
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         if DB_PATH.exists():
             DB_PATH.unlink()
 

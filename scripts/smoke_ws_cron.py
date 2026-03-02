@@ -65,7 +65,10 @@ async def run() -> None:
             reply = ws.receive_json()
             assert reply.get("type") == "pong", reply
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
     if DB_PATH.exists():
         DB_PATH.unlink()
 

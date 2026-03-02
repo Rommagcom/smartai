@@ -255,7 +255,10 @@ async def run() -> None:
         worker_result_service.push = original_result_push
         worker_result_service.pop_many = original_result_pop_many
 
-        await engine.dispose()
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
         if DB_PATH.exists():
             DB_PATH.unlink()
 

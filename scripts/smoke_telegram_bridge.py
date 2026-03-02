@@ -264,6 +264,7 @@ async def run() -> None:
     app = FakeApplication()
     await adapter._poll_worker_results_for_user(
         app,
+        123,
         {
             "token": "token-1",
             "chat_id": 123,
