@@ -71,6 +71,14 @@
 				"smoke-all"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "smoke-all-check",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_all.py"
+			]
 		}
 	]
 }

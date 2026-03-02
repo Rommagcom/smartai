@@ -162,7 +162,7 @@ async def run() -> None:
         api_executor.call = original_api_call
         try:
             await engine.dispose()
-        except Exception:
+        except BaseException:
             pass
         if DB_PATH.exists():
             DB_PATH.unlink()

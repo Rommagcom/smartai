@@ -215,7 +215,6 @@ class MemoryService:
 
     async def retrieve_relevant_memories(self, db: AsyncSession, user_id: UUID, query: str, top_k: int = 5) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
-        await self.apply_importance_decay(db, user_id)
         try:
             query_embedding = await ollama_client.embeddings(query)
         except Exception:
@@ -255,7 +254,6 @@ class MemoryService:
 
     async def list_memories(self, db: AsyncSession, user_id: UUID, limit: int = 200) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
-        await self.apply_importance_decay(db, user_id)
         result = await db.execute(
             select(LongTermMemory)
             .where(LongTermMemory.user_id == user_id, self._active_filter(now))
@@ -283,6 +281,55 @@ class MemoryService:
                 row.importance_score = max(0.0, min(1.0, decayed))
             row.last_decay_at = now
         await db.flush()
+
+    async def apply_importance_decay_all_users(self) -> dict:
+        """Run importance decay for ALL users — intended as a scheduler background job."""
+        from app.db.session import AsyncSessionLocal
+
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=1)
+        total_updated = 0
+        total_cleaned = 0
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(LongTermMemory).where(
+                        LongTermMemory.is_pinned.is_(False),
+                        LongTermMemory.is_locked.is_(False),
+                        self._active_filter(now),
+                        or_(LongTermMemory.last_decay_at.is_(None), LongTermMemory.last_decay_at < cutoff),
+                    ).limit(5000)
+                )
+                rows = result.scalars().all()
+                for row in rows:
+                    decayed = self._effective_importance(row, now)
+                    if decayed < float(row.importance_score or 0.0):
+                        row.importance_score = max(0.0, min(1.0, decayed))
+                    row.last_decay_at = now
+                    total_updated += 1
+
+                # Also clean up expired memories
+                expired_result = await db.execute(
+                    select(LongTermMemory).where(
+                        LongTermMemory.is_pinned.is_(False),
+                        LongTermMemory.is_locked.is_(False),
+                        LongTermMemory.expiration_date.is_not(None),
+                        LongTermMemory.expiration_date <= now,
+                    ).limit(2000)
+                )
+                expired_rows = expired_result.scalars().all()
+                for row in expired_rows:
+                    await db.delete(row)
+                    total_cleaned += 1
+
+                await db.commit()
+        except Exception:
+            logger.warning("background memory decay failed", exc_info=True)
+        logger.info(
+            "background memory decay completed",
+            extra={"context": {"decayed": total_updated, "cleaned": total_cleaned}},
+        )
+        return {"decayed": total_updated, "cleaned": total_cleaned}
 
     async def set_memory_pin(self, db: AsyncSession, user_id: UUID, memory_id: UUID, value: bool) -> LongTermMemory | None:
         result = await db.execute(select(LongTermMemory).where(LongTermMemory.id == memory_id, LongTermMemory.user_id == user_id))
