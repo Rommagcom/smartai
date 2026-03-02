@@ -117,6 +117,19 @@ class ChatService:
             r"\bсобира[юе]\b",
             r"\bв\s+процессе\b",
             r"\bмомент\b",
+            r"\bначинаю\b",
+            r"\bприступаю\b",
+            r"\bпровожу\b",
+            r"\bработаю\b",
+            r"\bищу\b",
+            r"\bзагружаю\b",
+            r"\bскачиваю\b",
+            r"\bполучаю\s+данн",
+            r"\bсканирую\b",
+            r"\bпарсю\b",
+            r"\bпроверю\b",
+            r"\bсделаю\b",
+            r"\bнайду\b",
         ]
         return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -530,9 +543,55 @@ class ChatService:
             logger.debug("compose_final_answer retry also failed", exc_info=True)
 
         if self._is_progress_placeholder_answer(answer):
-            return self._live_data_unavailable_fallback()
+            # Tools succeeded but LLM kept generating placeholders —
+            # build a raw data summary from tool results instead of giving up.
+            return self._build_raw_tool_summary(tool_calls)
 
         return answer
+
+    @staticmethod
+    def _build_raw_tool_summary(tool_calls: list[dict]) -> str:
+        """Last-resort: build a readable summary directly from tool output."""
+        parts: list[str] = []
+        for call in tool_calls:
+            if not call.get("success"):
+                continue
+            result = call.get("result")
+            if not result:
+                continue
+            if isinstance(result, dict):
+                # web_search results
+                items = result.get("results") if isinstance(result.get("results"), list) else None
+                if items:
+                    for item in items[:5]:
+                        title = str(item.get("title") or "").strip()
+                        snippet = str(item.get("snippet") or item.get("content") or "").strip()
+                        url = str(item.get("url") or "").strip()
+                        line = f"• {title}" if title else ""
+                        if snippet:
+                            line += f"\n  {snippet[:300]}"
+                        if url:
+                            line += f"\n  {url}"
+                        if line:
+                            parts.append(line)
+                    continue
+                # web_fetch / browser text
+                text = str(result.get("text") or result.get("content") or "").strip()
+                if text:
+                    parts.append(text[:2000])
+                    continue
+                msg = str(result.get("message") or "").strip()
+                if msg:
+                    parts.append(msg[:500])
+            elif isinstance(result, str) and result.strip():
+                parts.append(result.strip()[:1500])
+
+        if not parts:
+            return (
+                "Не удалось получить актуальные данные прямо сейчас. "
+                "Повторите запрос через 10–30 секунд или уточните источник."
+            )
+        return "Вот что удалось найти:\n\n" + "\n\n".join(parts)
 
     @staticmethod
     def _extract_timezone_offset(text: str) -> str | None:
@@ -776,6 +835,17 @@ class ChatService:
             logger.warning("LLM chat call failed", exc_info=True)
             answer = self._llm_unavailable_fallback()
         answer = self._sanitize_llm_answer(answer)
+
+        # Guard: base LLM path can also produce placeholders for complex requests
+        if self._is_progress_placeholder_answer(answer):
+            logger.info("base LLM produced placeholder, replacing with honest fallback")
+            answer = (
+                "Я могу помочь с этим запросом, но мне нужны инструменты для сбора данных. "
+                "Попробуйте переформулировать запрос — например: "
+                "'открой сайт smartcloud.kz и покажи содержимое' или "
+                "'web_search smartcloud.kz'."
+            )
+
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
 
