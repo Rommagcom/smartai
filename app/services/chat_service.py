@@ -81,15 +81,42 @@ class ChatService:
 
     @staticmethod
     def _is_progress_placeholder_answer(answer: str) -> bool:
-        lowered = str(answer or "").strip().lower()
+        """Detect when the LLM pretends it will perform another action.
+
+        These answers look like 'Делаю запрос...', 'Секунду...', etc.
+        The system cannot continue after the response is sent, so such text
+        misleads the user into waiting for something that never arrives.
+        """
+        raw = str(answer or "").strip()
+        if not raw:
+            return True
+        # Strip leading emoji / special chars so they don't mask the patterns
+        stripped = re.sub(r"^[^\w]+", "", raw, flags=re.UNICODE)
+        lowered = stripped.lower() if stripped else raw.lower()
         if not lowered:
             return True
         patterns = [
             r"^сейчас\b",
+            r"\bсейчас\s+(?:сделаю|выполню|проверю|найду|посмотрю)",
             r"\bпосмотрю\b",
             r"\bгляну\b",
             r"\bдостаю\b",
             r"\bпроверяю\b",
+            r"\bделаю\b",
+            r"\bвыполняю\b",
+            r"\bзапрашиваю\b",
+            r"\bанализирую\b",
+            r"\bсекунд[уы]?\b",
+            r"\bминут[уыка]?\b",
+            r"\bобработк[аиуе]\b",
+            r"\bподожди\b",
+            r"\bждите\b",
+            r"\bожидайте\b",
+            r"\bобрабатываю\b",
+            r"\bзапуска[юе]\b",
+            r"\bсобира[юе]\b",
+            r"\bв\s+процессе\b",
+            r"\bмомент\b",
         ]
         return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -442,19 +469,54 @@ class ChatService:
         if live_data_fallback:
             return live_data_fallback
 
+        answer = await self._compose_answer_with_retry(
+            system_prompt=user.system_prompt_template,
+            user_message=user_message,
+            tool_calls=safe_tool_calls,
+            response_hint=response_hint,
+        )
+        return self._sanitize_llm_answer(answer), tool_calls, artifacts
+
+    async def _compose_answer_with_retry(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tool_calls: list[dict],
+        response_hint: str,
+    ) -> str:
+        """Compose final answer and retry once if the LLM generates a placeholder."""
         try:
             answer = await tool_orchestrator_service.compose_final_answer(
-                system_prompt=user.system_prompt_template,
+                system_prompt=system_prompt,
                 user_message=user_message,
-                tool_calls=safe_tool_calls,
+                tool_calls=tool_calls,
                 response_hint=response_hint,
             )
         except Exception:
             logger.warning("compose_final_answer failed", exc_info=True)
-            answer = self._llm_unavailable_fallback()
-        if self._is_live_data_intent(user_message) and self._is_progress_placeholder_answer(answer):
-            answer = self._live_data_unavailable_fallback()
-        return self._sanitize_llm_answer(answer), tool_calls, artifacts
+            return self._llm_unavailable_fallback()
+
+        if not self._is_progress_placeholder_answer(answer):
+            return answer
+
+        logger.info("placeholder answer detected, retrying compose_final_answer")
+        try:
+            answer = await tool_orchestrator_service.compose_final_answer(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                tool_calls=tool_calls,
+                response_hint=(
+                    "ВАЖНО: Предыдущая попытка сгенерировала текст-заглушку. "
+                    "Ответь ПО ФАКТУ полученных данных. Если данных нет — скажи прямо."
+                ),
+            )
+        except Exception:
+            logger.debug("compose_final_answer retry also failed", exc_info=True)
+
+        if self._is_progress_placeholder_answer(answer):
+            return self._live_data_unavailable_fallback()
+
+        return answer
 
     @staticmethod
     def _extract_timezone_offset(text: str) -> str | None:
