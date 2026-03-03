@@ -131,6 +131,12 @@ class BackendApiClient:
     async def chat_history(self, token: str, session_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/chat/history/{session_id}", token=token)
 
+    async def chat(self, token: str, message: str, session_id: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"message": message}
+        if session_id:
+            body["session_id"] = session_id
+        return await self._request("POST", "/chat", token=token, json=body)
+
     async def chat_self_improve(self, token: str) -> dict[str, Any]:
         return await self._request("POST", "/chat/self-improve", token=token)
 
