@@ -113,6 +113,13 @@ class ToolOrchestratorService:
         handlers = self._handlers()
         results: list[dict] = []
         context: dict[str, dict] = {}
+        _dev_verbose_log(
+            "chain_start",
+            user_id=str(user.id),
+            max_steps=max_steps,
+            requested_steps_count=len(steps or []),
+            tools=[str(step.get("tool") or "") for step in (steps or [])[:max_steps] if isinstance(step, dict)],
+        )
         for step in (steps or [])[:max_steps]:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
@@ -132,6 +139,7 @@ class ToolOrchestratorService:
 
             validation_error = skills_registry_service.validate_input(tool, arguments)
             if validation_error:
+                _dev_verbose_log("step_validation_error", tool=tool, error=validation_error, arguments=arguments)
                 results.append(
                     {
                         "tool": tool,
@@ -178,6 +186,13 @@ class ToolOrchestratorService:
                         "error": str(exc),
                     }
                 )
+        _dev_verbose_log(
+            "chain_complete",
+            user_id=str(user.id),
+            calls_count=len(results),
+            success_count=sum(1 for item in results if bool(item.get("success"))),
+            tools=[str(item.get("tool") or "") for item in results],
+        )
         return results
 
     @staticmethod
@@ -223,6 +238,12 @@ class ToolOrchestratorService:
         response_hint: str,
     ) -> str:
         all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else True
+        _dev_verbose_log(
+            "compose_final_answer_start",
+            tool_calls_count=len(tool_calls),
+            all_failed=all_failed,
+            tools=[str(call.get("tool") or "") for call in tool_calls],
+        )
         
         summary_prompt = (
             "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
@@ -569,6 +590,19 @@ class ToolOrchestratorService:
         return {"items": chunks}
 
     async def _cron_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        _dev_verbose_log(
+            "cron_add_start",
+            user_id=str(user.id),
+            name=str(arguments.get("name") or "chat-reminder"),
+            has_cron_expression=bool(str(arguments.get("cron_expression") or "").strip()),
+            schedule_text=str(
+                arguments.get("schedule_text")
+                or arguments.get("schedule")
+                or arguments.get("natural_text")
+                or ""
+            )[:160],
+            task_text_preview=str(arguments.get("task_text") or "")[:160],
+        )
         cron_name = str(arguments.get("name") or "chat-reminder")
         cron_expression = str(arguments.get("cron_expression") or "").strip()
         action_type = self._normalize_cron_action_type(str(arguments.get("action_type") or "send_message"))
@@ -588,11 +622,21 @@ class ToolOrchestratorService:
 
         if not cron_expression:
             if not schedule_text:
+                _dev_verbose_log("cron_add_invalid_args", user_id=str(user.id), reason="missing_schedule_and_cron_expression")
                 raise ValueError("cron_add requires cron_expression or schedule_text")
 
             user_timezone = str(user.preferences.get("timezone") or "Europe/Moscow")
             parsed = schedule_parser_service.parse(schedule_text=schedule_text, timezone_name=user_timezone)
             cron_expression = parsed.cron_expression
+            _dev_verbose_log(
+                "cron_add_schedule_parsed",
+                user_id=str(user.id),
+                schedule_text=schedule_text,
+                timezone=user_timezone,
+                cron_expression=cron_expression,
+                is_one_time=bool(parsed.is_one_time),
+                run_at_iso=parsed.run_at_iso,
+            )
             payload["timezone"] = user_timezone
             if parsed.is_one_time and parsed.run_at_iso:
                 payload["run_at"] = parsed.run_at_iso
@@ -630,6 +674,18 @@ class ToolOrchestratorService:
                 action_type=cron.action_type,
                 payload=cron.payload,
             )
+            _dev_verbose_log(
+                "cron_add_scheduler_synced",
+                user_id=str(user.id),
+                cron_id=str(cron.id),
+                cron_expression=cron.cron_expression,
+            )
+        _dev_verbose_log(
+            "cron_add_complete",
+            user_id=str(user.id),
+            cron_id=str(cron.id),
+            cron_expression=cron.cron_expression,
+        )
         return {
             "id": str(cron.id),
             "name": cron.name,

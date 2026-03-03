@@ -24,6 +24,15 @@ _URL_RE = re.compile(
 
 class ChatService:
     @staticmethod
+    def _dev_verbose_log(event: str, **context: object) -> None:
+        if not settings.DEV_VERBOSE_LOGGING:
+            return
+        logger.info(
+            f"chat service dev trace: {event}",
+            extra={"context": {"component": "chat_service", "event": event, **context}},
+        )
+
+    @staticmethod
     def _extract_fenced_block(text: str, fence_name: str) -> str:
         normalized = str(text or "")
         if not normalized:
@@ -156,14 +165,26 @@ class ChatService:
             or pairs.get("task")
         )
         if not schedule_text or not task_text:
+            ChatService._dev_verbose_log(
+                "cron_add_structured_rejected",
+                has_schedule=bool(schedule_text),
+                has_task=bool(task_text),
+                message_preview=text[:160],
+            )
             return None
 
-        return {
+        result = {
             "name": pairs.get("name") or "chat-reminder",
             "schedule_text": schedule_text,
             "task_text": task_text,
             "action_type": pairs.get("action_type") or "send_message",
         }
+        ChatService._dev_verbose_log(
+            "cron_add_structured_extracted",
+            schedule_text=result["schedule_text"],
+            task_text_preview=str(result["task_text"])[:160],
+        )
+        return result
 
     async def _try_fast_shortcuts(
         self,
@@ -267,10 +288,20 @@ class ChatService:
 
         cron_add_args = ChatService._extract_cron_add_structured_args(user_message)
         if cron_add_args:
+            ChatService._dev_verbose_log(
+                "deterministic_route_cron_add_structured",
+                schedule_text=str(cron_add_args.get("schedule_text") or ""),
+                task_text_preview=str(cron_add_args.get("task_text") or "")[:160],
+            )
             return [{"tool": "cron_add", "arguments": cron_add_args}]
 
         quick_reminder_args = ChatService._extract_quick_relative_reminder_args(user_message)
         if quick_reminder_args:
+            ChatService._dev_verbose_log(
+                "deterministic_route_cron_add_quick",
+                schedule_text=str(quick_reminder_args.get("schedule_text") or ""),
+                task_text_preview=str(quick_reminder_args.get("task_text") or "")[:160],
+            )
             return [{"tool": "cron_add", "arguments": quick_reminder_args}]
 
         if re.search(r"\b(?:очисти|очистить|сотри|стереть)\b.*\bпамят|\bудал[иь].*\bвсю\b.*\bпамят|\bforget\s+(?:all|everything)\b.*\bmemory\b", lowered):
@@ -665,6 +696,12 @@ class ChatService:
                 )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
+            self._dev_verbose_log(
+                "planner_result",
+                use_tools=use_tools,
+                steps_count=len(planned_steps),
+                tools=[str(step.get("tool") or "") for step in planned_steps if isinstance(step, dict)],
+            )
             if not use_tools or not planned_steps:
                 return None
 
@@ -1042,6 +1079,12 @@ class ChatService:
         steps = self._deterministic_tool_steps(user_message)
         if not steps:
             return None
+        self._dev_verbose_log(
+            "fast_route_start",
+            user_id=str(user.id),
+            tools=[str(step.get("tool") or "") for step in steps],
+            message_preview=str(user_message or "")[:180],
+        )
         try:
             planned_calls = await tool_orchestrator_service.execute_tool_chain(
                 db=db,
@@ -1052,6 +1095,14 @@ class ChatService:
         except Exception:
             logger.warning("deterministic tool route failed", exc_info=True)
             return None
+
+        self._dev_verbose_log(
+            "fast_route_result",
+            user_id=str(user.id),
+            calls_count=len(planned_calls),
+            success_count=sum(1 for call in planned_calls if bool(call.get("success"))),
+            tools=[str(call.get("tool") or "") for call in planned_calls],
+        )
 
         tool_calls = [*manual_tool_calls, *planned_calls]
         artifacts = self._extract_artifacts(tool_calls)
@@ -1164,6 +1215,12 @@ class ChatService:
         session_id: UUID,
         user_message: str,
     ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+        self._dev_verbose_log(
+            "respond_start",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            message_preview=str(user_message or "")[:220],
+        )
         manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
         tool_calls: list[dict] = list(manual_tool_calls)
         artifacts: list[dict] = []
@@ -1175,6 +1232,11 @@ class ChatService:
             manual_tool_calls=manual_tool_calls,
         )
         if fast_shortcut:
+            self._dev_verbose_log(
+                "respond_fast_shortcut",
+                user_id=str(user.id),
+                session_id=str(session_id),
+            )
             return fast_shortcut
 
         # For tool-intent messages, try tool-chain first and avoid expensive
@@ -1182,6 +1244,11 @@ class ChatService:
         needs_tools = self._should_attempt_tool_planning(user_message)
         planner_task = None
         if needs_tools:
+            self._dev_verbose_log(
+                "respond_tool_intent_detected",
+                user_id=str(user.id),
+                session_id=str(session_id),
+            )
             planner_task = asyncio.create_task(
                 tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
@@ -1198,6 +1265,13 @@ class ChatService:
             )
             if tool_answer:
                 answer, tool_calls, artifacts = tool_answer
+                self._dev_verbose_log(
+                    "respond_tool_answer",
+                    user_id=str(user.id),
+                    session_id=str(session_id),
+                    tool_calls_count=len(tool_calls),
+                    tools=[str(call.get("tool") or "") for call in tool_calls],
+                )
                 return answer, [], [], tool_calls, artifacts
 
         llm_messages, used_memory_ids, rag_sources = await self.build_context(db, user, session_id, user_message)
@@ -1225,8 +1299,21 @@ class ChatService:
             artifacts=artifacts,
         )
         if recovered:
+            self._dev_verbose_log(
+                "respond_recovered_placeholder",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(recovered[3]),
+            )
             return recovered
 
+        self._dev_verbose_log(
+            "respond_llm_only",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            used_memory_ids_count=len(used_memory_ids),
+            rag_sources_count=len(rag_sources),
+        )
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
     async def _maybe_recover_placeholder_answer(
