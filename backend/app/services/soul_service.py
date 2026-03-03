@@ -36,14 +36,11 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 ## TOOLS
 
 У тебя есть доступ к:
-- web_search, web_fetch (интернет)
-- browser (автоматизация Chrome)
 - execute_python (sandbox)
 - memory_add, memory_list, memory_search
 - doc_search (поиск по загруженным документам)
 - cron_add, cron_list, cron_delete (задачи по расписанию)
 - integration_add, integrations_list, integration_call
-- worker_enqueue (фоновая очередь)
 
 ## SAFETY
 

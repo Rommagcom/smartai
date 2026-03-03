@@ -117,15 +117,6 @@ class BackendApiClient:
     async def worker_results_poll(self, token: str, limit: int = 20) -> dict[str, Any]:
         return await self._request("GET", "/chat/worker-results/poll", token=token, params={"limit": limit})
 
-    async def web_search(self, token: str, query: str, limit: int = 5) -> dict[str, Any]:
-        return await self._request("POST", "/chat/tools/web-search", token=token, json={"query": query, "limit": limit})
-
-    async def web_fetch(self, token: str, url: str, max_chars: int = 12000) -> dict[str, Any]:
-        return await self._request("POST", "/chat/tools/web-fetch", token=token, json={"url": url, "max_chars": max_chars})
-
-    async def browser_action(self, token: str, url: str, action: str = "extract_text") -> dict[str, Any]:
-        return await self._request("POST", "/chat/tools/browser", token=token, json={"url": url, "action": action})
-
     async def pdf_create(self, token: str, title: str, content: str, filename: str = "document.pdf") -> dict[str, Any]:
         return await self._request(
             "POST",

@@ -26,7 +26,6 @@ from app.services.sandbox_service import sandbox_service
 from app.services.schedule_parser_service import schedule_parser_service
 from app.services.scheduler_service import scheduler_service
 from app.services.skills_registry_service import skills_registry_service
-from app.services.web_tools_service import web_tools_service
 from app.workers.models import WorkerJobType
 from app.workers.worker_service import worker_service
 
@@ -46,6 +45,7 @@ class ToolOrchestratorService:
         return normalized
 
     async def plan_tool_calls(self, user_message: str, system_prompt: str) -> dict:
+        del system_prompt
         planner_prompt = (
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
             "Формат: {\"use_tools\": bool, \"steps\": [{\"tool\": \"...\", \"arguments\": {...}}], \"response_hint\": \"...\"}. "
@@ -54,17 +54,16 @@ class ToolOrchestratorService:
             "Доступные инструменты: "
             f"{skills_registry_service.planner_signatures()}. "
             "Правила: "
-            "1) Для актуальных данных (курс валют, новости, погода) обычно сначала web_search, потом web_fetch. "
-            "2) Для PDF отчета после сбора данных добавляй pdf_create. "
-            "3) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
-            "4) Если пользователь просит 'подключить API', используй integration_add. "
-            "5) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
-            "6) НИКОГДА не используй worker_enqueue. Для поиска ВСЕГДА используй web_search/web_fetch напрямую. Все задачи выполняй синхронно. "
-            "7) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
-            "8) Не выдумывай аргументы, если их нет в сообщении. "
-            "9) Для удаления конкретного напоминания: сначала cron_list, затем cron_delete с нужным job_id из результата. "
-            "10) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
-            "11) Для просмотра списка напоминаний используй cron_list."
+            "1) Для PDF отчета используй pdf_create. "
+            "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
+            "3) Если пользователь просит 'подключить API', используй integration_add. "
+            "4) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
+            "5) НИКОГДА не используй worker_enqueue для отключённых инструментов. "
+            "6) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
+            "7) Не выдумывай аргументы, если их нет в сообщении. "
+            "8) Для удаления конкретного напоминания: сначала cron_list, затем cron_delete с нужным job_id из результата. "
+            "9) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
+            "10) Для просмотра списка напоминаний используй cron_list."
         )
 
         try:
@@ -170,13 +169,6 @@ class ToolOrchestratorService:
     def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
         merged = dict(arguments)
 
-        if tool in {"web_fetch", "browser"}:
-            if not merged.get("url"):
-                first_url = (context.get("web_search") or {}).get("first_url") or ""
-                if first_url:
-                    merged["url"] = first_url
-            return merged
-
         if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
             return merged
 
@@ -189,15 +181,6 @@ class ToolOrchestratorService:
 
     @staticmethod
     def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
-        if tool == "web_search" and isinstance(result, dict):
-            items = result.get("results") if isinstance(result.get("results"), list) else []
-            for item in items:
-                href = str(item.get("href") or item.get("url") or "").strip()
-                if href and "duckduckgo.com" not in href:
-                    context.setdefault("web_search", {})["first_url"] = href
-                    break
-            return
-
         if tool not in {
             "integration_onboarding_connect",
             "integration_onboarding_test",
@@ -224,26 +207,24 @@ class ToolOrchestratorService:
         tool_calls: list[dict],
         response_hint: str,
     ) -> str:
-        all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else False
-        failure_guidance = ""
-        if all_failed:
-            failure_guidance = (
-                " Все инструменты завершились с ошибкой. "
-                "Честно скажи пользователю, что получить данные не удалось. "
-                "Предложи конкретный следующий шаг: повторить через минуту, уточнить запрос, или указать альтернативный источник."
-            )
+        all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else True
+        
         summary_prompt = (
             "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "Если есть числовые значения (например курсы валют), дай их кратко и явно. "
-            "Если были ошибки/пустые результаты, честно сообщи и предложи следующий шаг."
-            f"{failure_guidance}"
-            " КРИТИЧНО: НИКОГДА не пиши 'делаю', 'выполняю', 'проверяю', 'сейчас', 'секунду', "
-            "'момент', 'запрашиваю', 'обрабатываю', 'анализирую', 'начинаю', 'приступаю', "
-            "'провожу', 'работаю', 'ищу', 'загружаю', 'скачиваю', 'сканирую'. "
-            "Ты НЕ МОЖЕШЬ выполнять действия после этого ответа — это финальный текст. "
-            "Отвечай ТОЛЬКО по тем данным, которые УЖЕ получены в Tool calls JSON. "
-            "Если данных нет или они неполные, скажи ЧЕСТНО: 'Не удалось получить данные. Попробуйте [конкретный совет].'"
+            "Если есть числовые значения, дай их кратко и явно. "
         )
+        if all_failed:
+            summary_prompt += (
+                "ВСЕ инструменты завершились с ошибкой. "
+                "Объясни пользователю, что произошло, и предложи конкретный следующий шаг "
+                "(например: попробовать позже, уточнить запрос, или дай ссылку, по которой можно посмотреть самостоятельно). "
+                "НЕ притворяйся, что данные доступны."
+            )
+        else:
+            summary_prompt += (
+                "Если были ошибки/пустые результаты, честно сообщи и предложи следующий шаг."
+            )
+            
         compact = json.dumps(tool_calls, ensure_ascii=False)[:16000]
         return await ollama_client.chat(
             messages=[
@@ -262,9 +243,6 @@ class ToolOrchestratorService:
 
     def _handlers(self) -> dict:
         return {
-            "web_search": self._web_search,
-            "web_fetch": self._web_fetch,
-            "browser": self._browser,
             "pdf_create": self._pdf_create,
             "execute_python": self._execute_python,
             "memory_add": self._memory_add,
@@ -275,7 +253,6 @@ class ToolOrchestratorService:
             "cron_list": self._cron_list,
             "cron_delete": self._cron_delete,
             "cron_delete_all": self._cron_delete_all,
-            "worker_enqueue": self._worker_enqueue,
             "integration_onboarding_connect": self._integration_onboarding_connect,
             "integration_onboarding_test": self._integration_onboarding_test,
             "integration_onboarding_save": self._integration_onboarding_save,
@@ -414,13 +391,11 @@ class ToolOrchestratorService:
             raise ValueError("worker_enqueue requires job_type")
 
         mapping = {
-            "web_search": WorkerJobType.WEB_SEARCH,
-            "web_fetch": WorkerJobType.WEB_FETCH,
             "pdf_create": WorkerJobType.PDF_CREATE,
         }
         job_type = mapping.get(job_type_raw)
         if not job_type:
-            raise ValueError("worker_enqueue supports only: web_search, web_fetch, pdf_create")
+            raise ValueError("worker_enqueue supports only: pdf_create")
 
         payload["__user_id"] = str(user.id)
         payload["__requested_job_type"] = job_type_raw
@@ -434,32 +409,6 @@ class ToolOrchestratorService:
                 else "Задача поставлена в очередь. Отправлю результат отдельным сообщением после обработки."
             ),
         }
-
-    async def _web_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        query = str(arguments.get("query") or "").strip()
-        if not query:
-            raise ValueError("web_search requires query")
-        limit = int(arguments.get("limit", 5))
-        return await web_tools_service.web_search(query=query, limit=max(1, min(limit, 10)))
-
-    async def _web_fetch(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        url = str(arguments.get("url") or "").strip()
-        if not url:
-            raise ValueError("web_fetch requires url")
-        max_chars = int(arguments.get("max_chars", 12000))
-        return await web_tools_service.web_fetch(url=url, max_chars=max(1000, min(max_chars, 50000)))
-
-    async def _browser(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        url = str(arguments.get("url") or "").strip()
-        if not url:
-            raise ValueError("browser requires url")
-        action = str(arguments.get("action") or "extract_text").strip().lower()
-        if action not in {"extract_text", "screenshot", "pdf"}:
-            raise ValueError("browser action must be extract_text, screenshot or pdf")
-        return await web_tools_service.browser_action(url=url, action=action)
 
     async def _pdf_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db, user
@@ -788,7 +737,7 @@ class ToolOrchestratorService:
                     if isinstance(arguments.get("payload"), dict)
                     else {}
                 )
-                _direct = {"web_search", "web_fetch", "pdf_create"}
+                _direct = {"pdf_create"}
                 if job_type in _direct:
                     logger.info(
                         "auto-converted worker_enqueue(%s) → direct %s",

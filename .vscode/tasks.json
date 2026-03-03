@@ -11,6 +11,13 @@
 			],
 			"options": {
 				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": false
 			}
 		},
 		{
