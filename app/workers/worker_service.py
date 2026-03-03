@@ -20,7 +20,6 @@ from app.services.alerting_service import alerting_service
 from app.services.pdf_service import pdf_service
 from app.services.delivery_format_service import build_worker_delivery_payload
 from app.services.observability_metrics_service import observability_metrics_service
-from app.services.web_tools_service import web_tools_service
 from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
 from app.workers.models import WorkerJobStatus, WorkerJobType
@@ -33,8 +32,6 @@ class WorkerService:
     def __init__(self) -> None:
         self._redis: Redis | None = None
         self._handlers: dict[WorkerJobType, WorkerHandler] = {
-            WorkerJobType.WEB_SEARCH: self._handle_web_search,
-            WorkerJobType.WEB_FETCH: self._handle_web_fetch,
             WorkerJobType.PDF_CREATE: self._handle_pdf_create,
         }
 
@@ -436,20 +433,6 @@ class WorkerService:
                 .limit(1)
             )
             return result.scalar_one_or_none()
-
-    async def _handle_web_search(self, payload: dict) -> dict:
-        query = str(payload.get("query") or "").strip()
-        if not query:
-            raise ValueError("web_search job requires query")
-        limit = int(payload.get("limit", 5))
-        return await web_tools_service.web_search(query=query, limit=max(1, min(limit, 10)))
-
-    async def _handle_web_fetch(self, payload: dict) -> dict:
-        url = str(payload.get("url") or "").strip()
-        if not url:
-            raise ValueError("web_fetch job requires url")
-        max_chars = int(payload.get("max_chars", 12000))
-        return await web_tools_service.web_fetch(url=url, max_chars=max(1000, min(max_chars, 50000)))
 
     async def _handle_pdf_create(self, payload: dict) -> dict:
         title = str(payload.get("title") or "Generated document")

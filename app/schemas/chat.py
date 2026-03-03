@@ -32,23 +32,6 @@ class MessageOut(BaseModel):
     model_config = {"from_attributes": True, "populate_by_name": True}
 
 
-class WebSearchRequest(BaseModel):
-    query: str
-    limit: int = 5
-
-
-class WebFetchRequest(BaseModel):
-    url: str
-    max_chars: int = 12000
-
-
-class BrowserActionRequest(BaseModel):
-    url: str
-    action: str = "extract_text"
-    max_chars: int = 8000
-    timeout_seconds: int = 30
-
-
 class PdfCreateRequest(BaseModel):
     title: str = "Generated document"
     content: str

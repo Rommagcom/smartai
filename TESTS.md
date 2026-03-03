@@ -21,18 +21,16 @@
    - `python -m scripts.smoke_telegram_bridge`
 - Telegram admin full-delete flow (`DELETE /telegram/admin/users/{telegram_user_id}`):
    - `python -m scripts.smoke_telegram_admin_delete`
-- Worker queue flow (Redis-backed enqueue/dedup/retry/success/fail + poll):
+- Worker queue flow (`SKIP`: web worker jobs removed):
    - `python -m scripts.smoke_worker_queue`
-- Worker chat API flow (`POST /chat` -> `worker_enqueue` -> worker run -> `worker-results/poll`):
+- Worker chat API flow (`SKIP`: web worker jobs removed):
    - `python -m scripts.smoke_worker_chat_flow`
-- Chat tools + reminders E2E (`tool chain + cron_add via /chat`):
+- Chat tools + reminders E2E (`SKIP`: web tools removed):
    - `python -m scripts.smoke_chat_tools_reminders`
 
 Актуальные VS Code tasks:
 - `run-smoke-all`
-- `run-smoke-chat-tools-reminders`
 - `run-smoke-admin-access`
-- `run-smoke-chat-self-service`
 
 ## Быстрые команды релизной проверки
 - Базовый pre-release (multi + topology + smoke):
@@ -41,7 +39,6 @@
    - `make pre-release WORKERS=3 RUN_K6=1 K6_MODE=docker`
 - Альтернатива через `just`:
    - `just smoke-all`
-   - `just smoke-chat-tools-reminders`
    - `just multi-up`
    - `just pre-release` (переменные: `WORKERS`, `BASE_URL`, `RUN_K6`, `K6_MODE`)
 
@@ -49,7 +46,6 @@
 - `smoke-all-via-just` → `just smoke-all`
 - `multi-up-via-just` → `just multi-up`
 - `run-smoke-all` → `python -m scripts.smoke_all`
-- `run-smoke-chat-tools-reminders` → `python -m scripts.smoke_chat_tools_reminders`
 - `run-smoke-admin-access` → `python -m scripts.smoke_admin_access`
 
 ## Quick copy-paste
@@ -57,7 +53,6 @@ Windows PowerShell (из корня репозитория):
 ```powershell
 Set-Location backend
 ..\.venv\Scripts\python.exe -m scripts.smoke_all
-..\.venv\Scripts\python.exe -m scripts.smoke_chat_tools_reminders
 ..\.venv\Scripts\python.exe -m scripts.smoke_admin_access
 ```
 
@@ -65,7 +60,6 @@ Linux/macOS (из корня репозитория):
 ```bash
 cd backend
 ../.venv/bin/python -m scripts.smoke_all
-../.venv/bin/python -m scripts.smoke_chat_tools_reminders
 ../.venv/bin/python -m scripts.smoke_admin_access
 ```
 

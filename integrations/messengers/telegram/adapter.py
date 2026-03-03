@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
+from sqlalchemy import func, select
 from telegram import Bot, InputFile, Update
 from telegram.ext import (
     Application,
@@ -23,14 +24,24 @@ from telegram.ext import (
     filters,
 )
 
+from app.core.config import settings
+from app.core.security import create_token, get_password_hash, verify_password
+from app.db.session import AsyncSessionLocal
+from app.models.telegram_allowed_user import TelegramAllowedUser
+from app.models.user import User
+from app.services.chat_service import chat_service
 from integrations.messengers.base.adapter import MessengerAdapter
 from app.services.alerting_service import alerting_service
+from app.services.memory_service import memory_service
 from app.services.observability_metrics_service import observability_metrics_service
+from app.services.short_term_memory_service import short_term_memory_service
 from integrations.messengers.telegram.backend_client import BackendApiClient
+from integrations.messengers.common.auth_bridge import build_backend_credentials
 from integrations.messengers.telegram.settings import get_telegram_settings
 
 logger = logging.getLogger(__name__)
 SUCCESS_REPLY = "Готово ✅"
+DEFAULT_ARTIFACT_FILENAME = "artifact.bin"
 
 (
     SOUL_NAME,
@@ -67,6 +78,7 @@ class TelegramAdapter(MessengerAdapter):
         )
         self._known_users: dict[int, dict[str, Any]] = self._load_known_users()
         self._background_tasks: set[asyncio.Task] = set()
+        self._direct_session_ids: dict[int, str] = {}
 
     # ---- known-users file persistence ----
 
@@ -111,9 +123,6 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("history", self.history))
         application.add_handler(CommandHandler("self_improve", self.self_improve))
         application.add_handler(CommandHandler("py", self.execute_python))
-        application.add_handler(CommandHandler("web_search", self.web_search))
-        application.add_handler(CommandHandler("web_fetch", self.web_fetch))
-        application.add_handler(CommandHandler("browse", self.browse))
         application.add_handler(CommandHandler("make_pdf", self.make_pdf))
         application.add_handler(CommandHandler("memory_add", self.memory_add))
         application.add_handler(CommandHandler("memory_list", self.memory_list))
@@ -158,12 +167,164 @@ class TelegramAdapter(MessengerAdapter):
 
     async def _auth(self, update: Update) -> tuple[str, str]:
         telegram_user_id = update.effective_user.id if update.effective_user else 0
-        allowed = await self.client.is_telegram_allowed(telegram_user_id)
-        if not allowed:
-            raise PermissionError(
-                "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
+        if telegram_user_id <= 0:
+            raise PermissionError("Не удалось определить Telegram ID пользователя.")
+
+        async with AsyncSessionLocal() as db:
+            allowed_result = await db.execute(
+                select(TelegramAllowedUser).where(
+                    TelegramAllowedUser.telegram_user_id == telegram_user_id,
+                    TelegramAllowedUser.is_active.is_(True),
+                )
             )
-        return await self.client.ensure_auth(telegram_user_id)
+            if allowed_result.scalar_one_or_none() is None:
+                raise PermissionError(
+                    "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
+                )
+
+            username, password = build_backend_credentials(
+                telegram_user_id,
+                self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
+            )
+            user_result = await db.execute(select(User).where(User.username == username))
+            user = user_result.scalar_one_or_none()
+
+            if user is None:
+                users_count_query = await db.execute(select(func.count()).select_from(User))
+                users_count = int(users_count_query.scalar() or 0)
+                user = User(
+                    username=username,
+                    hashed_password=get_password_hash(password),
+                    preferences={},
+                    is_admin=users_count == 0,
+                )
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+            elif not verify_password(password, user.hashed_password):
+                user.hashed_password = get_password_hash(password)
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+
+        token = create_token(str(user.id), settings.ACCESS_TOKEN_EXPIRE_MINUTES, "access")
+        return token, username
+
+    @staticmethod
+    async def _stream_text_reply(bot: Bot, chat_id: int, text: str) -> None:
+        clean = (text or "").strip() or "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
+        first_limit = 3600
+        visible = clean[:first_limit]
+        tail = clean[first_limit:]
+
+        msg = await bot.send_message(chat_id=chat_id, text="⏳")
+        chunk_size = 220
+        for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
+            part = visible[:idx]
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
+            await asyncio.sleep(0.08)
+
+        if not visible:
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
+
+        while tail:
+            part = tail[:3500]
+            tail = tail[3500:]
+            await bot.send_message(chat_id=chat_id, text=part)
+
+    async def _chat_background_task_direct(
+        self,
+        bot: Bot,
+        chat_id: int,
+        telegram_user_id: int,
+        text: str,
+        backend_username: str | None = None,
+        context: ContextTypes.DEFAULT_TYPE | None = None,
+    ) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                username = str(backend_username or "").strip()
+                if not username:
+                    known = self._known_users.get(telegram_user_id) if isinstance(self._known_users, dict) else None
+                    username = str((known or {}).get("username") or "").strip()
+                if not username:
+                    username, _password = build_backend_credentials(
+                        telegram_user_id,
+                        self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
+                    )
+                user_result = await db.execute(select(User).where(User.username == username))
+                user = user_result.scalar_one_or_none()
+                if user is None:
+                    await bot.send_message(chat_id=chat_id, text="Не удалось найти пользователя Telegram в системе.")
+                    return
+
+                if not user.soul_configured:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="Нужна первичная SOUL-настройка. Используй /start и пройди onboarding.",
+                    )
+                    if context and context.user_data is not None:
+                        context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
+                    return
+
+                session_id = self._direct_session_ids.get(telegram_user_id)
+                session = await memory_service.get_or_create_session(db, user.id, session_id)
+                self._direct_session_ids[telegram_user_id] = str(session.id)
+
+                await memory_service.append_message(db, user.id, session.id, "user", text)
+                await db.commit()
+
+                response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond(
+                    db,
+                    user,
+                    session.id,
+                    text,
+                )
+
+                await memory_service.append_message(
+                    db,
+                    user.id,
+                    session.id,
+                    "assistant",
+                    response_text,
+                    message_meta={
+                        "used_memory_ids": used_memory_ids,
+                        "rag_sources": rag_sources,
+                        "tool_calls": tool_calls,
+                    },
+                )
+                await db.commit()
+
+                user_short = (text or "").strip()[:200]
+                assistant_short = (response_text or "").strip()[:200]
+                if user_short:
+                    summary = f"Пользователь: {user_short}"
+                    if assistant_short:
+                        summary += f" → Ассистент: {assistant_short}"
+                    await short_term_memory_service.append(str(user.id), summary)
+
+            await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
+
+            for artifact in artifacts:
+                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                if not file_base64:
+                    continue
+                file_bytes = base64.b64decode(file_base64)
+                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                bio = BytesIO(file_bytes)
+                bio.name = file_name
+                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+        except httpx.TimeoutException:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
+            )
+        except Exception:
+            logger.exception("telegram direct chat failed")
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
+            )
 
     async def _auth_or_reject(self, update: Update) -> tuple[str, str] | None:
         try:
@@ -270,7 +431,7 @@ class TelegramAdapter(MessengerAdapter):
         status_code = int(res.get("status") or 0)
         if status_code == 401 and tg_user_id:
             try:
-                new_token, username = await self.client.ensure_auth(tg_user_id)
+                new_token, _ = await self.client.ensure_auth(tg_user_id)
                 data["token"] = new_token
                 if tg_user_id in self._known_users:
                     self._known_users[tg_user_id]["token"] = new_token
@@ -521,67 +682,6 @@ class TelegramAdapter(MessengerAdapter):
         context.user_data.pop("soul_setup_auto", None)
         return False
 
-    async def _deliver_chat_result(self, bot: Bot, chat_id: int, res: dict[str, Any]) -> None:
-        if res.get("status") == 200:
-            payload = res.get("payload") or {}
-            response_text = str(payload.get("response") or "").strip()
-            if not response_text:
-                response_text = "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
-            await bot.send_message(chat_id=chat_id, text=response_text)
-            for artifact in payload.get("artifacts", []):
-                file_base64 = artifact.get("file_base64")
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = artifact.get("file_name", "artifact.bin")
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
-            return
-
-        if res.get("status") == 428:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
-            )
-            return
-
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"Не удалось обработать запрос (HTTP {res.get('status')}). Попробуйте ещё раз.",
-        )
-
-    async def _chat_background_task(
-        self,
-        bot: Bot,
-        chat_id: int,
-        token: str,
-        telegram_user_id: int,
-        text: str,
-    ) -> None:
-        try:
-            res = await self.client.chat(token, telegram_user_id, text)
-        except httpx.TimeoutException:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
-            )
-            return
-        except httpx.HTTPError:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Временная ошибка связи с backend. Попробуйте ещё раз.",
-            )
-            return
-        except Exception:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
-            )
-            return
-
-        await self._deliver_chat_result(bot=bot, chat_id=chat_id, res=res)
-
     async def _reply_api_result(self, update: Update, result: dict) -> None:
         payload = self._sanitize_reply_payload(result.get("payload"))
         if result["status"] == 200:
@@ -653,9 +753,6 @@ class TelegramAdapter(MessengerAdapter):
             "/chat <message> (или просто текст)\n"
             "/history <session_id>, /self_improve\n"
             "/py <python_code>\n"
-            "/web_search <query>\n"
-            "/web_fetch <url>\n"
-            "/browse <url>|<extract_text|screenshot|pdf>\n"
             "/make_pdf <title>|<content>\n"
             "/memory_add <fact_type>|<content>|<importance>\n"
             "/memory_list\n"
@@ -725,22 +822,20 @@ class TelegramAdapter(MessengerAdapter):
         auth = await self._auth_or_reject(update)
         if not auth:
             return
-        token, _ = auth
-        soul_ready = await self._ensure_soul_ready_for_chat(update, token, context)
-        if not soul_ready:
-            return
+        _token, backend_username = auth
         telegram_user_id = update.effective_user.id if update.effective_user else 0
         if not update.effective_chat or context is None:
             await update.effective_message.reply_text("Не удалось запустить фоновую обработку. Повторите запрос.")
             return
 
         task = asyncio.create_task(
-            self._chat_background_task(
+            self._chat_background_task_direct(
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
-                token=token,
                 telegram_user_id=telegram_user_id,
                 text=text,
+                backend_username=backend_username,
+                context=context,
             )
         )
         self._background_tasks.add(task)
@@ -776,60 +871,6 @@ class TelegramAdapter(MessengerAdapter):
         token, _ = auth
         res = await self.client.execute_python(token, code)
         await self._reply_api_result(update, res)
-
-    async def web_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = " ".join(context.args).strip()
-        if not query:
-            await update.effective_message.reply_text("Использование: /web_search <query>")
-            return
-        auth = await self._auth_or_reject(update)
-        if not auth:
-            return
-        token, _ = auth
-        res = await self.client.web_search(token, query=query, limit=5)
-        await self._reply_api_result(update, res)
-
-    async def web_fetch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        url = " ".join(context.args).strip()
-        if not url:
-            await update.effective_message.reply_text("Использование: /web_fetch <url>")
-            return
-        auth = await self._auth_or_reject(update)
-        if not auth:
-            return
-        token, _ = auth
-        res = await self.client.web_fetch(token, url=url)
-        await self._reply_api_result(update, res)
-
-    async def browse(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = " ".join(context.args).strip()
-        if not text:
-            await update.effective_message.reply_text("Использование: /browse <url>|<extract_text|screenshot|pdf>")
-            return
-        parts = _split_pipe(text, 1)
-        url = parts[0]
-        action = parts[1].strip().lower() if len(parts) > 1 else "extract_text"
-
-        auth = await self._auth_or_reject(update)
-        if not auth:
-            return
-        token, _ = auth
-        res = await self.client.browser_action(token, url=url, action=action)
-        if res["status"] != 200:
-            await self._reply_api_result(update, res)
-            return
-
-        payload = res["payload"]
-        file_base64 = payload.get("file_base64")
-        if not file_base64:
-            await self._reply_api_result(update, res)
-            return
-
-        file_bytes = base64.b64decode(file_base64)
-        file_name = payload.get("file_name", "artifact.bin")
-        bio = BytesIO(file_bytes)
-        bio.name = file_name
-        await update.effective_message.reply_document(document=InputFile(bio, filename=file_name))
 
     async def make_pdf(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(context.args).strip()
