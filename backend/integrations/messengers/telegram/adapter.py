@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
+from sqlalchemy import func, select
 from telegram import Bot, InputFile, Update
 from telegram.ext import (
     Application,
@@ -23,14 +24,24 @@ from telegram.ext import (
     filters,
 )
 
+from app.core.config import settings
+from app.core.security import create_token, get_password_hash, verify_password
+from app.db.session import AsyncSessionLocal
+from app.models.telegram_allowed_user import TelegramAllowedUser
+from app.models.user import User
+from app.services.chat_service import chat_service
 from integrations.messengers.base.adapter import MessengerAdapter
 from app.services.alerting_service import alerting_service
+from app.services.memory_service import memory_service
 from app.services.observability_metrics_service import observability_metrics_service
+from app.services.short_term_memory_service import short_term_memory_service
 from integrations.messengers.telegram.backend_client import BackendApiClient
+from integrations.messengers.common.auth_bridge import build_backend_credentials
 from integrations.messengers.telegram.settings import get_telegram_settings
 
 logger = logging.getLogger(__name__)
 SUCCESS_REPLY = "Готово ✅"
+DEFAULT_ARTIFACT_FILENAME = "artifact.bin"
 
 (
     SOUL_NAME,
@@ -67,6 +78,7 @@ class TelegramAdapter(MessengerAdapter):
         )
         self._known_users: dict[int, dict[str, Any]] = self._load_known_users()
         self._background_tasks: set[asyncio.Task] = set()
+        self._direct_session_ids: dict[int, str] = {}
 
     # ---- known-users file persistence ----
 
@@ -158,12 +170,158 @@ class TelegramAdapter(MessengerAdapter):
 
     async def _auth(self, update: Update) -> tuple[str, str]:
         telegram_user_id = update.effective_user.id if update.effective_user else 0
-        allowed = await self.client.is_telegram_allowed(telegram_user_id)
-        if not allowed:
-            raise PermissionError(
-                "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
+        if telegram_user_id <= 0:
+            raise PermissionError("Не удалось определить Telegram ID пользователя.")
+
+        async with AsyncSessionLocal() as db:
+            allowed_result = await db.execute(
+                select(TelegramAllowedUser).where(
+                    TelegramAllowedUser.telegram_user_id == telegram_user_id,
+                    TelegramAllowedUser.is_active.is_(True),
+                )
             )
-        return await self.client.ensure_auth(telegram_user_id)
+            if allowed_result.scalar_one_or_none() is None:
+                raise PermissionError(
+                    "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
+                )
+
+            username, password = build_backend_credentials(
+                telegram_user_id,
+                self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
+            )
+            user_result = await db.execute(select(User).where(User.username == username))
+            user = user_result.scalar_one_or_none()
+
+            if user is None:
+                users_count_query = await db.execute(select(func.count()).select_from(User))
+                users_count = int(users_count_query.scalar() or 0)
+                user = User(
+                    username=username,
+                    hashed_password=get_password_hash(password),
+                    preferences={},
+                    is_admin=users_count == 0,
+                )
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+            elif not verify_password(password, user.hashed_password):
+                user.hashed_password = get_password_hash(password)
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+
+        token = create_token(str(user.id), settings.ACCESS_TOKEN_EXPIRE_MINUTES, "access")
+        return token, username
+
+    @staticmethod
+    async def _stream_text_reply(bot: Bot, chat_id: int, text: str) -> None:
+        clean = (text or "").strip() or "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
+        first_limit = 3600
+        visible = clean[:first_limit]
+        tail = clean[first_limit:]
+
+        msg = await bot.send_message(chat_id=chat_id, text="⏳")
+        chunk_size = 220
+        for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
+            part = visible[:idx]
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
+            await asyncio.sleep(0.08)
+
+        if not visible:
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
+
+        while tail:
+            part = tail[:3500]
+            tail = tail[3500:]
+            await bot.send_message(chat_id=chat_id, text=part)
+
+    async def _chat_background_task_direct(
+        self,
+        bot: Bot,
+        chat_id: int,
+        telegram_user_id: int,
+        text: str,
+        context: ContextTypes.DEFAULT_TYPE | None,
+    ) -> None:
+        try:
+            async with AsyncSessionLocal() as db:
+                username, _password = build_backend_credentials(
+                    telegram_user_id,
+                    self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
+                )
+                user_result = await db.execute(select(User).where(User.username == username))
+                user = user_result.scalar_one_or_none()
+                if user is None:
+                    await bot.send_message(chat_id=chat_id, text="Не удалось найти пользователя Telegram в системе.")
+                    return
+
+                if not user.soul_configured:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="Нужна первичная SOUL-настройка. Используй /start и пройди onboarding.",
+                    )
+                    if context and context.user_data is not None:
+                        context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
+                    return
+
+                session_id = self._direct_session_ids.get(telegram_user_id)
+                session = await memory_service.get_or_create_session(db, user.id, session_id)
+                self._direct_session_ids[telegram_user_id] = str(session.id)
+
+                await memory_service.append_message(db, user.id, session.id, "user", text)
+                await db.commit()
+
+                response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond(
+                    db,
+                    user,
+                    session.id,
+                    text,
+                )
+
+                await memory_service.append_message(
+                    db,
+                    user.id,
+                    session.id,
+                    "assistant",
+                    response_text,
+                    message_meta={
+                        "used_memory_ids": used_memory_ids,
+                        "rag_sources": rag_sources,
+                        "tool_calls": tool_calls,
+                    },
+                )
+                await db.commit()
+
+                user_short = (text or "").strip()[:200]
+                assistant_short = (response_text or "").strip()[:200]
+                if user_short:
+                    summary = f"Пользователь: {user_short}"
+                    if assistant_short:
+                        summary += f" → Ассистент: {assistant_short}"
+                    await short_term_memory_service.append(str(user.id), summary)
+
+            await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
+
+            for artifact in artifacts:
+                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                if not file_base64:
+                    continue
+                file_bytes = base64.b64decode(file_base64)
+                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                bio = BytesIO(file_bytes)
+                bio.name = file_name
+                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+        except httpx.TimeoutException:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
+            )
+        except Exception:
+            logger.exception("telegram direct chat failed")
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
+            )
 
     async def _auth_or_reject(self, update: Update) -> tuple[str, str] | None:
         try:
@@ -270,7 +428,7 @@ class TelegramAdapter(MessengerAdapter):
         status_code = int(res.get("status") or 0)
         if status_code == 401 and tg_user_id:
             try:
-                new_token, username = await self.client.ensure_auth(tg_user_id)
+                new_token, _ = await self.client.ensure_auth(tg_user_id)
                 data["token"] = new_token
                 if tg_user_id in self._known_users:
                     self._known_users[tg_user_id]["token"] = new_token
@@ -533,7 +691,7 @@ class TelegramAdapter(MessengerAdapter):
                 if not file_base64:
                     continue
                 file_bytes = base64.b64decode(file_base64)
-                file_name = artifact.get("file_name", "artifact.bin")
+                file_name = artifact.get("file_name", DEFAULT_ARTIFACT_FILENAME)
                 bio = BytesIO(file_bytes)
                 bio.name = file_name
                 await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
@@ -725,22 +883,19 @@ class TelegramAdapter(MessengerAdapter):
         auth = await self._auth_or_reject(update)
         if not auth:
             return
-        token, _ = auth
-        soul_ready = await self._ensure_soul_ready_for_chat(update, token, context)
-        if not soul_ready:
-            return
+        del auth
         telegram_user_id = update.effective_user.id if update.effective_user else 0
         if not update.effective_chat or context is None:
             await update.effective_message.reply_text("Не удалось запустить фоновую обработку. Повторите запрос.")
             return
 
         task = asyncio.create_task(
-            self._chat_background_task(
+            self._chat_background_task_direct(
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
-                token=token,
                 telegram_user_id=telegram_user_id,
                 text=text,
+                context=context,
             )
         )
         self._background_tasks.add(task)
@@ -826,7 +981,7 @@ class TelegramAdapter(MessengerAdapter):
             return
 
         file_bytes = base64.b64decode(file_base64)
-        file_name = payload.get("file_name", "artifact.bin")
+        file_name = payload.get("file_name", DEFAULT_ARTIFACT_FILENAME)
         bio = BytesIO(file_bytes)
         bio.name = file_name
         await update.effective_message.reply_document(document=InputFile(bio, filename=file_name))
