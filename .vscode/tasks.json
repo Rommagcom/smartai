@@ -61,24 +61,16 @@
 			}
 		},
 		{
-			"label": "tmp-smoke-worker-queue2",
+			"label": "run-smoke-chat-tools-reminders",
 			"type": "shell",
 			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"backend/scripts/smoke_worker_queue.py"
+				"-m",
+				"scripts.smoke_chat_tools_reminders"
 			],
-			"isBackground": false
-		},
-		{
-			"label": "tmp-run-worker-queue-cwd",
-			"type": "shell",
-			"command": "cd backend; & 'C:/Repositories/SmartAi/.venv/Scripts/python.exe' -m scripts.smoke_worker_queue",
-			"isBackground": false
-		},
-		{
-			"label": "tmp-run-chat-tools-reminders",
-			"type": "shell",
-			"command": "& 'C:/Repositories/SmartAi/.venv/Scripts/python.exe' -m scripts.smoke_chat_tools_reminders",
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
 			"isBackground": false
 		},
 		{
@@ -114,91 +106,27 @@
 		{
 			"label": "run-smoke-chat-self-service",
 			"type": "shell",
-			"command": "cmd",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"/c",
-				"cd backend && python -m scripts.smoke_chat_self_service"
+				"-m",
+				"scripts.smoke_chat_self_service"
 			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
 			"isBackground": false
 		},
 		{
-			"label": "run-smoke-chat-self-service-direct",
+			"label": "run-smoke-admin-access",
 			"type": "shell",
-			"command": "cmd",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"/c",
-				"cd backend && echo START_SMOKE && python -m scripts.smoke_chat_self_service && echo END_SMOKE"
+				"-m",
+				"scripts.smoke_admin_access"
 			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-chat-self-service-venv",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_self_service"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-chat-self-service-log",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_self_service > smoke_chat_self_service.log 2>&1 & echo EXITCODE:%ERRORLEVEL%"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-chat-self-service-venv2",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_self_service"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-chat-self-service-venv3",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_self_service"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-chat-self-service-log2",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_self_service > smoke_chat_self_service.log 2>&1"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-admin-access-local",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_admin_access"
-			],
-			"isBackground": false
-		},
-		{
-			"label": "run-smoke-admin-access-log",
-			"type": "shell",
-			"command": "cmd",
-			"args": [
-				"/c",
-				"cd backend && ..\\.venv\\Scripts\\python.exe -m scripts.smoke_admin_access > smoke_admin_access.log 2>&1 & echo EXITCODE:%ERRORLEVEL%"
-			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
 			"isBackground": false
 		}
 	]

@@ -536,7 +536,7 @@ class SkillsRegistryService:
         return {str(item.get("manifest", {}).get("name") or "").strip() for item in self._skills}
 
     def strip_unknown_properties(self, skill_name: str, payload: dict | None) -> dict:
-        skill = self._find_skill(skill_name)
+        skill = self.get_contract(skill_name)
         if not skill:
             return payload if isinstance(payload, dict) else {}
 
