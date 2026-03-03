@@ -219,6 +219,43 @@ async def run() -> None:
         "doc_search reply should include source document",
     )
 
+    async def documents_list_ok(token: str, limit: int = 200):
+        del token, limit
+        await asyncio.sleep(0)
+        return {
+            "status": 200,
+            "payload": {"items": [{"source_doc": DOCUMENT_FILENAME, "chunks": 3}]},
+        }
+
+    adapter.client.documents_list = documents_list_ok
+    update_doc_list = FakeUpdate(user_id=123)
+    await adapter.doc_list(update_doc_list, FakeContext())
+    ensure(len(update_doc_list.effective_message.replies) > 0, "doc_list should produce reply")
+    ensure(DOCUMENT_FILENAME in update_doc_list.effective_message.replies[-1], "doc_list should include filename")
+
+    async def documents_delete_ok(token: str, source_doc: str):
+        del token
+        await asyncio.sleep(0)
+        ensure(source_doc == DOCUMENT_FILENAME, f"unexpected source_doc: {source_doc}")
+        return {"status": 200, "payload": {"status": "deleted", "deleted_count": 3, "source_doc": source_doc}}
+
+    adapter.client.documents_delete = documents_delete_ok
+    update_doc_delete = FakeUpdate(user_id=123)
+    await adapter.doc_delete(update_doc_delete, FakeContext(args=[DOCUMENT_FILENAME]))
+    ensure(len(update_doc_delete.effective_message.replies) > 0, "doc_delete should produce reply")
+    ensure("Удалил документ" in update_doc_delete.effective_message.replies[-1], "doc_delete should confirm deletion")
+
+    async def documents_delete_all_ok(token: str):
+        del token
+        await asyncio.sleep(0)
+        return {"status": 200, "payload": {"status": "deleted_all", "deleted_count": 7}}
+
+    adapter.client.documents_delete_all = documents_delete_all_ok
+    update_doc_delete_all = FakeUpdate(user_id=123)
+    await adapter.doc_delete_all(update_doc_delete_all, FakeContext())
+    ensure(len(update_doc_delete_all.effective_message.replies) > 0, "doc_delete_all should produce reply")
+    ensure("Удалены все загруженные документы" in update_doc_delete_all.effective_message.replies[-1], "doc_delete_all should confirm deletion")
+
     async def documents_upload_unavailable(token: str, filename: str, content: bytes):
         del token, filename, content
         await asyncio.sleep(0)

@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from app.services.alerting_service import alerting_service
+from app.core.config import settings
 from app.services.delivery_format_service import build_worker_delivery_payload
 from app.services.memory_service import memory_service
 from app.services.observability_metrics_service import observability_metrics_service
@@ -165,6 +166,19 @@ class SchedulerService:
                         }
                     },
                 )
+            elif settings.DEV_VERBOSE_LOGGING:
+                logger.info(
+                    "scheduler periodic sync idle",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "sync_idle",
+                            "loaded": loaded,
+                            "removed": removed,
+                            "failed": failed,
+                        }
+                    },
+                )
             return {"loaded": loaded, "failed": failed, "removed": removed}
         except Exception as exc:
             alerting_service.emit(
@@ -224,6 +238,19 @@ class SchedulerService:
         success = False
         now = datetime.now(timezone.utc).isoformat()
         try:
+            if settings.DEV_VERBOSE_LOGGING:
+                logger.info(
+                    "scheduler execute action start",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "execute_start",
+                            "user_id": user_id,
+                            "action_type": action_type,
+                            "payload": payload,
+                        }
+                    },
+                )
             normalized_action_type = str(action_type or "").strip().lower()
             message_action_types = {"send_message", "reminder", "notification", "daily_briefing"}
 
@@ -256,6 +283,18 @@ class SchedulerService:
             else:
                 raise ValueError(f"Unsupported scheduler action_type: {action_type}")
             success = True
+            if settings.DEV_VERBOSE_LOGGING:
+                logger.info(
+                    "scheduler execute action done",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "execute_done",
+                            "user_id": user_id,
+                            "action_type": action_type,
+                        }
+                    },
+                )
         except Exception as exc:
             alerting_service.emit(
                 component="scheduler",

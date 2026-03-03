@@ -71,6 +71,23 @@ class ChatService:
         return None
 
     @staticmethod
+    def _deterministic_tool_steps(user_message: str) -> list[dict] | None:
+        lowered = str(user_message or "").strip().lower()
+        if not lowered:
+            return None
+
+        if re.search(r"\bудал[иь].*вс[её].*напомин|очист[иь].*(напомин|задач)|delete\s+all\s+reminder", lowered):
+            return [{"tool": "cron_delete_all", "arguments": {}}]
+
+        if re.search(r"\b(покажи|список|какие)\b.*\b(напомин|задач|cron)\b|\bмои\s+(напомин|задач|cron)", lowered):
+            return [{"tool": "cron_list", "arguments": {}}]
+
+        if re.search(r"\b(что\s+ты\s+помниш|что\s+ты\s+знаеш|покажи\s+памят|список\s+памят|моя\s+памят)\b", lowered):
+            return [{"tool": "memory_list", "arguments": {}}]
+
+        return None
+
+    @staticmethod
     def _live_data_unavailable_fallback() -> str:
         return (
             "Не удалось получить актуальные данные прямо сейчас. "
@@ -625,10 +642,115 @@ class ChatService:
     def _sanitize_tool_result_for_llm(result: dict) -> dict:
         if not isinstance(result, dict):
             return {"raw": str(result)}
-        sanitized = dict(result)
-        if "file_base64" in sanitized:
-            sanitized["file_base64"] = "<omitted_base64>"
-        return sanitized
+        max_depth = 3
+        max_items = 12
+        max_str = 1200
+        heavy_keys = {"file_base64", "content", "chunk_text", "raw", "body", "html"}
+
+        def _clip(text: str, limit: int = max_str) -> str:
+            normalized = str(text or "")
+            if len(normalized) <= limit:
+                return normalized
+            return normalized[: max(1, limit - 1)] + "…"
+
+        def _sanitize(value: object, depth: int) -> object:
+            if depth > max_depth:
+                return "<omitted_depth>"
+            if isinstance(value, dict):
+                output: dict[str, object] = {}
+                for index, (key, item) in enumerate(value.items()):
+                    if index >= max_items:
+                        output["_truncated"] = f"{len(value) - max_items} fields omitted"
+                        break
+                    if key == "file_base64":
+                        output[key] = "<omitted_base64>"
+                        continue
+                    if key in heavy_keys and isinstance(item, str):
+                        output[key] = _clip(item, 500)
+                        continue
+                    output[key] = _sanitize(item, depth + 1)
+                return output
+            if isinstance(value, list):
+                trimmed = [_sanitize(item, depth + 1) for item in value[:max_items]]
+                if len(value) > max_items:
+                    trimmed.append(f"<omitted_items:{len(value) - max_items}>")
+                return trimmed
+            if isinstance(value, str):
+                return _clip(value)
+            return value
+
+        return _sanitize(result, 0) if isinstance(result, dict) else {"raw": str(result)}
+
+    @classmethod
+    def _format_deterministic_tool_answer(cls, tool_calls: list[dict]) -> str | None:
+        for call in tool_calls:
+            if not call.get("success"):
+                continue
+            tool = str(call.get("tool") or "").strip().lower()
+            result = call.get("result") if isinstance(call.get("result"), dict) else {}
+
+            if tool == "cron_delete_all":
+                deleted_count = int(result.get("deleted_count") or 0)
+                if deleted_count <= 0:
+                    return "У вас не было активных напоминаний."
+                return f"Готово: удалил все напоминания ({deleted_count})."
+
+            if tool == "cron_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "Сейчас активных напоминаний нет."
+                lines = ["Ваши активные напоминания:"]
+                for item in items[:8]:
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                    task_text = str(payload.get("task_text") or payload.get("message") or item.get("name") or "задача").strip()
+                    cron_expr = str(item.get("cron_expression") or "").strip()
+                    lines.append(f"- {task_text} ({cron_expr})")
+                if len(items) > 8:
+                    lines.append(f"- …и ещё {len(items) - 8}")
+                return "\n".join(lines)
+
+            if tool == "memory_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "Пока в долгосрочной памяти нет сохранённых фактов."
+                lines = ["Вот что я помню о вас:"]
+                for item in items[:8]:
+                    fact_type = str(item.get("fact_type") or "fact").strip()
+                    content = cls._truncate_text(str(item.get("content") or ""), 200)
+                    if content:
+                        lines.append(f"- [{fact_type}] {content}")
+                if len(items) > 8:
+                    lines.append(f"- …и ещё {len(items) - 8}")
+                return "\n".join(lines)
+        return None
+
+    async def _maybe_fast_tool_answer(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        steps = self._deterministic_tool_steps(user_message)
+        if not steps:
+            return None
+        try:
+            planned_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=steps,
+                max_steps=1,
+            )
+        except Exception:
+            logger.warning("deterministic tool route failed", exc_info=True)
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls)
+        if answer:
+            return answer, tool_calls, artifacts
+        return None
 
     @staticmethod
     def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
@@ -737,6 +859,26 @@ class ChatService:
         import asyncio as _aio
 
         manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
+        tool_calls: list[dict] = list(manual_tool_calls)
+        artifacts: list[dict] = []
+
+        if manual_tool_calls and self._is_memory_only_message(user_message):
+            answer = "Запомнил. Буду учитывать это в следующих ответах и задачах."
+            return answer, [], [], tool_calls, artifacts
+
+        if self._is_timezone_query(user_message):
+            answer = self._timezone_answer(user)
+            return answer, [], [], tool_calls, artifacts
+
+        fast_tool_answer = await self._maybe_fast_tool_answer(
+            db=db,
+            user=user,
+            user_message=user_message,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if fast_tool_answer:
+            answer, tool_calls, artifacts = fast_tool_answer
+            return answer, [], [], tool_calls, artifacts
 
         # Run build_context and tool planner in parallel when tools are likely
         needs_tools = self._should_attempt_tool_planning(user_message)
@@ -757,21 +899,6 @@ class ChatService:
             "temperature": user.preferences.get("temperature", 0.3),
             "top_p": user.preferences.get("top_p", 0.9),
         }
-
-        tool_calls: list[dict] = list(manual_tool_calls)
-        artifacts: list[dict] = []
-
-        if manual_tool_calls and self._is_memory_only_message(user_message):
-            if planner_task:
-                planner_task.cancel()
-            answer = "Запомнил. Буду учитывать это в следующих ответах и задачах."
-            return answer, used_memory_ids, rag_sources, tool_calls, artifacts
-
-        if self._is_timezone_query(user_message):
-            if planner_task:
-                planner_task.cancel()
-            answer = self._timezone_answer(user)
-            return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
         tool_answer = await self._maybe_tool_answer_with_plan(
             db, user, user_message, manual_tool_calls, planner_task,

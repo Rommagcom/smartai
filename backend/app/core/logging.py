@@ -47,7 +47,9 @@ def setup_logging() -> None:
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
 
-    root_logger.setLevel(logging.INFO)
+    level_name = str(settings.OBS_LOG_LEVEL or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger.setLevel(level)
     root_logger.addHandler(handler)
 
     # Reduce poll endpoint noise in uvicorn access log

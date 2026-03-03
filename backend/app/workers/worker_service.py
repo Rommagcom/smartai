@@ -50,6 +50,7 @@ class WorkerService:
         *,
         max_retries: int | None = None,
         dedupe_key: str | None = None,
+        priority: str | None = None,
     ) -> dict:
         started_at = perf_counter()
         success = False
@@ -57,6 +58,8 @@ class WorkerService:
             retries = max(0, max_retries if max_retries is not None else settings.WORKER_MAX_RETRIES)
             payload_copy = dict(payload or {})
             user_id = str(payload_copy.get("__user_id") or "").strip() or None
+            normalized_priority = self._normalize_priority(priority or payload_copy.get("__priority"))
+            payload_copy["__priority"] = normalized_priority
 
             dedupe = dedupe_key or self._build_dedupe_key(job_type=job_type, payload=payload_copy)
             existing_task = await self._find_deduplicated_task(dedupe)
@@ -83,7 +86,7 @@ class WorkerService:
                 await db.refresh(task)
 
             redis = self._get_redis()
-            await redis.lpush(settings.WORKER_QUEUE_KEY, str(task.id))
+            await redis.lpush(self._queue_key_for_priority(normalized_priority), str(task.id))
             success = True
             logger.info(
                 "worker task enqueued",
@@ -124,10 +127,16 @@ class WorkerService:
         await self._promote_retries()
         redis = self._get_redis()
         task_id = await redis.brpoplpush(
-            settings.WORKER_QUEUE_KEY,
+            settings.WORKER_QUEUE_HIGH_KEY,
             settings.WORKER_PROCESSING_QUEUE_KEY,
-            timeout=settings.WORKER_BRPOP_TIMEOUT_SECONDS,
+            timeout=1,
         )
+        if not task_id:
+            task_id = await redis.brpoplpush(
+                settings.WORKER_QUEUE_KEY,
+                settings.WORKER_PROCESSING_QUEUE_KEY,
+                timeout=settings.WORKER_BRPOP_TIMEOUT_SECONDS,
+            )
         if not task_id:
             return None
         return await self._process_task(task_id)
@@ -295,9 +304,13 @@ class WorkerService:
             await db.commit()
 
         pipe = redis.pipeline()
+        priority_by_task_id = {
+            str(row.id): self._normalize_priority((row.payload or {}).get("__priority"))
+            for row in rows
+        }
         for task_id in ready_ids:
             pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, task_id)
-            pipe.lpush(settings.WORKER_QUEUE_KEY, task_id)
+            pipe.lpush(self._queue_key_for_priority(priority_by_task_id.get(task_id)), task_id)
         await pipe.execute()
 
     async def _recover_processing_queue(self) -> None:
@@ -361,7 +374,8 @@ class WorkerService:
             return
 
         if status == WorkerJobStatus.QUEUED.value:
-            await redis.lpush(settings.WORKER_QUEUE_KEY, task_id)
+            priority = self._normalize_priority((task.payload or {}).get("__priority"))
+            await redis.lpush(self._queue_key_for_priority(priority), task_id)
             await redis.lrem(settings.WORKER_PROCESSING_QUEUE_KEY, 0, task_id)
             return
 
@@ -412,6 +426,20 @@ class WorkerService:
             ensure_ascii=False,
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _normalize_priority(priority: object) -> str:
+        lowered = str(priority or "").strip().lower()
+        if lowered in {"high", "urgent", "interactive"}:
+            return "high"
+        return "normal"
+
+    @staticmethod
+    def _queue_key_for_priority(priority: object) -> str:
+        normalized = str(priority or "").strip().lower()
+        if normalized == "high":
+            return settings.WORKER_QUEUE_HIGH_KEY
+        return settings.WORKER_QUEUE_KEY
 
     async def _find_deduplicated_task(self, dedupe_key: str) -> WorkerTask | None:
         window_start = datetime.now(timezone.utc) - timedelta(seconds=settings.WORKER_DEDUPE_WINDOW_SECONDS)

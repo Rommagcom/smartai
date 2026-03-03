@@ -4,15 +4,16 @@
 		{
 			"label": "run-smoke-all",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_all.py"
+				"-m",
+				"scripts.smoke_all"
 			]
 		},
 		{
 			"label": "alembic-upgrade-head",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
 				"-m",
 				"alembic",
@@ -23,23 +24,25 @@
 		{
 			"label": "run-smoke-worker-queue",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_worker_queue.py"
+				"-m",
+				"scripts.smoke_worker_queue"
 			]
 		},
 		{
 			"label": "run-smoke-worker-chat-flow",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_worker_chat_flow.py"
+				"-m",
+				"scripts.smoke_worker_chat_flow"
 			]
 		},
 		{
 			"label": "run-smoke-memory-docs",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
 				"-m",
 				"scripts.smoke_memory_docs"
@@ -48,9 +51,10 @@
 		{
 			"label": "run-smoke-all-once",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_all.py"
+				"-m",
+				"scripts.smoke_all"
 			],
 			"isBackground": false
 		},

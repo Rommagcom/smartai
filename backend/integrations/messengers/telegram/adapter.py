@@ -72,6 +72,7 @@ class TelegramAdapter(MessengerAdapter):
 
     def __init__(self) -> None:
         self.settings = get_telegram_settings()
+        self._verbose_logging = bool(self.settings.DEV_VERBOSE_LOGGING)
         self.client = BackendApiClient(
             base_url=self.settings.BACKEND_API_BASE_URL,
             bridge_secret=self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
@@ -79,6 +80,14 @@ class TelegramAdapter(MessengerAdapter):
         self._known_users: dict[int, dict[str, Any]] = self._load_known_users()
         self._background_tasks: set[asyncio.Task] = set()
         self._direct_session_ids: dict[int, str] = {}
+
+    def _dev_log(self, event: str, **context: Any) -> None:
+        if not self._verbose_logging:
+            return
+        logger.info(
+            f"telegram dev trace: {event}",
+            extra={"context": {"component": "telegram_bridge", "event": event, **context}},
+        )
 
     # ---- known-users file persistence ----
 
@@ -126,7 +135,10 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("make_pdf", self.make_pdf))
         application.add_handler(CommandHandler("memory_add", self.memory_add))
         application.add_handler(CommandHandler("memory_list", self.memory_list))
+        application.add_handler(CommandHandler("doc_list", self.doc_list))
         application.add_handler(CommandHandler("doc_search", self.doc_search))
+        application.add_handler(CommandHandler("doc_delete", self.doc_delete))
+        application.add_handler(CommandHandler("doc_delete_all", self.doc_delete_all))
         application.add_handler(CommandHandler("cron_add", self.cron_add))
         application.add_handler(CommandHandler("cron_list", self.cron_list))
         application.add_handler(CommandHandler("cron_del", self.cron_del))
@@ -241,6 +253,13 @@ class TelegramAdapter(MessengerAdapter):
         backend_username: str | None = None,
         context: ContextTypes.DEFAULT_TYPE | None = None,
     ) -> None:
+        started_at = perf_counter()
+        self._dev_log(
+            "direct_chat_start",
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            text_preview=(text or "")[:180],
+        )
         try:
             async with AsyncSessionLocal() as db:
                 username = str(backend_username or "").strip()
@@ -280,6 +299,16 @@ class TelegramAdapter(MessengerAdapter):
                     session.id,
                     text,
                 )
+                self._dev_log(
+                    "direct_chat_result",
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    session_id=str(session.id),
+                    used_memory_count=len(used_memory_ids),
+                    rag_sources_count=len(rag_sources),
+                    tool_calls_count=len(tool_calls),
+                    artifacts_count=len(artifacts),
+                )
 
                 await memory_service.append_message(
                     db,
@@ -314,6 +343,12 @@ class TelegramAdapter(MessengerAdapter):
                 bio = BytesIO(file_bytes)
                 bio.name = file_name
                 await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+            self._dev_log(
+                "direct_chat_done",
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            )
         except httpx.TimeoutException:
             await bot.send_message(
                 chat_id=chat_id,
@@ -321,6 +356,12 @@ class TelegramAdapter(MessengerAdapter):
             )
         except Exception:
             logger.exception("telegram direct chat failed")
+            self._dev_log(
+                "direct_chat_error",
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            )
             await bot.send_message(
                 chat_id=chat_id,
                 text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
@@ -684,6 +725,11 @@ class TelegramAdapter(MessengerAdapter):
 
     async def _reply_api_result(self, update: Update, result: dict) -> None:
         payload = self._sanitize_reply_payload(result.get("payload"))
+        self._dev_log(
+            "api_result",
+            status=result.get("status"),
+            payload_preview=_safe_json(payload, max_len=1200),
+        )
         if result["status"] == 200:
             if isinstance(payload, dict):
                 soul_setup_text = self._format_soul_setup_success(payload)
@@ -756,7 +802,10 @@ class TelegramAdapter(MessengerAdapter):
             "/make_pdf <title>|<content>\n"
             "/memory_add <fact_type>|<content>|<importance>\n"
             "/memory_list\n"
+            "/doc_list\n"
             "[Загрузка документа файлом в чат] + /doc_search <query>\n"
+            "/doc_delete <filename>\n"
+            "/doc_delete_all\n"
             "/cron_add <name>|<cron>|<action_type>|<payload_json>\n"
             "/cron_list, /cron_del <job_id>\n"
             "/integrations_add <service>|<auth_json>|<endpoints_json>\n"
@@ -824,6 +873,11 @@ class TelegramAdapter(MessengerAdapter):
             return
         _token, backend_username = auth
         telegram_user_id = update.effective_user.id if update.effective_user else 0
+        self._dev_log(
+            "chat_message_received",
+            telegram_user_id=telegram_user_id,
+            text_preview=(text or "")[:180],
+        )
         if not update.effective_chat or context is None:
             await update.effective_message.reply_text("Не удалось запустить фоновую обработку. Повторите запрос.")
             return
@@ -987,6 +1041,77 @@ class TelegramAdapter(MessengerAdapter):
 
         await update.effective_message.reply_text("Результаты поиска по документам:\n" + "\n\n".join(lines))
 
+    async def doc_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.documents_list(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        self._dev_log("doc_list", items_count=len(items))
+        if not items:
+            await update.effective_message.reply_text("Загруженных документов нет.")
+            return
+
+        lines: list[str] = ["Загруженные документы:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            source_doc = str(item.get("source_doc") or "").strip() or "document"
+            chunks = int(item.get("chunks") or 0)
+            lines.append(f"- {source_doc} (чанков: {chunks})")
+        if len(items) > 30:
+            lines.append(f"- …и ещё {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def doc_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        source_doc = " ".join(context.args).strip()
+        if not source_doc:
+            await update.effective_message.reply_text("Использование: /doc_delete <filename>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.documents_delete(token, source_doc)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        self._dev_log("doc_delete", source_doc=source_doc, deleted_count=deleted_count)
+        if deleted_count <= 0:
+            await update.effective_message.reply_text(f"Документ '{source_doc}' не найден.")
+            return
+        await update.effective_message.reply_text(
+            f"Удалил документ '{source_doc}'. Удалено чанков: {deleted_count}."
+        )
+
+    async def doc_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.documents_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        self._dev_log("doc_delete_all", deleted_count=deleted_count)
+        await update.effective_message.reply_text(
+            f"Удалены все загруженные документы. Удалено чанков: {deleted_count}."
+        )
+
     async def cron_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(context.args).strip()
         if not text:
@@ -1006,6 +1131,12 @@ class TelegramAdapter(MessengerAdapter):
             "payload": payload,
             "is_active": True,
         }
+        self._dev_log(
+            "cron_add_request",
+            name=body["name"],
+            cron_expression=body["cron_expression"],
+            action_type=body["action_type"],
+        )
         auth = await self._auth_or_reject(update)
         if not auth:
             return
