@@ -73,5 +73,32 @@ class RagService:
             logger.warning("rag retrieve_context skipped: %s", exc)
             raise
 
+    async def list_documents(self, user_id: str, limit: int = 1000) -> list[dict]:
+        await asyncio.sleep(0)
+        try:
+            return milvus_service.list_user_documents(user_id=user_id, limit=limit)
+        except Exception as exc:
+            logger.warning("rag list_documents skipped: %s", exc)
+            raise RuntimeError("Document list is temporarily unavailable") from exc
+
+    async def delete_document(self, user_id: str, source_doc: str) -> int:
+        await asyncio.sleep(0)
+        normalized = str(source_doc or "").strip()
+        if not normalized:
+            raise ValueError("source_doc is required")
+        try:
+            return milvus_service.delete_document_chunks(user_id=user_id, source_doc=normalized)
+        except Exception as exc:
+            logger.warning("rag delete_document skipped: %s", exc)
+            raise RuntimeError("Document delete is temporarily unavailable") from exc
+
+    async def delete_all_documents(self, user_id: str) -> int:
+        await asyncio.sleep(0)
+        try:
+            return milvus_service.delete_user_chunks(user_id=user_id)
+        except Exception as exc:
+            logger.warning("rag delete_all_documents skipped: %s", exc)
+            raise RuntimeError("Document delete is temporarily unavailable") from exc
+
 
 rag_service = RagService()

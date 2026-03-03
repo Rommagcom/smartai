@@ -11,6 +11,8 @@ class TelegramBridgeSettings(BaseSettings):
     TELEGRAM_BACKEND_BRIDGE_SECRET: str = "change-me-telegram-bridge-secret"
     TELEGRAM_POLL_CONCURRENCY: int = 10
     TELEGRAM_KNOWN_USER_TTL_SECONDS: int = 2592000  # 30 days
+    OBS_LOG_LEVEL: str = "INFO"
+    DEV_VERBOSE_LOGGING: bool = False
 
 
 @lru_cache

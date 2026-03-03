@@ -208,6 +208,7 @@ class SkillsRegistryService:
                     "properties": {
                         "job_type": {"type": "string", "enum": ["pdf_create"]},
                         "payload": {"type": "object"},
+                        "priority": {"type": "string", "enum": ["normal", "high"]},
                     },
                     "required": ["job_type", "payload"],
                     "additionalProperties": False,

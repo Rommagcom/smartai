@@ -36,6 +36,15 @@ TOOL_NAMES = skills_registry_service.tool_names()
 TOOL_STEP_TIMEOUT_SECONDS = 90
 
 
+def _dev_verbose_log(event: str, **context: object) -> None:
+    if not settings.DEV_VERBOSE_LOGGING:
+        return
+    logger.info(
+        f"tool orchestrator dev trace: {event}",
+        extra={"context": {"component": "tool_orchestrator", "event": event, **context}},
+    )
+
+
 class ToolOrchestratorService:
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
@@ -105,6 +114,7 @@ class ToolOrchestratorService:
         for step in (steps or [])[:max_steps]:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+            _dev_verbose_log("step_start", tool=tool, arguments=arguments)
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
             arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
             if tool not in handlers:
@@ -136,6 +146,7 @@ class ToolOrchestratorService:
                     timeout=TOOL_STEP_TIMEOUT_SECONDS,
                 )
                 self._update_chain_context(tool=tool, result=result, context=context)
+                _dev_verbose_log("step_success", tool=tool, result=result)
                 results.append(
                     {
                         "tool": tool,
@@ -146,6 +157,7 @@ class ToolOrchestratorService:
                 )
             except asyncio.TimeoutError:
                 logger.warning("tool step '%s' timed out after %ss", tool, TOOL_STEP_TIMEOUT_SECONDS)
+                _dev_verbose_log("step_timeout", tool=tool)
                 results.append(
                     {
                         "tool": tool,
@@ -155,6 +167,7 @@ class ToolOrchestratorService:
                     }
                 )
             except Exception as exc:
+                _dev_verbose_log("step_error", tool=tool, error=str(exc))
                 results.append(
                     {
                         "tool": tool,
@@ -387,6 +400,8 @@ class ToolOrchestratorService:
         del db
         job_type_raw = str(arguments.get("job_type") or "").strip().lower()
         payload = dict(arguments.get("payload") or {}) if isinstance(arguments.get("payload"), dict) else {}
+        priority_raw = str(arguments.get("priority") or payload.get("__priority") or "normal").strip().lower()
+        priority = "high" if priority_raw in {"high", "urgent", "interactive"} else "normal"
         if not job_type_raw:
             raise ValueError("worker_enqueue requires job_type")
 
@@ -399,10 +414,12 @@ class ToolOrchestratorService:
 
         payload["__user_id"] = str(user.id)
         payload["__requested_job_type"] = job_type_raw
-        enqueue_result = await worker_service.enqueue(job_type=job_type, payload=payload)
+        payload["__priority"] = priority
+        enqueue_result = await worker_service.enqueue(job_type=job_type, payload=payload, priority=priority)
         deduplicated = bool(enqueue_result.get("deduplicated"))
         return {
             "status": "queued" if not deduplicated else "deduplicated",
+            "priority": priority,
             "message": (
                 "Похожая задача уже в обработке. Использую существующую очередь выполнения."
                 if deduplicated
@@ -550,7 +567,21 @@ class ToolOrchestratorService:
             is_active=True,
         )
         db.add(cron)
-        await db.flush()
+        await db.commit()
+        await db.refresh(cron)
+        logger.info(
+            "cron created via tool orchestrator",
+            extra={
+                "context": {
+                    "component": "scheduler",
+                    "event": "cron_create_tool",
+                    "cron_id": str(cron.id),
+                    "user_id": str(user.id),
+                    "cron_expression": cron.cron_expression,
+                    "action_type": cron.action_type,
+                }
+            },
+        )
         if scheduler_service.scheduler.running:
             scheduler_service.add_or_replace_job(
                 job_id=str(cron.id),
@@ -596,7 +627,8 @@ class ToolOrchestratorService:
         if scheduler_service.scheduler.running and scheduler_service.scheduler.get_job(str(job.id)):
             scheduler_service.scheduler.remove_job(str(job.id))
         await db.delete(job)
-        await db.flush()
+        await db.commit()
+        _dev_verbose_log("cron_delete", job_id=str(job_id), user_id=str(user.id))
         return {"status": "deleted", "job_id": str(job_id)}
 
     async def _cron_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -611,7 +643,8 @@ class ToolOrchestratorService:
                 scheduler_service.scheduler.remove_job(str(job.id))
             await db.delete(job)
             deleted += 1
-        await db.flush()
+        await db.commit()
+        _dev_verbose_log("cron_delete_all", user_id=str(user.id), deleted_count=deleted)
         return {"status": "deleted_all", "deleted_count": deleted}
 
     async def _integrations_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -728,31 +761,6 @@ class ToolOrchestratorService:
                 continue
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
-
-            # --- auto-convert worker_enqueue → direct tool execution ----
-            if tool == "worker_enqueue":
-                job_type = str(arguments.get("job_type") or "").strip().lower()
-                payload = (
-                    arguments.get("payload")
-                    if isinstance(arguments.get("payload"), dict)
-                    else {}
-                )
-                _direct = {"pdf_create"}
-                if job_type in _direct:
-                    logger.info(
-                        "auto-converted worker_enqueue(%s) → direct %s",
-                        job_type,
-                        job_type,
-                    )
-                    tool = job_type
-                    arguments = dict(payload)
-                else:
-                    logger.warning(
-                        "worker_enqueue with unknown job_type=%s, skipping",
-                        job_type,
-                    )
-                    continue
-            # --- end auto-convert -----------------------------------
 
             if tool in TOOL_NAMES:
                 normalized_steps.append({"tool": tool, "arguments": arguments})

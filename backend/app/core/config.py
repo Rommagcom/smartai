@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     REDIS_URL: str = "redis://localhost:6379/0"
     WORKER_QUEUE_KEY: str = "assistant:worker:queue"
+    WORKER_QUEUE_HIGH_KEY: str = "assistant:worker:queue:high"
     WORKER_PROCESSING_QUEUE_KEY: str = "assistant:worker:processing"
     WORKER_RETRY_ZSET_KEY: str = "assistant:worker:retry"
     WORKER_RESULT_QUEUE_PREFIX: str = "assistant:worker:result"
@@ -80,6 +81,8 @@ class Settings(BaseSettings):
     AUTH_DATA_ACTIVE_KEY_ID: str = ""
 
     OBS_LOG_JSON: bool = True
+    OBS_LOG_LEVEL: str = "INFO"
+    DEV_VERBOSE_LOGGING: bool = False
     OBS_ALERT_BUFFER_SIZE: int = 200
 
     SANDBOX_TIMEOUT_SECONDS: int = 30

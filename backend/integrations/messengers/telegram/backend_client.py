@@ -1,17 +1,32 @@
 from __future__ import annotations
 
+import json
+import logging
+from time import perf_counter
 from typing import Any
 
 import httpx
 
 from app.services.http_client_service import http_client_service
 from integrations.messengers.common.auth_bridge import build_backend_credentials
+from integrations.messengers.telegram.settings import get_telegram_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_payload(payload: Any, max_len: int = 1200) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        text = str(payload)
+    return text if len(text) <= max_len else f"{text[:max_len]}..."
 
 
 class BackendApiClient:
     def __init__(self, base_url: str, bridge_secret: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.bridge_secret = bridge_secret
+        self._verbose_logging = bool(get_telegram_settings().DEV_VERBOSE_LOGGING)
 
     async def _request(
         self,
@@ -23,9 +38,26 @@ class BackendApiClient:
         files: dict | None = None,
         extra_headers: dict | None = None,
     ) -> dict[str, Any]:
+        started_at = perf_counter()
         headers = dict(extra_headers or {})
         if token:
             headers["Authorization"] = f"Bearer {token}"
+
+        if self._verbose_logging:
+            logger.info(
+                "telegram bridge request",
+                extra={
+                    "context": {
+                        "component": "telegram_bridge",
+                        "event": "api_request",
+                        "method": method.upper(),
+                        "path": path,
+                        "has_json": bool(json),
+                        "has_params": bool(params),
+                        "has_files": bool(files),
+                    }
+                },
+            )
 
         client = http_client_service.get()
         response = await client.request(
@@ -42,6 +74,21 @@ class BackendApiClient:
             payload = response.json()
         except Exception:
             payload = {"raw": response.text}
+        if self._verbose_logging:
+            logger.info(
+                "telegram bridge response",
+                extra={
+                    "context": {
+                        "component": "telegram_bridge",
+                        "event": "api_response",
+                        "method": method.upper(),
+                        "path": path,
+                        "status": response.status_code,
+                        "latency_ms": round((perf_counter() - started_at) * 1000, 2),
+                        "payload": _safe_payload(payload),
+                    }
+                },
+            )
         return {"status": response.status_code, "payload": payload}
 
     async def is_telegram_allowed(self, telegram_user_id: int) -> bool:
@@ -118,6 +165,15 @@ class BackendApiClient:
 
     async def documents_search(self, token: str, query: str, top_k: int = 5) -> dict[str, Any]:
         return await self._request("GET", "/documents/search", token=token, params={"query": query, "top_k": top_k})
+
+    async def documents_list(self, token: str, limit: int = 200) -> dict[str, Any]:
+        return await self._request("GET", "/documents", token=token, params={"limit": limit})
+
+    async def documents_delete(self, token: str, source_doc: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/documents/{source_doc}", token=token)
+
+    async def documents_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/documents/all", token=token)
 
     async def cron_add(self, token: str, body: dict) -> dict[str, Any]:
         return await self._request("POST", "/cron", token=token, json=body)
