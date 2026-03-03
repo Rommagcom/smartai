@@ -682,67 +682,6 @@ class TelegramAdapter(MessengerAdapter):
         context.user_data.pop("soul_setup_auto", None)
         return False
 
-    async def _deliver_chat_result(self, bot: Bot, chat_id: int, res: dict[str, Any]) -> None:
-        if res.get("status") == 200:
-            payload = res.get("payload") or {}
-            response_text = str(payload.get("response") or "").strip()
-            if not response_text:
-                response_text = "Не удалось сформировать ответ. Попробуйте переформулировать запрос."
-            await bot.send_message(chat_id=chat_id, text=response_text)
-            for artifact in payload.get("artifacts", []):
-                file_base64 = artifact.get("file_base64")
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = artifact.get("file_name", DEFAULT_ARTIFACT_FILENAME)
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
-            return
-
-        if res.get("status") == 428:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
-            )
-            return
-
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"Не удалось обработать запрос (HTTP {res.get('status')}). Попробуйте ещё раз.",
-        )
-
-    async def _chat_background_task(
-        self,
-        bot: Bot,
-        chat_id: int,
-        token: str,
-        telegram_user_id: int,
-        text: str,
-    ) -> None:
-        try:
-            res = await self.client.chat(token, telegram_user_id, text)
-        except httpx.TimeoutException:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
-            )
-            return
-        except httpx.HTTPError:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Временная ошибка связи с backend. Попробуйте ещё раз.",
-            )
-            return
-        except Exception:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
-            )
-            return
-
-        await self._deliver_chat_result(bot=bot, chat_id=chat_id, res=res)
-
     async def _reply_api_result(self, update: Update, result: dict) -> None:
         payload = self._sanitize_reply_payload(result.get("payload"))
         if result["status"] == 200:
