@@ -1,0 +1,12 @@
+# Python cache artifacts (workspace-wide)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE/OS junk
+.DS_Store
+Thumbs.db
+
+# Root-level leftovers must not exist (real code lives in backend/)
+/integrations/
+/scripts/
