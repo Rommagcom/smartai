@@ -158,43 +158,28 @@ class ChatService:
         lowered = stripped.lower() if stripped else raw.lower()
         if not lowered:
             return True
-        patterns = [
-            r"^сейчас\b",
-            r"\bсейчас\s+(?:сделаю|выполню|проверю|найду|посмотрю)",
-            r"\bпосмотрю\b",
-            r"\bгляну\b",
-            r"\bдостаю\b",
-            r"\bпроверяю\b",
-            r"\bделаю\b",
-            r"\bвыполняю\b",
-            r"\bзапрашиваю\b",
-            r"\bанализирую\b",
-            r"\bсекунд[уы]?\b",
-            r"\bминут[уыка]?\b",
-            r"\bобработк[аиуе]\b",
-            r"\bподожди\b",
-            r"\bждите\b",
-            r"\bожидайте\b",
-            r"\bобрабатываю\b",
-            r"\bзапуска[юе]\b",
-            r"\bсобира[юе]\b",
-            r"\bв\s+процессе\b",
-            r"\bмомент\b",
-            r"\bначинаю\b",
-            r"\bприступаю\b",
-            r"\bпровожу\b",
-            r"\bработаю\b",
-            r"\bищу\b",
-            r"\bзагружаю\b",
-            r"\bскачиваю\b",
-            r"\bполучаю\s+данн",
-            r"\bсканирую\b",
-            r"\bпарсю\b",
-            r"\bпроверю\b",
-            r"\bсделаю\b",
-            r"\bнайду\b",
+        if any(marker in lowered for marker in ("http://", "https://", "```", "\n- ", "\n• ")):
+            return False
+
+        if len(lowered) > 220:
+            return False
+
+        strong_patterns = [
+            r"^(?:сейчас|секунду|подожди|ждите|ожидайте)(?:[\s,:.!?-].*)?$",
+            r"^сейчас\s+(?:сделаю|выполню|проверю|найду|посмотрю|открою|запрошу|поищу)(?:[\s,:.!?-].*)?$",
+            r"^(?:делаю|выполняю|проверяю|запрашиваю|анализирую|ищу|сканирую|парсю|загружаю|скачиваю|обрабатываю|запускаю)(?:[\s,:.!?-].*)?$",
+            r"^в\s+процессе(?:[\s,:.!?-].*)?$",
         ]
-        return any(re.search(pattern, lowered) for pattern in patterns)
+        if any(re.match(pattern, lowered) for pattern in strong_patterns):
+            return True
+
+        if lowered.endswith("...") and re.search(
+            r"\b(?:делаю|выполняю|проверяю|запрашиваю|анализирую|ищу|обрабатываю|сейчас)\b",
+            lowered,
+        ):
+            return True
+
+        return False
 
     @staticmethod
     def _tool_result_has_signal(result: object) -> bool:
@@ -916,6 +901,9 @@ class ChatService:
         # Guard: base LLM path can also produce placeholders for complex requests
         if self._is_progress_placeholder_answer(answer):
             logger.info("base LLM produced placeholder, attempting direct tool route")
+            if not self._should_attempt_tool_planning(user_message):
+                logger.info("placeholder ignored for non-tool request")
+                return answer, used_memory_ids, rag_sources, tool_calls, artifacts
             direct_steps = self._direct_route_from_message(user_message)
             if direct_steps:
                 try:
@@ -938,9 +926,7 @@ class ChatService:
 
             answer = (
                 "Я могу помочь с этим запросом, но мне нужны инструменты для сбора данных. "
-                "Попробуйте переформулировать запрос — например: "
-                "'открой сайт smartcloud.kz и покажи содержимое' или "
-                "'web_search smartcloud.kz'."
+                "Попробуйте переформулировать запрос или уточнить, какие данные вам нужны."
             )
 
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
