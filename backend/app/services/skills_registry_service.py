@@ -109,6 +109,38 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "memory_delete",
+                    "title": "Memory Delete",
+                    "description": "Удаление одного memory-факта (по id или query)",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "string"},
+                        "query": {"type": "string"},
+                    },
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                "permissions": ["memory.write"],
+            },
+            {
+                "manifest": {
+                    "name": "memory_delete_all",
+                    "title": "Memory Delete All",
+                    "description": "Удаление всех memory-фактов пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["memory.write"],
+            },
+            {
+                "manifest": {
                     "name": "doc_search",
                     "title": "Document Search",
                     "description": "RAG-поиск по загруженным документам",

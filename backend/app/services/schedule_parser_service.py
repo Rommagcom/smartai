@@ -30,6 +30,30 @@ MONTHS = {
     "ноябрь": 11,
     "декабря": 12,
     "декабрь": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
 
 WEEKDAYS = {
@@ -50,6 +74,28 @@ WEEKDAYS = {
     "субботы": "sat",
     "воскресенье": "sun",
     "воскресенья": "sun",
+    "понедельникам": "mon",
+    "вторникам": "tue",
+    "средам": "wed",
+    "четвергам": "thu",
+    "пятницам": "fri",
+    "субботам": "sat",
+    "воскресеньям": "sun",
+    "monday": "mon",
+    "mon": "mon",
+    "tuesday": "tue",
+    "tue": "tue",
+    "wednesday": "wed",
+    "wed": "wed",
+    "thursday": "thu",
+    "thurs": "thu",
+    "thu": "thu",
+    "friday": "fri",
+    "fri": "fri",
+    "saturday": "sat",
+    "sat": "sat",
+    "sunday": "sun",
+    "sun": "sun",
 }
 
 WEEKDAY_INDEX = {
@@ -76,7 +122,11 @@ class ScheduleParseResult:
 
 
 class ScheduleParserService:
-    def parse(self, schedule_text: str, timezone_name: str = "Europe/Moscow") -> ScheduleParseResult:
+    @staticmethod
+    def _contains_token(text: str, token: str) -> bool:
+        return re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text) is not None
+
+    def parse(self, schedule_text: str, timezone_name: str = "UTC +5") -> ScheduleParseResult:
         text = self._normalize(schedule_text)
         tz = self._resolve_timezone(timezone_name)
         now = datetime.now(tz)
@@ -93,6 +143,32 @@ class ScheduleParserService:
         if self._is_daily(text):
             return ScheduleParseResult(
                 cron_expression=f"{minute} {hour} * * *",
+                is_one_time=False,
+                run_at_iso=None,
+            )
+
+        recurring_yearly = self._recurring_yearly(text)
+        if recurring_yearly is not None:
+            day, month = recurring_yearly
+            return ScheduleParseResult(
+                cron_expression=f"{minute} {hour} {day} {month} *",
+                is_one_time=False,
+                run_at_iso=None,
+            )
+
+        recurring_quarterly = self._recurring_quarterly(text)
+        if recurring_quarterly is not None:
+            day, months = recurring_quarterly
+            return ScheduleParseResult(
+                cron_expression=f"{minute} {hour} {day} {months} *",
+                is_one_time=False,
+                run_at_iso=None,
+            )
+
+        recurring_dom = self._recurring_monthly_day(text)
+        if recurring_dom is not None:
+            return ScheduleParseResult(
+                cron_expression=f"{minute} {hour} {recurring_dom} * *",
                 is_one_time=False,
                 run_at_iso=None,
             )
@@ -127,7 +203,7 @@ class ScheduleParserService:
         try:
             return ZoneInfo(timezone_name)
         except Exception:
-            return ZoneInfo("Europe/Moscow")
+            return ZoneInfo("Asia/Almaty")
 
     def _parse_time(self, text: str) -> tuple[int, int]:
         match = TIME_HHMM_PATTERN.search(text)
@@ -152,30 +228,162 @@ class ScheduleParserService:
 
     @staticmethod
     def _is_daily(text: str) -> bool:
-        return any(token in text for token in ["каждый день", "ежедневно", "каждое утро", "каждый вечер"])
+        return any(
+            token in text
+            for token in ["каждый день", "ежедневно", "каждое утро", "каждый вечер", "daily", "every day", "everyday", "every morning", "every evening"]
+        )
 
     def _recurring_weekday(self, text: str) -> str | None:
-        if "кажд" not in text:
+        weekday: str | None = None
+        for candidate, dow in WEEKDAYS.items():
+            if self._contains_token(text, candidate):
+                weekday = dow
+                break
+        if not weekday:
             return None
-        for ru_name, dow in WEEKDAYS.items():
-            if ru_name in text:
-                return dow
+
+        recurring_hint = any(
+            token in text
+            for token in [
+                "weekly",
+                "every week",
+                "every",
+                "еженед",
+                "кажд",
+                "по понедельникам",
+                "по вторникам",
+                "по средам",
+                "по четвергам",
+                "по пятницам",
+                "по субботам",
+                "по воскресеньям",
+            ]
+        )
+        if recurring_hint:
+            return weekday
         return None
+
+    @staticmethod
+    def _recurring_monthly_day(text: str) -> int | None:
+        monthly_hint = any(
+            token in text
+            for token in [
+                "monthly",
+                "every month",
+                "each month",
+                "ежемесяч",
+                "каждый месяц",
+            ]
+        )
+        if not monthly_hint:
+            return None
+
+        day_match = (
+            re.search(r"\bday\s*(\d{1,2})\b", text)
+            or re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b", text)
+            or re.search(r"\b(\d{1,2})\s*(?:числа|число)\b", text)
+            or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\b", text)
+        )
+        if not day_match:
+            return None
+
+        day = int(day_match.group(1))
+        if 1 <= day <= 31:
+            return day
+        return None
+
+    @staticmethod
+    def _extract_month_number(text: str) -> int | None:
+        explicit = DATE_PATTERN.search(text)
+        if explicit:
+            return MONTHS.get(explicit.group(2))
+
+        month_match = (
+            re.search(r"\bmonth\s*(\d{1,2})\b", text)
+            or re.search(r"\bмесяц\s*(\d{1,2})\b", text)
+            or re.search(r"\bmonth\s*[:=]\s*(\d{1,2})\b", text)
+            or re.search(r"\bмесяц\s*[:=]\s*(\d{1,2})\b", text)
+        )
+        if month_match:
+            value = int(month_match.group(1))
+            if 1 <= value <= 12:
+                return value
+
+        for name, number in MONTHS.items():
+            if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text):
+                return number
+        return None
+
+    @staticmethod
+    def _extract_day_number(text: str) -> int | None:
+        explicit = DATE_PATTERN.search(text)
+        if explicit:
+            value = int(explicit.group(1))
+            return value if 1 <= value <= 31 else None
+
+        day_match = (
+            re.search(r"\bday\s*(\d{1,2})\b", text)
+            or re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b", text)
+            or re.search(r"\b(\d{1,2})\s*(?:числа|число)\b", text)
+            or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)\b", text)
+        )
+        if not day_match:
+            return None
+        value = int(day_match.group(1))
+        return value if 1 <= value <= 31 else None
+
+    def _recurring_yearly(self, text: str) -> tuple[int, int] | None:
+        yearly_hint = any(
+            token in text
+            for token in ["yearly", "annual", "annually", "every year", "каждый год", "ежегод", "раз в год"]
+        )
+        if not yearly_hint:
+            return None
+
+        day = self._extract_day_number(text)
+        month = self._extract_month_number(text)
+        if day is None or month is None:
+            return None
+        return day, month
+
+    def _recurring_quarterly(self, text: str) -> tuple[int, str] | None:
+        quarterly_hint = any(
+            token in text
+            for token in ["quarterly", "every quarter", "ежекварт", "каждый квартал"]
+        )
+        if not quarterly_hint:
+            return None
+
+        day = self._extract_day_number(text)
+        if day is None:
+            return None
+
+        start_month = self._extract_month_number(text) or 1
+        quarter_start = ((start_month - 1) // 3) * 3 + 1
+        months: list[int] = []
+        value = quarter_start
+        for _ in range(4):
+            months.append(value)
+            value += 3
+            if value > 12:
+                value -= 12
+        month_expr = ",".join(str(item) for item in months)
+        return day, month_expr
 
     def _absolute_or_relative_datetime(self, text: str, now: datetime, hour: int, minute: int) -> datetime | None:
         relative = self._extract_relative_offset(text, now)
         if relative is not None:
             return relative
 
-        if "сегодня" in text:
+        if "сегодня" in text or "today" in text:
             dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             return dt if dt > now else dt + timedelta(days=1)
 
-        if "послезавтра" in text:
+        if "послезавтра" in text or "day after tomorrow" in text:
             base = now + timedelta(days=2)
             return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        if "завтра" in text:
+        if "завтра" in text or "tomorrow" in text:
             base = now + timedelta(days=1)
             return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
@@ -209,14 +417,21 @@ class ScheduleParserService:
 
     @staticmethod
     def _extract_relative_offset(text: str, now: datetime) -> datetime | None:
-        """Parse 'через N минут/часов/дней' patterns."""
+        """Parse relative offsets like 'через N минут', '+5 minutes', 'in 5 minutes'."""
         UNIT_MAP = {
             "минут": "minutes", "мин": "minutes",
             "час": "hours", "часа": "hours", "часов": "hours",
             "день": "days", "дня": "days", "дней": "days",
+            "minute": "minutes", "minutes": "minutes", "min": "minutes", "mins": "minutes",
+            "hour": "hours", "hours": "hours", "hr": "hours", "hrs": "hours",
+            "day": "days", "days": "days",
         }
         unit_pattern = "|".join(sorted((re.escape(u) for u in UNIT_MAP), key=len, reverse=True))
-        match = re.search(rf"через\s+(\d+)\s*({unit_pattern})", text)
+        match = (
+            re.search(rf"через\s+(\d+)\s*({unit_pattern})", text)
+            or re.search(rf"\+\s*(\d+)\s*({unit_pattern})", text)
+            or re.search(rf"\bin\s+(\d+)\s*({unit_pattern})\b", text)
+        )
         if not match:
             return None
         amount = int(match.group(1))
@@ -229,7 +444,7 @@ class ScheduleParserService:
 
     def _extract_weekday_once(self, text: str, now: datetime) -> datetime | None:
         for ru_name, dow in WEEKDAYS.items():
-            if ru_name not in text:
+            if not self._contains_token(text, ru_name):
                 continue
             target_idx = WEEKDAY_INDEX[dow]
             days_ahead = (target_idx - now.weekday()) % 7

@@ -72,7 +72,9 @@ class ToolOrchestratorService:
             "7) Не выдумывай аргументы, если их нет в сообщении. "
             "8) Для удаления конкретного напоминания: сначала cron_list, затем cron_delete с нужным job_id из результата. "
             "9) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
-            "10) Для просмотра списка напоминаний используй cron_list."
+            "10) Для просмотра списка напоминаний используй cron_list. "
+            "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
+            "12) Для очистки памяти пользователя используй memory_delete_all."
         )
 
         try:
@@ -261,6 +263,8 @@ class ToolOrchestratorService:
             "memory_add": self._memory_add,
             "memory_list": self._memory_list,
             "memory_search": self._memory_search,
+            "memory_delete": self._memory_delete,
+            "memory_delete_all": self._memory_delete_all,
             "doc_search": self._doc_search,
             "cron_add": self._cron_add,
             "cron_list": self._cron_list,
@@ -517,6 +521,42 @@ class ToolOrchestratorService:
                 }
                 for item in rows
             ]
+        }
+
+    async def _memory_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        memory_id_raw = str(arguments.get("memory_id") or "").strip()
+        query = str(arguments.get("query") or "").strip()
+
+        if memory_id_raw:
+            try:
+                memory_id = UUID(memory_id_raw)
+            except ValueError as exc:
+                raise ValueError("memory_delete requires valid memory_id") from exc
+            deleted = await memory_service.delete_memory_by_id(db=db, user_id=user.id, memory_id=memory_id)
+        elif query:
+            deleted = await memory_service.delete_memory_by_query(db=db, user_id=user.id, query=query)
+        else:
+            raise ValueError("memory_delete requires memory_id or query")
+
+        if not deleted:
+            return {
+                "deleted": False,
+                "message": "Подходящий факт не найден",
+            }
+
+        return {
+            "deleted": True,
+            "id": str(deleted.id),
+            "fact_type": deleted.fact_type,
+            "content": deleted.content,
+        }
+
+    async def _memory_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del arguments
+        deleted_count = await memory_service.delete_all_memories(db=db, user_id=user.id)
+        return {
+            "deleted": True,
+            "deleted_count": deleted_count,
         }
 
     async def _doc_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:

@@ -8,6 +8,7 @@ from scripts.smoke_api_flow import run as run_api_flow
 from scripts.smoke_admin_access import run as run_admin_access
 from scripts.smoke_integrations import run as run_integrations
 from scripts.smoke_memory_docs import run as run_memory_docs
+from scripts.smoke_chat_cron_add import run as run_chat_cron_add
 from scripts.smoke_onboarding_step import run as run_onboarding_step
 from scripts.smoke_telegram_bridge import run as run_telegram_bridge
 from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
@@ -48,6 +49,11 @@ async def run() -> None:
 
         print("RUN_SMOKE_MEMORY_DOCS")
         await run_memory_docs()
+
+        reset_scheduler()
+
+        print("RUN_SMOKE_CHAT_CRON_ADD")
+        await run_chat_cron_add()
 
         reset_scheduler()
 

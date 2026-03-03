@@ -361,6 +361,31 @@ class MemoryService:
         await db.flush()
         return memory
 
+    async def delete_memory_by_id(self, db: AsyncSession, user_id: UUID, memory_id: UUID) -> LongTermMemory | None:
+        result = await db.execute(select(LongTermMemory).where(LongTermMemory.id == memory_id, LongTermMemory.user_id == user_id))
+        memory = result.scalar_one_or_none()
+        if not memory:
+            return None
+        await db.delete(memory)
+        await db.flush()
+        return memory
+
+    async def delete_memory_by_query(self, db: AsyncSession, user_id: UUID, query: str) -> LongTermMemory | None:
+        rows = await self.retrieve_relevant_memories(db=db, user_id=user_id, query=query, top_k=1)
+        if not rows:
+            return None
+        memory = rows[0]
+        await db.delete(memory)
+        await db.flush()
+        return memory
+
+    async def delete_all_memories(self, db: AsyncSession, user_id: UUID) -> int:
+        rows = await self.list_memories(db=db, user_id=user_id, limit=500)
+        for row in rows:
+            await db.delete(row)
+        await db.flush()
+        return len(rows)
+
     async def cleanup_expired_memories(self, db: AsyncSession, user_id: UUID, limit: int = 500) -> int:
         now = datetime.now(timezone.utc)
         result = await db.execute(
