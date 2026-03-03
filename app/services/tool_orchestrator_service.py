@@ -243,6 +243,7 @@ class ToolOrchestratorService:
 
     def _handlers(self) -> dict:
         return {
+            "worker_enqueue": self._worker_enqueue,
             "pdf_create": self._pdf_create,
             "execute_python": self._execute_python,
             "memory_add": self._memory_add,
@@ -728,31 +729,6 @@ class ToolOrchestratorService:
                 continue
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
-
-            # --- auto-convert worker_enqueue → direct tool execution ----
-            if tool == "worker_enqueue":
-                job_type = str(arguments.get("job_type") or "").strip().lower()
-                payload = (
-                    arguments.get("payload")
-                    if isinstance(arguments.get("payload"), dict)
-                    else {}
-                )
-                _direct = {"pdf_create"}
-                if job_type in _direct:
-                    logger.info(
-                        "auto-converted worker_enqueue(%s) → direct %s",
-                        job_type,
-                        job_type,
-                    )
-                    tool = job_type
-                    arguments = dict(payload)
-                else:
-                    logger.warning(
-                        "worker_enqueue with unknown job_type=%s, skipping",
-                        job_type,
-                    )
-                    continue
-            # --- end auto-convert -----------------------------------
 
             if tool in TOOL_NAMES:
                 normalized_steps.append({"tool": tool, "arguments": arguments})
