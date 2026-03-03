@@ -11,6 +11,7 @@ from anyio import to_thread
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.api_integration import ApiIntegration
 from app.models.cron_job import CronJob
 from app.models.user import User
@@ -106,6 +107,7 @@ class ToolOrchestratorService:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
+            arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
             if tool not in handlers:
                 results.append(
                     {

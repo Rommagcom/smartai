@@ -192,9 +192,13 @@ class SkillsRegistryService:
                         "name": {"type": "string"},
                         "cron_expression": {"type": "string"},
                         "schedule_text": {"type": "string"},
+                        "schedule": {"type": "string", "_planner_hidden": True},
+                        "natural_text": {"type": "string", "_planner_hidden": True},
                         "action_type": {"type": "string"},
                         "payload": {"type": "object"},
                         "task_text": {"type": "string"},
+                        "message": {"type": "string", "_planner_hidden": True},
+                        "text": {"type": "string", "_planner_hidden": True},
                     },
                     "required": [],
                     "additionalProperties": False,
@@ -531,6 +535,22 @@ class SkillsRegistryService:
     def tool_names(self) -> set[str]:
         return {str(item.get("manifest", {}).get("name") or "").strip() for item in self._skills}
 
+    def strip_unknown_properties(self, skill_name: str, payload: dict | None) -> dict:
+        skill = self.get_contract(skill_name)
+        if not skill:
+            return payload if isinstance(payload, dict) else {}
+
+        schema = skill.get("input_schema") if isinstance(skill, dict) else None
+        if not isinstance(schema, dict):
+            return payload if isinstance(payload, dict) else {}
+
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return payload if isinstance(payload, dict) else {}
+
+        source = payload if isinstance(payload, dict) else {}
+        return {key: value for key, value in source.items() if key in properties}
+
     # Tools hidden from the planner to prevent misuse.
     # worker_enqueue is auto-converted to direct calls in _normalize_steps
     _PLANNER_HIDDEN_TOOLS: set[str] = {"worker_enqueue"}
@@ -547,7 +567,11 @@ class SkillsRegistryService:
             if not isinstance(props, dict) or not props:
                 signatures.append(f"{name}()")
                 continue
-            args = ", ".join(str(key) for key in props.keys())
+            args = ", ".join(
+                str(key)
+                for key, meta in props.items()
+                if not (isinstance(meta, dict) and bool(meta.get("_planner_hidden")))
+            )
             signatures.append(f"{name}({args})")
         return ", ".join(signatures)
 

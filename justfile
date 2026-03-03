@@ -18,5 +18,8 @@ multi-check:
 smoke-all:
     python -m scripts.smoke_all
 
+smoke-chat-tools-reminders:
+    python -m scripts.smoke_chat_tools_reminders
+
 pre-release:
     BASE_URL={{base_url}} WORKERS={{workers}} RUN_K6={{run_k6}} K6_MODE={{k6_mode}} bash scripts/pre_release_check.sh
