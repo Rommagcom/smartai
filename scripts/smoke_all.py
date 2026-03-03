@@ -6,15 +6,11 @@ from app.core.config import settings
 from app.services.scheduler_service import scheduler_service
 from scripts.smoke_api_flow import run as run_api_flow
 from scripts.smoke_admin_access import run as run_admin_access
-from scripts.smoke_chat_tools_reminders import run as run_chat_tools_reminders
-from scripts.smoke_chat_self_service import run as run_chat_self_service
 from scripts.smoke_integrations import run as run_integrations
 from scripts.smoke_memory_docs import run as run_memory_docs
 from scripts.smoke_onboarding_step import run as run_onboarding_step
 from scripts.smoke_telegram_bridge import run as run_telegram_bridge
 from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
-from scripts.smoke_worker_chat_flow import run as run_worker_chat_flow
-from scripts.smoke_worker_queue import run as run_worker_queue
 from scripts.smoke_ws_cron import run as run_ws_cron
 from scripts.smoke_tool_routing import run as run_tool_routing
 
@@ -55,13 +51,8 @@ async def run() -> None:
 
         reset_scheduler()
 
-        print("RUN_SMOKE_CHAT_TOOLS_REMINDERS")
-        await run_chat_tools_reminders()
-
-        reset_scheduler()
-
-        print("RUN_SMOKE_CHAT_SELF_SERVICE")
-        await run_chat_self_service()
+        print("SKIP_SMOKE_CHAT_TOOLS_REMINDERS (web tools removed)")
+        print("SKIP_SMOKE_CHAT_SELF_SERVICE (web tools removed)")
 
         reset_scheduler()
 
@@ -83,11 +74,8 @@ async def run() -> None:
         print("RUN_SMOKE_TELEGRAM_ADMIN_DELETE")
         await run_telegram_admin_delete()
 
-        print("RUN_SMOKE_WORKER_QUEUE")
-        await run_worker_queue()
-
-        print("RUN_SMOKE_WORKER_CHAT_FLOW")
-        await run_worker_chat_flow()
+        print("SKIP_SMOKE_WORKER_QUEUE (web worker jobs removed)")
+        print("SKIP_SMOKE_WORKER_CHAT_FLOW (web worker jobs removed)")
 
         print("RUN_SMOKE_TOOL_ROUTING")
         await run_tool_routing()

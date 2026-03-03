@@ -79,13 +79,6 @@ class Settings(BaseSettings):
     AUTH_DATA_ENCRYPTION_KEYS: str = ""
     AUTH_DATA_ACTIVE_KEY_ID: str = ""
 
-    WEB_FETCH_TIMEOUT_SECONDS: int = 25
-    WEB_SEARCH_TIMEOUT_SECONDS: int = 25
-    SEARXNG_BASE_URL: str = ""
-
-    BROWSER_HEADLESS: bool = True
-    CHROME_EXECUTABLE_PATH: str = ""
-
     OBS_LOG_JSON: bool = True
     OBS_ALERT_BUFFER_SIZE: int = 200
 

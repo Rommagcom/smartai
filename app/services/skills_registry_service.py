@@ -19,60 +19,6 @@ class SkillsRegistryService:
         return [
             {
                 "manifest": {
-                    "name": "web_search",
-                    "title": "Web Search",
-                    "description": "Поиск по вебу через search backend",
-                    "version": "1.0.0",
-                },
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-                "permissions": [PERMISSION_NETWORK_HTTP_READ],
-            },
-            {
-                "manifest": {
-                    "name": "web_fetch",
-                    "title": "Web Fetch",
-                    "description": "Получение содержимого URL",
-                    "version": "1.0.0",
-                },
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"},
-                        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
-                    },
-                    "required": ["url"],
-                    "additionalProperties": False,
-                },
-                "permissions": [PERMISSION_NETWORK_HTTP_READ],
-            },
-            {
-                "manifest": {
-                    "name": "browser",
-                    "title": "Browser Action",
-                    "description": "Browser extract/screenshot/pdf",
-                    "version": "1.0.0",
-                },
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string"},
-                        "action": {"type": "string", "enum": ["extract_text", "screenshot", "pdf"]},
-                    },
-                    "required": ["url"],
-                    "additionalProperties": False,
-                },
-                "permissions": [PERMISSION_NETWORK_HTTP_READ, "browser.automation"],
-            },
-            {
-                "manifest": {
                     "name": "pdf_create",
                     "title": "PDF Create",
                     "description": "Генерация PDF из текста",
@@ -260,7 +206,7 @@ class SkillsRegistryService:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "job_type": {"type": "string", "enum": ["web_search", "web_fetch", "pdf_create"]},
+                        "job_type": {"type": "string", "enum": ["pdf_create"]},
                         "payload": {"type": "object"},
                     },
                     "required": ["job_type", "payload"],
@@ -552,7 +498,7 @@ class SkillsRegistryService:
         return {key: value for key, value in source.items() if key in properties}
 
     # Tools hidden from the planner to prevent misuse.
-    # worker_enqueue is auto-converted to direct calls in _normalize_steps
+    # worker_enqueue is retained for backward compatibility in legacy paths.
     _PLANNER_HIDDEN_TOOLS: set[str] = {"worker_enqueue"}
 
     def planner_signatures(self) -> str:
