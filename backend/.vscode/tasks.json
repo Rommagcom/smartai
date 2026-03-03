@@ -55,15 +55,6 @@
 			"isBackground": false
 		},
 		{
-			"label": "tmp-smoke-worker-queue",
-			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
-			"args": [
-				"scripts/smoke_worker_queue.py"
-			],
-			"isBackground": false
-		},
-		{
 			"label": "just smoke-all",
 			"type": "shell",
 			"command": "just",
