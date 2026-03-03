@@ -12,7 +12,6 @@ class BackendApiClient:
     def __init__(self, base_url: str, bridge_secret: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.bridge_secret = bridge_secret
-        self._session_ids: dict[int, str] = {}
 
     async def _request(
         self,
@@ -81,29 +80,6 @@ class BackendApiClient:
 
     async def soul_adapt_task(self, token: str, body: dict) -> dict[str, Any]:
         return await self._request("POST", "/users/me/soul/adapt-task", token=token, json=body)
-
-    async def chat(self, token: str, telegram_user_id: int, message: str) -> dict[str, Any]:
-        body: dict[str, Any] = {"message": message}
-        session_id = self._session_ids.get(telegram_user_id)
-        if session_id:
-            body["session_id"] = session_id
-        client = http_client_service.get()
-        response_raw = await client.request(
-            method="POST",
-            url=f"{self.base_url}/chat",
-            json=body,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=180,
-        )
-        payload: Any
-        try:
-            payload = response_raw.json()
-        except Exception:
-            payload = {"raw": response_raw.text}
-        response = {"status": response_raw.status_code, "payload": payload}
-        if response["status"] == 200 and response["payload"].get("session_id"):
-            self._session_ids[telegram_user_id] = response["payload"]["session_id"]
-        return response
 
     async def chat_history(self, token: str, session_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/chat/history/{session_id}", token=token)
