@@ -135,6 +135,16 @@
 				"cwd": "c:/Repositories/SmartAi/backend"
 			},
 			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-cron-add-natural",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_chat_cron_add_natural"
+			],
+			"isBackground": false
 		}
 	]
 }

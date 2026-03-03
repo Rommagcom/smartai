@@ -115,17 +115,15 @@ async def run() -> None:
     await adapter.start(update_ready, context)
     ensure(any("Ассистент готов" in text for text in update_ready.effective_message.replies), "start should show ready state")
 
-    async def chat_direct_requires_setup(bot, chat_id: int, telegram_user_id: int, text: str, backend_username: str | None = None, context=None):
-        del telegram_user_id, text, backend_username
+    async def chat_api_requires_setup(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
+        del telegram_user_id, text, token
         await asyncio.sleep(0)
-        if context and context.user_data is not None:
-            context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
         await bot.send_message(
             chat_id=chat_id,
             text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
         )
 
-    adapter._chat_background_task_direct = chat_direct_requires_setup
+    adapter._chat_background_task_api = chat_api_requires_setup
     context.user_data.clear()
     update_chat = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat, context)
@@ -140,12 +138,12 @@ async def run() -> None:
         "chat should notify about soul setup on 428",
     )
 
-    async def chat_direct_ok(bot, chat_id: int, telegram_user_id: int, text: str, backend_username: str | None = None, context=None):
-        del telegram_user_id, text, backend_username, context
+    async def chat_api_ok(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
+        del telegram_user_id, text, token
         await asyncio.sleep(0)
         await bot.send_message(chat_id=chat_id, text="ok-from-backend")
 
-    adapter._chat_background_task_direct = chat_direct_ok
+    adapter._chat_background_task_api = chat_api_ok
     context.user_data.clear()
     update_chat_ok = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat_ok, context)

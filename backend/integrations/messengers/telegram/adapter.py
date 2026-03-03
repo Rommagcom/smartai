@@ -367,6 +367,95 @@ class TelegramAdapter(MessengerAdapter):
                 text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
             )
 
+    async def _chat_background_task_api(
+        self,
+        bot: Bot,
+        chat_id: int,
+        telegram_user_id: int,
+        token: str,
+        text: str,
+    ) -> None:
+        started_at = perf_counter()
+        self._dev_log(
+            "api_chat_start",
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            text_preview=(text or "")[:180],
+        )
+        try:
+            known = self._known_users.get(telegram_user_id) if isinstance(self._known_users, dict) else None
+            session_id = str((known or {}).get("session_id") or "").strip() or None
+
+            response = await self.client.chat(token=token, message=text, session_id=session_id)
+            status = int(response.get("status") or 0)
+            payload = response.get("payload") if isinstance(response.get("payload"), dict) else {}
+
+            if status != 200:
+                self._dev_log(
+                    "api_chat_error",
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    status=status,
+                )
+                detail = payload.get("detail") if isinstance(payload, dict) else None
+                detail_text = _safe_json(detail, max_len=1200) if isinstance(detail, (dict, list)) else str(detail or "")
+                suffix = f"\n{detail_text}" if detail_text else ""
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Ошибка запроса (HTTP {status}). Попробуйте ещё раз.{suffix}",
+                )
+                return
+
+            new_session_id = str(payload.get("session_id") or "").strip()
+            if new_session_id and telegram_user_id in self._known_users:
+                self._known_users[telegram_user_id]["session_id"] = new_session_id
+                self._known_users[telegram_user_id]["last_seen_at"] = datetime.now(timezone.utc).isoformat()
+                self._save_known_users()
+
+            response_text = str(payload.get("response") or "").strip()
+            tool_calls = payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else []
+            artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+
+            self._dev_log(
+                "api_chat_result",
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                session_id=new_session_id or session_id,
+                tool_calls_count=len(tool_calls),
+                tools=[str(call.get("tool") or "") for call in tool_calls if isinstance(call, dict)],
+                artifacts_count=len(artifacts),
+                latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            )
+
+            await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
+
+            for artifact in artifacts:
+                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                if not file_base64:
+                    continue
+                file_bytes = base64.b64decode(file_base64)
+                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                bio = BytesIO(file_bytes)
+                bio.name = file_name
+                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+        except httpx.TimeoutException:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Ответ занял слишком много времени. Попробуйте ещё раз через несколько секунд.",
+            )
+        except Exception:
+            logger.exception("telegram api chat failed")
+            self._dev_log(
+                "api_chat_exception",
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            )
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Внутренняя ошибка при обработке запроса. Попробуйте ещё раз.",
+            )
+
     async def _auth_or_reject(self, update: Update) -> tuple[str, str] | None:
         try:
             auth = await self._auth(update)
@@ -871,7 +960,7 @@ class TelegramAdapter(MessengerAdapter):
         auth = await self._auth_or_reject(update)
         if not auth:
             return
-        _token, backend_username = auth
+        token, _backend_username = auth
         telegram_user_id = update.effective_user.id if update.effective_user else 0
         self._dev_log(
             "chat_message_received",
@@ -883,13 +972,12 @@ class TelegramAdapter(MessengerAdapter):
             return
 
         task = asyncio.create_task(
-            self._chat_background_task_direct(
+            self._chat_background_task_api(
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
                 telegram_user_id=telegram_user_id,
+                token=token,
                 text=text,
-                backend_username=backend_username,
-                context=context,
             )
         )
         self._background_tasks.add(task)

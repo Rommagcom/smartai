@@ -224,7 +224,7 @@ class ChatService:
             r"\bв\s+очеред[ьи]\b",
             r"\bв\s+фоне\b",
             r"\bпостав[ьт].*очеред",
-            r"\bнапомин|напомни|календар|расписан",
+            r"\bнапомин|напомни|календар|расписан|запланир",
             r"\bcron(?:[_\s-]?(?:add|list|delete|delete_all))?\b",
             r"\bintegration|api\b",
             r"\bdoc[_\s-]?search|документ\b",
@@ -304,6 +304,15 @@ class ChatService:
             )
             return [{"tool": "cron_add", "arguments": quick_reminder_args}]
 
+        natural_reminder_args = ChatService._extract_natural_reminder_args(user_message)
+        if natural_reminder_args:
+            ChatService._dev_verbose_log(
+                "deterministic_route_cron_add_natural",
+                schedule_text=str(natural_reminder_args.get("schedule_text") or ""),
+                task_text_preview=str(natural_reminder_args.get("task_text") or "")[:160],
+            )
+            return [{"tool": "cron_add", "arguments": natural_reminder_args}]
+
         if re.search(r"\b(?:очисти|очистить|сотри|стереть)\b.*\bпамят|\bудал[иь].*\bвсю\b.*\bпамят|\bforget\s+(?:all|everything)\b.*\bmemory\b", lowered):
             return [{"tool": "memory_delete_all", "arguments": {}}]
 
@@ -361,6 +370,68 @@ class ChatService:
         tail = re.sub(r"^(?:что|чтобы)\s+", "", tail, flags=re.IGNORECASE)
         task_text = tail.strip()
         if not task_text:
+            return None
+
+        return {
+            "name": "chat-reminder",
+            "schedule_text": schedule_text,
+            "task_text": task_text,
+            "action_type": "send_message",
+        }
+
+    @staticmethod
+    def _extract_natural_reminder_args(user_message: str) -> dict | None:
+        raw = str(user_message or "").strip()
+        if not raw:
+            return None
+
+        reminder_intent = re.search(
+            r"\b(?:напомни(?:\s+мне)?|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?|запланируй|запланировать|remind\s+me|set\s+reminder|schedule)\b",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if not reminder_intent:
+            return None
+
+        tail = raw[reminder_intent.end() :].strip(" \t\n\r.,;:-")
+        if not tail:
+            return None
+
+        split_match = re.search(r"\b(?:что|чтобы|о|про|about|that)\b", tail, flags=re.IGNORECASE)
+        schedule_text = ""
+        task_text = ""
+
+        if split_match:
+            schedule_text = tail[: split_match.start()].strip(" \t\n\r.,;:-")
+            task_text = tail[split_match.end() :].strip(" \t\n\r.,;:-")
+        else:
+            natural_match = re.match(
+                r"^((?:сегодня|завтра|послезавтра|на\s+завтра|tomorrow|today|"
+                r"в\s+\d{1,2}(?::\d{2})?|at\s+\d{1,2}(?::\d{2})?|"
+                r"в\s+понедельник|в\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье)"
+                r"[^,;]*)\s+(.+)$",
+                tail,
+                flags=re.IGNORECASE,
+            )
+            if not natural_match:
+                task_first_match = re.match(
+                    r"^(.+?)\s+(?:на|в|к|for|at|on|by)\s+"
+                    r"((?:сегодня|завтра|послезавтра|на\s+завтра|tomorrow|today|"
+                    r"в\s+\d{1,2}(?::\d{2})?|at\s+\d{1,2}(?::\d{2})?|"
+                    r"в\s+понедельник|в\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье)"
+                    r"(?:\s+на\s+\d{1,2}(?::\d{2})?|\s+at\s+\d{1,2}(?::\d{2})?)?.*)$",
+                    tail,
+                    flags=re.IGNORECASE,
+                )
+                if not task_first_match:
+                    return None
+                task_text = task_first_match.group(1).strip(" \t\n\r.,;:-")
+                schedule_text = task_first_match.group(2).strip(" \t\n\r.,;:-")
+            else:
+                schedule_text = natural_match.group(1).strip(" \t\n\r.,;:-")
+                task_text = natural_match.group(2).strip(" \t\n\r.,;:-")
+
+        if not schedule_text or not task_text:
             return None
 
         return {
