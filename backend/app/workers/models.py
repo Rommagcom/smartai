@@ -4,8 +4,6 @@ from enum import StrEnum
 
 
 class WorkerJobType(StrEnum):
-    WEB_SEARCH = "web_search"
-    WEB_FETCH = "web_fetch"
     PDF_CREATE = "pdf_create"
 
 

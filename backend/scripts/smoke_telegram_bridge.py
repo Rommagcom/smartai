@@ -115,16 +115,23 @@ async def run() -> None:
     await adapter.start(update_ready, context)
     ensure(any("Ассистент готов" in text for text in update_ready.effective_message.replies), "start should show ready state")
 
-    async def chat_precondition(token: str, user_id: int, message: str):
+    async def chat_direct_requires_setup(bot, chat_id: int, telegram_user_id: int, text: str, backend_username: str | None = None, context=None):
+        del telegram_user_id, text, backend_username
         await asyncio.sleep(0)
-        return {"status": 428, "payload": {"detail": "setup required"}}
+        if context and context.user_data is not None:
+            context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
+        )
 
-    adapter.client.chat = chat_precondition
+    adapter._chat_background_task_direct = chat_direct_requires_setup
     context.user_data.clear()
     update_chat = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat, context)
     ensure(len(update_chat.effective_message.replies) == 0, "chat should not send intermediate ack")
-    await asyncio.sleep(0.05)
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
     ensure(
         any(
             "SOUL-настройка" in text or "запустил setup автоматически" in text
@@ -133,16 +140,18 @@ async def run() -> None:
         "chat should notify about soul setup on 428",
     )
 
-    async def chat_ok(token: str, user_id: int, message: str):
+    async def chat_direct_ok(bot, chat_id: int, telegram_user_id: int, text: str, backend_username: str | None = None, context=None):
+        del telegram_user_id, text, backend_username, context
         await asyncio.sleep(0)
-        return {"status": 200, "payload": {"response": "ok-from-backend"}}
+        await bot.send_message(chat_id=chat_id, text="ok-from-backend")
 
-    adapter.client.chat = chat_ok
+    adapter._chat_background_task_direct = chat_direct_ok
     context.user_data.clear()
     update_chat_ok = FakeUpdate(user_id=123, text="Привет")
     await adapter.chat_message(update_chat_ok, context)
     ensure(len(update_chat_ok.effective_message.replies) == 0, "chat should not send intermediate ack")
-    await asyncio.sleep(0.05)
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
     ensure(
         any("ok-from-backend" in text for _, text in context.bot.sent_messages),
         "chat should deliver backend response asynchronously",

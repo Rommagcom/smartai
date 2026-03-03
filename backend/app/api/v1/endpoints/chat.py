@@ -12,7 +12,6 @@ from app.models.message import Message
 from app.models.user import User
 from app.models.worker_task import WorkerTask
 from app.schemas.chat import (
-    BrowserActionRequest,
     ChatRequest,
     ChatResponse,
     FeedbackRequest,
@@ -21,8 +20,6 @@ from app.schemas.chat import (
     TaskHistoryItem,
     TaskHistoryResponse,
     WorkerResultsPollResponse,
-    WebFetchRequest,
-    WebSearchRequest,
 )
 from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
@@ -33,7 +30,6 @@ from app.services.skills_registry_service import skills_registry_service
 from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
 from app.services.soul_service import soul_service
-from app.services.web_tools_service import web_tools_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
@@ -254,46 +250,6 @@ async def execute_python(
     db.add(snippet)
     await db.commit()
     return result
-
-
-@router.post("/tools/web-search")
-async def web_search(
-    payload: WebSearchRequest,
-    current_user: CurrentUser,
-) -> dict:
-    del current_user
-    limit = max(1, min(payload.limit, 10))
-    return await web_tools_service.web_search(query=payload.query, limit=limit)
-
-
-@router.post("/tools/web-fetch")
-async def web_fetch(
-    payload: WebFetchRequest,
-    current_user: CurrentUser,
-) -> dict:
-    del current_user
-    max_chars = max(1000, min(payload.max_chars, 50000))
-    return await web_tools_service.web_fetch(url=payload.url, max_chars=max_chars)
-
-
-@router.post("/tools/browser")
-async def browser_action(
-    payload: BrowserActionRequest,
-    current_user: CurrentUser,
-) -> dict:
-    del current_user
-    action = payload.action.strip().lower()
-    if action not in {"extract_text", "screenshot", "pdf"}:
-        raise HTTPException(status_code=400, detail="action must be one of: extract_text, screenshot, pdf")
-
-    max_chars = max(1000, min(payload.max_chars, 50000))
-    timeout_seconds = max(5, min(payload.timeout_seconds, 120))
-    return await web_tools_service.browser_action(
-        url=payload.url,
-        action=action,
-        max_chars=max_chars,
-        timeout_seconds=timeout_seconds,
-    )
 
 
 @router.post("/tools/pdf-create")

@@ -99,15 +99,15 @@ async def run() -> None:
         body = chat.json()
         ensure(body.get("response") == "smoke-ok", f"unexpected response: {body}")
 
-        validation_ok = skills_registry_service.validate_input("web_search", {"query": "ok", "limit": 5})
+        validation_ok = skills_registry_service.validate_input("pdf_create", {"content": "ok", "title": "t"})
         ensure(validation_ok is None, f"expected valid args, got: {validation_ok}")
 
-        validation_error = skills_registry_service.validate_input("web_search", {"query": "ok", "extra": 1})
+        validation_error = skills_registry_service.validate_input("pdf_create", {"content": "ok", "extra": 1})
         ensure(bool(validation_error), "expected validation error for extra argument")
 
     try:
         await engine.dispose()
-    except BaseException:
+    except Exception:
         pass
     print("SMOKE_OK")
 

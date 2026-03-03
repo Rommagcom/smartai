@@ -1,5 +1,6 @@
 import logging
 import re
+import asyncio
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,26 +29,15 @@ class ChatService:
         if not lowered:
             return False
 
-        if _URL_RE.search(user_message or ""):
-            return True
-
         tool_intent_patterns = [
             r"\bв\s+очеред[ьи]\b",
             r"\bв\s+фоне\b",
             r"\bпостав[ьт].*очеред",
             r"\bнапомин|напомни|календар|расписан",
             r"\bcron\b",
-            r"\bпогод|курс|новост|поиск|найди\b",
-            r"\bищи|узнай|актуальн",
-            r"\bинтернет|в\s+интернете|на\s+сайте|проверь\s+в\s+сети|по\s+сети\b",
-            r"\bweb[_\s-]?search|web[_\s-]?fetch\b",
-            r"\bbrowser|screenshot|pdf\b",
             r"\bintegration|api\b",
             r"\bdoc[_\s-]?search|документ\b",
             r"\bexecute[_\s-]?python|python\b",
-            r"\bсайт|страниц[ауы]|портал\b",
-            r"\bпроанализируй|открой|проверь|скачай\b",
-            r"\bпарс|scrape|fetch\b",
             r"\bпамят|(?:что\s+)?(?:ты\s+)?помниш|знаешь\s+обо\s+мне|мои\s+факт",
             r"\bудали|удалить|отмени|отключи|убери|убрать|останови|выключи\b",
             r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
@@ -73,52 +63,10 @@ class ChatService:
         if not lowered:
             return None
 
-        # Explicit tool invocation: "web_search <query>"
-        web_search_match = re.match(r"web[_\s-]?search\s+(.+)", lowered)
-        if web_search_match:
-            query = web_search_match.group(1).strip()
-            return [{"tool": "web_search", "arguments": {"query": query, "limit": 5}}]
-
-        # Explicit: "web_fetch <url>"
-        web_fetch_match = re.match(r"web[_\s-]?fetch\s+(https?://\S+)", lowered)
-        if web_fetch_match:
-            return [{"tool": "web_fetch", "arguments": {"url": web_fetch_match.group(1).strip()}}]
-
-        # Explicit: "browser <url>" or "открой <url>"
-        browser_match = re.match(r"(?:browser|открой)\s+(https?://\S+)", lowered)
-        if browser_match:
-            return [{"tool": "browser", "arguments": {"url": browser_match.group(1).strip(), "action": "extract_text"}}]
-
-        # "открой сайт <domain>" / "открой <domain>"
-        open_site_match = re.match(r"(?:открой|зайди\s+на|покажи)\s+(?:сайт\s+)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", lowered)
-        if open_site_match:
-            domain = open_site_match.group(1).strip()
-            url = f"https://{domain}" if not domain.startswith("http") else domain
-            return [
-                {"tool": "web_search", "arguments": {"query": domain, "limit": 3}},
-                {"tool": "browser", "arguments": {"url": url, "action": "extract_text"}},
-            ]
-
         # "memory_add <text>"
         memory_add_match = re.match(r"memory[_\s-]?add\s+(.+)", lowered)
         if memory_add_match:
             return [{"tool": "memory_add", "arguments": {"content": memory_add_match.group(1).strip(), "fact_type": "fact"}}]
-
-        # "найди <query>" / "поиск <query>"
-        search_intent_match = re.match(r"(?:найди|поиск|поищи|нагугли|загугли)\s+(.+)", lowered)
-        if search_intent_match:
-            query = search_intent_match.group(1).strip()
-            return [{"tool": "web_search", "arguments": {"query": query, "limit": 5}}]
-
-        # URL in message — try web_fetch on it
-        url_match = _URL_RE.search(user_message or "")
-        if url_match:
-            raw_url = url_match.group(0).strip()
-            url = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
-            return [
-                {"tool": "web_search", "arguments": {"query": raw_url, "limit": 3}},
-                {"tool": "web_fetch", "arguments": {"url": url}},
-            ]
 
         return None
 
@@ -223,50 +171,6 @@ class ChatService:
             ):
                 return True
         return False
-
-    async def _append_web_search_fallback_if_needed(
-        self,
-        db: AsyncSession,
-        user: User,
-        user_message: str,
-        tool_calls: list[dict],
-    ) -> list[dict]:
-        if not self._service_unavailable_tool_failure(tool_calls):
-            return tool_calls
-
-        try:
-            fallback_calls = await tool_orchestrator_service.execute_tool_chain(
-                db=db,
-                user=user,
-                steps=[{"tool": "web_search", "arguments": {"query": user_message, "limit": 5}}],
-                max_steps=1,
-            )
-            return [*tool_calls, *fallback_calls]
-        except Exception:
-            logger.warning("web_search fallback failed", exc_info=True)
-            return tool_calls
-
-    async def _force_web_search_for_live_data(
-        self,
-        db: AsyncSession,
-        user: User,
-        user_message: str,
-    ) -> tuple[list[dict], str] | None:
-        """Force a web_search + optional web_fetch when the planner didn't select tools
-        but the user is asking for live/real-time data (weather, rates, news)."""
-        try:
-            steps: list[dict] = [
-                {"tool": "web_search", "arguments": {"query": user_message, "limit": 5}},
-            ]
-            tool_calls = await tool_orchestrator_service.execute_tool_chain(
-                db=db, user=user, steps=steps, max_steps=2,
-            )
-            if self._has_meaningful_tool_output(tool_calls):
-                return tool_calls, "Используй результаты поиска для ответа."
-            return None
-        except Exception:
-            logger.warning("forced web_search for live data failed", exc_info=True)
-            return None
 
     @classmethod
     def _has_meaningful_tool_output(cls, tool_calls: list[dict]) -> bool:
@@ -503,25 +407,12 @@ class ChatService:
 
         if not planned_result:
             if self._is_live_data_intent(user_message):
-                # Planner didn't select tools — force web_search for live data
-                forced_result = await self._force_web_search_for_live_data(
-                    db=db, user=user, user_message=user_message,
-                )
-                if forced_result is not None:
-                    planned_result = forced_result
-                else:
-                    return self._live_data_unavailable_fallback(), manual_tool_calls, []
+                return self._live_data_unavailable_fallback(), manual_tool_calls, []
             else:
                 return None
 
         planned_calls, response_hint = planned_result
         tool_calls = [*manual_tool_calls, *planned_calls]
-        tool_calls = await self._append_web_search_fallback_if_needed(
-            db=db,
-            user=user,
-            user_message=user_message,
-            tool_calls=tool_calls,
-        )
         artifacts = self._extract_artifacts(tool_calls)
 
         # ---- safety-net: if all results are "queued", return a clear message ----
@@ -622,7 +513,6 @@ class ChatService:
             if not result:
                 continue
             if isinstance(result, dict):
-                # web_search results
                 items = result.get("results") if isinstance(result.get("results"), list) else None
                 if items:
                     for item in items[:5]:
@@ -637,7 +527,6 @@ class ChatService:
                         if line:
                             parts.append(line)
                     continue
-                # web_fetch / browser text
                 text = str(result.get("text") or result.get("content") or "").strip()
                 if text:
                     parts.append(text[:2000])
@@ -923,11 +812,7 @@ class ChatService:
                         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
                 except Exception:
                     logger.warning("direct route fallback in respond failed", exc_info=True)
-
-            answer = (
-                "Я могу помочь с этим запросом, но мне нужны инструменты для сбора данных. "
-                "Попробуйте переформулировать запрос или уточнить, какие данные вам нужны."
-            )
+            logger.info("direct route produced no result; returning base LLM answer")
 
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
