@@ -24,6 +24,176 @@ _URL_RE = re.compile(
 
 class ChatService:
     @staticmethod
+    def _extract_fenced_block(text: str, fence_name: str) -> str:
+        normalized = str(text or "")
+        if not normalized:
+            return ""
+
+        fenced_match = re.search(
+            rf"```\s*{re.escape(fence_name)}\s*\n?(.*?)```",
+            normalized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced_match:
+            return fenced_match.group(1).strip()
+
+        lowered = normalized.lower()
+        prefix = f"```{fence_name.lower()}"
+        if lowered.startswith(prefix) and normalized.endswith("```"):
+            return normalized[len(prefix) : -3].strip()
+        return text
+
+    @staticmethod
+    def _parse_key_value_lines(text: str) -> dict[str, str]:
+        pairs: dict[str, str] = {}
+        for raw_line in text.splitlines():
+            line = raw_line.strip().lstrip("-*")
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            norm_key = key.strip().lower().replace(" ", "_")
+            norm_value = value.strip()
+            if norm_key and norm_value:
+                pairs[norm_key] = norm_value
+        return pairs
+
+    @staticmethod
+    def _extract_cron_add_structured_args(user_message: str) -> dict | None:
+        text = str(user_message or "").strip()
+        if not text or "cron_add" not in text.lower():
+            return None
+
+        body = ChatService._extract_fenced_block(text, "cron_add")
+        pairs = ChatService._parse_key_value_lines(body)
+
+        schedule_text = (
+            pairs.get("time")
+            or pairs.get("when")
+            or pairs.get("schedule_text")
+            or pairs.get("schedule")
+        )
+        recurring = (pairs.get("recurring") or pairs.get("repeat") or "").strip().lower()
+        weekday_value = (
+            pairs.get("weekday")
+            or pairs.get("day_of_week")
+            or pairs.get("day")
+            or pairs.get("on")
+            or ""
+        ).strip()
+        day_of_month_value = (
+            pairs.get("day_of_month")
+            or pairs.get("dom")
+            or pairs.get("month_day")
+            or ""
+        ).strip()
+        month_value = (
+            pairs.get("month")
+            or pairs.get("month_name")
+            or pairs.get("month_of_year")
+            or ""
+        ).strip()
+
+        weekly_markers = {"weekly", "week", "every_week", "everyweek", "еженедельно", "каждую_неделю", "каждую неделю"}
+        daily_markers = {"daily", "everyday", "every_day", "каждый_день", "ежедневно"}
+        monthly_markers = {"monthly", "month", "every_month", "every month", "ежемесячно", "каждый_месяц", "каждый месяц"}
+        yearly_markers = {"yearly", "annual", "annually", "every_year", "every year", "ежегодно", "каждый_год", "каждый год"}
+        quarterly_markers = {"quarterly", "every_quarter", "every quarter", "ежеквартально", "каждый_квартал", "каждый квартал"}
+
+        normalized_schedule = (schedule_text or "").lower()
+        weekday_tokens = [
+            "понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень",
+            "monday", "tuesday", "wednesday", "thursday", "thurs", "friday", "saturday", "sunday",
+            " mon", " tue", " wed", " thu", " fri", " sat", " sun",
+        ]
+        has_weekday_in_schedule = any(token in normalized_schedule for token in weekday_tokens)
+
+        if schedule_text and recurring in daily_markers:
+            if "каждый день" not in schedule_text.lower() and "daily" not in schedule_text.lower():
+                schedule_text = f"каждый день в {schedule_text}"
+
+        if schedule_text and recurring in weekly_markers:
+            if weekday_value and not has_weekday_in_schedule:
+                schedule_text = f"every {weekday_value} {schedule_text}"
+            elif "кажд" not in schedule_text.lower() and "every" not in schedule_text.lower() and "weekly" not in schedule_text.lower():
+                schedule_text = f"every {schedule_text}"
+
+        if schedule_text and recurring in monthly_markers:
+            monthly_prefixed = any(token in schedule_text.lower() for token in ["every month", "monthly", "ежемесяч", "каждый месяц"])
+            if day_of_month_value and day_of_month_value.isdigit() and 1 <= int(day_of_month_value) <= 31:
+                if not monthly_prefixed:
+                    schedule_text = f"every month on day {int(day_of_month_value)} at {schedule_text}"
+            elif not monthly_prefixed:
+                schedule_text = f"every month {schedule_text}"
+
+        if schedule_text and recurring in yearly_markers:
+            yearly_prefixed = any(token in schedule_text.lower() for token in ["every year", "yearly", "annual", "ежегод", "каждый год"])
+            if (
+                day_of_month_value
+                and day_of_month_value.isdigit()
+                and 1 <= int(day_of_month_value) <= 31
+                and month_value
+            ):
+                if not yearly_prefixed:
+                    schedule_text = f"every year on day {int(day_of_month_value)} {month_value} at {schedule_text}"
+            elif not yearly_prefixed:
+                schedule_text = f"every year {schedule_text}"
+
+        if schedule_text and recurring in quarterly_markers:
+            quarterly_prefixed = any(token in schedule_text.lower() for token in ["every quarter", "quarterly", "ежекварт", "каждый квартал"])
+            if day_of_month_value and day_of_month_value.isdigit() and 1 <= int(day_of_month_value) <= 31:
+                if month_value:
+                    if not quarterly_prefixed:
+                        schedule_text = f"every quarter on day {int(day_of_month_value)} {month_value} at {schedule_text}"
+                elif not quarterly_prefixed:
+                    schedule_text = f"every quarter on day {int(day_of_month_value)} at {schedule_text}"
+            elif not quarterly_prefixed:
+                schedule_text = f"every quarter {schedule_text}"
+
+        task_text = (
+            pairs.get("message")
+            or pairs.get("task_text")
+            or pairs.get("text")
+            or pairs.get("task")
+        )
+        if not schedule_text or not task_text:
+            return None
+
+        return {
+            "name": pairs.get("name") or "chat-reminder",
+            "schedule_text": schedule_text,
+            "task_text": task_text,
+            "action_type": pairs.get("action_type") or "send_message",
+        }
+
+    async def _try_fast_shortcuts(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]] | None:
+        tool_calls: list[dict] = list(manual_tool_calls)
+        artifacts: list[dict] = []
+
+        if manual_tool_calls and self._is_memory_only_message(user_message):
+            return "Запомнил. Буду учитывать это в следующих ответах и задачах.", [], [], tool_calls, artifacts
+
+        if self._is_timezone_query(user_message):
+            return self._timezone_answer(user), [], [], tool_calls, artifacts
+
+        fast_tool_answer = await self._maybe_fast_tool_answer(
+            db=db,
+            user=user,
+            user_message=user_message,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if not fast_tool_answer:
+            return None
+
+        answer, tool_calls, artifacts = fast_tool_answer
+        return answer, [], [], tool_calls, artifacts
+
+    @staticmethod
     def _should_attempt_tool_planning(user_message: str) -> bool:
         lowered = str(user_message or "").strip().lower()
         if not lowered:
@@ -34,7 +204,7 @@ class ChatService:
             r"\bв\s+фоне\b",
             r"\bпостав[ьт].*очеред",
             r"\bнапомин|напомни|календар|расписан",
-            r"\bcron\b",
+            r"\bcron(?:[_\s-]?(?:add|list|delete|delete_all))?\b",
             r"\bintegration|api\b",
             r"\bdoc[_\s-]?search|документ\b",
             r"\bexecute[_\s-]?python|python\b",
@@ -68,6 +238,25 @@ class ChatService:
         if memory_add_match:
             return [{"tool": "memory_add", "arguments": {"content": memory_add_match.group(1).strip(), "fact_type": "fact"}}]
 
+        memory_delete_all_match = re.match(r"memory[_\s-]?delete[_\s-]?all\b", lowered)
+        if memory_delete_all_match:
+            return [{"tool": "memory_delete_all", "arguments": {}}]
+
+        memory_delete_match = re.match(r"memory[_\s-]?delete\s+(.+)", lowered)
+        if memory_delete_match:
+            payload = memory_delete_match.group(1).strip()
+            memory_id_match = re.search(
+                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+                payload,
+            )
+            if memory_id_match:
+                return [{"tool": "memory_delete", "arguments": {"memory_id": memory_id_match.group(0)}}]
+            return [{"tool": "memory_delete", "arguments": {"query": payload}}]
+
+        cron_add_args = ChatService._extract_cron_add_structured_args(user_message)
+        if cron_add_args:
+            return [{"tool": "cron_add", "arguments": cron_add_args}]
+
         return None
 
     @staticmethod
@@ -75,6 +264,29 @@ class ChatService:
         lowered = str(user_message or "").strip().lower()
         if not lowered:
             return None
+
+        cron_add_args = ChatService._extract_cron_add_structured_args(user_message)
+        if cron_add_args:
+            return [{"tool": "cron_add", "arguments": cron_add_args}]
+
+        quick_reminder_args = ChatService._extract_quick_relative_reminder_args(user_message)
+        if quick_reminder_args:
+            return [{"tool": "cron_add", "arguments": quick_reminder_args}]
+
+        if re.search(r"\b(?:очисти|очистить|сотри|стереть)\b.*\bпамят|\bудал[иь].*\bвсю\b.*\bпамят|\bforget\s+(?:all|everything)\b.*\bmemory\b", lowered):
+            return [{"tool": "memory_delete_all", "arguments": {}}]
+
+        if re.search(r"\b(?:удали|удалить|убери|убрать|забудь|сотри|стереть)\b.*\b(?:факт|запис|памят)\b", lowered):
+            memory_id_match = re.search(
+                r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+                lowered,
+            )
+            if memory_id_match:
+                return [{"tool": "memory_delete", "arguments": {"memory_id": memory_id_match.group(0)}}]
+
+            query = ChatService._extract_memory_delete_query(user_message)
+            if query:
+                return [{"tool": "memory_delete", "arguments": {"query": query}}]
 
         if re.search(r"\bудал[иь].*вс[её].*напомин|очист[иь].*(напомин|задач)|delete\s+all\s+reminder", lowered):
             return [{"tool": "cron_delete_all", "arguments": {}}]
@@ -86,6 +298,80 @@ class ChatService:
             return [{"tool": "memory_list", "arguments": {}}]
 
         return None
+
+    @staticmethod
+    def _extract_quick_relative_reminder_args(user_message: str) -> dict | None:
+        raw = str(user_message or "").strip()
+        lowered = raw.lower()
+        if not raw:
+            return None
+
+        reminder_intent = re.search(
+            r"\b(?:напомни|напомин|запланируй|поставь\s+напомин|создай\s+напомин|remind|set\s+reminder)\b",
+            lowered,
+        )
+        if not reminder_intent:
+            return None
+
+        schedule_match = re.search(
+            r"\b(через\s+\d+\s*(?:секунд[ауы]?|минут[ауы]?|час(?:а|ов)?|дн(?:я|ей)|недел[юьи]?|месяц(?:а|ев)?))\b"
+            r"|\b(in\s+\d+\s*(?:seconds?|minutes?|hours?|days?|weeks?|months?))\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        if not schedule_match:
+            return None
+
+        schedule_text = (schedule_match.group(1) or schedule_match.group(2) or "").strip()
+        if not schedule_text:
+            return None
+
+        tail = raw[schedule_match.end() :].strip(" \t\n\r.,;:-")
+        tail = re.sub(r"^(?:что|чтобы)\s+", "", tail, flags=re.IGNORECASE)
+        task_text = tail.strip()
+        if not task_text:
+            return None
+
+        return {
+            "name": "chat-reminder",
+            "schedule_text": schedule_text,
+            "task_text": task_text,
+            "action_type": "send_message",
+        }
+
+    @staticmethod
+    def _extract_memory_delete_query(user_message: str) -> str | None:
+        raw = str(user_message or "").strip()
+        lowered = raw.lower()
+        if not raw:
+            return None
+
+        patterns = [
+            r"\b(?:удали|удалить|убери|убрать|забудь|сотри|стереть)\b\s*(?:из\s+памяти\s*)?(?:факт|запись|это|про)?\s*[:\-]?\s*(.+)$",
+            r"\bdelete\b\s*(?:from\s+memory\s*)?(?:fact|entry|item)?\s*[:\-]?\s*(.+)$",
+            r"\bforget\b\s*(?:from\s+memory\s*)?\s*[:\-]?\s*(.+)$",
+        ]
+
+        candidate: str | None = None
+        for pattern in patterns:
+            match = re.search(pattern, raw, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip()
+                break
+
+        if candidate is None and "памят" in lowered:
+            tail_match = re.search(r"\b(?:факт|запись)\b\s*[:\-]?\s*(.+)$", raw, flags=re.IGNORECASE)
+            if tail_match:
+                candidate = tail_match.group(1).strip()
+
+        if not candidate:
+            return None
+
+        cleaned = candidate.strip().strip("'\"“”«»`).,;:!? ")
+        lowered_cleaned = cleaned.lower()
+        if lowered_cleaned in {"все", "всё", "all", "everything", "память", "memory"}:
+            return None
+        return cleaned or None
 
     @staticmethod
     def _live_data_unavailable_fallback() -> str:
@@ -232,7 +518,7 @@ class ChatService:
             return cleaned
         return (
             "Не удалось сформировать итоговый текст ответа. "
-            "Попробуйте уточнить запрос (например: укажите город и период)."
+            "Попробуйте уточнить запрос."
         )
 
     @staticmethod
@@ -644,7 +930,7 @@ class ChatService:
             return {"raw": str(result)}
         max_depth = 3
         max_items = 12
-        max_str = 1200
+        max_str = 5200
         heavy_keys = {"file_base64", "content", "chunk_text", "raw", "body", "html"}
 
         def _clip(text: str, limit: int = max_str) -> str:
@@ -688,6 +974,28 @@ class ChatService:
                 continue
             tool = str(call.get("tool") or "").strip().lower()
             result = call.get("result") if isinstance(call.get("result"), dict) else {}
+
+            if tool == "cron_add":
+                payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+                task_text = cls._truncate_text(
+                    str(payload.get("message") or result.get("name") or "Напоминание"),
+                    180,
+                )
+                return f"Готово: напоминание создано — {task_text}."
+
+            if tool == "memory_delete_all":
+                deleted_count = int(result.get("deleted_count") or 0)
+                if deleted_count <= 0:
+                    return "В памяти не было фактов для удаления."
+                return f"Готово: очистил память ({deleted_count})."
+
+            if tool == "memory_delete":
+                if not bool(result.get("deleted")):
+                    return "Не нашёл подходящий факт в памяти."
+                content = cls._truncate_text(str(result.get("content") or ""), 120)
+                if content:
+                    return f"Удалил факт из памяти: {content}"
+                return "Готово: удалил факт из памяти."
 
             if tool == "cron_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)
@@ -856,56 +1164,48 @@ class ChatService:
         session_id: UUID,
         user_message: str,
     ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
-        import asyncio as _aio
-
         manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
         tool_calls: list[dict] = list(manual_tool_calls)
         artifacts: list[dict] = []
 
-        if manual_tool_calls and self._is_memory_only_message(user_message):
-            answer = "Запомнил. Буду учитывать это в следующих ответах и задачах."
-            return answer, [], [], tool_calls, artifacts
-
-        if self._is_timezone_query(user_message):
-            answer = self._timezone_answer(user)
-            return answer, [], [], tool_calls, artifacts
-
-        fast_tool_answer = await self._maybe_fast_tool_answer(
+        fast_shortcut = await self._try_fast_shortcuts(
             db=db,
             user=user,
             user_message=user_message,
             manual_tool_calls=manual_tool_calls,
         )
-        if fast_tool_answer:
-            answer, tool_calls, artifacts = fast_tool_answer
-            return answer, [], [], tool_calls, artifacts
+        if fast_shortcut:
+            return fast_shortcut
 
-        # Run build_context and tool planner in parallel when tools are likely
+        # For tool-intent messages, try tool-chain first and avoid expensive
+        # context building when the final answer can be produced from tools.
         needs_tools = self._should_attempt_tool_planning(user_message)
+        planner_task = None
         if needs_tools:
-            context_task = _aio.ensure_future(self.build_context(db, user, session_id, user_message))
-            planner_task = _aio.ensure_future(
+            planner_task = asyncio.create_task(
                 tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
                 )
             )
-            llm_messages, used_memory_ids, rag_sources = await context_task
-        else:
-            llm_messages, used_memory_ids, rag_sources = await self.build_context(db, user, session_id, user_message)
-            planner_task = None
+
+            tool_answer = await self._maybe_tool_answer_with_plan(
+                db,
+                user,
+                user_message,
+                manual_tool_calls,
+                planner_task,
+            )
+            if tool_answer:
+                answer, tool_calls, artifacts = tool_answer
+                return answer, [], [], tool_calls, artifacts
+
+        llm_messages, used_memory_ids, rag_sources = await self.build_context(db, user, session_id, user_message)
 
         options = {
             "temperature": user.preferences.get("temperature", 0.3),
             "top_p": user.preferences.get("top_p", 0.9),
         }
-
-        tool_answer = await self._maybe_tool_answer_with_plan(
-            db, user, user_message, manual_tool_calls, planner_task,
-        )
-        if tool_answer:
-            answer, tool_calls, artifacts = tool_answer
-            return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
         try:
             answer = await ollama_client.chat(messages=llm_messages, stream=False, options=options)
@@ -914,34 +1214,66 @@ class ChatService:
             answer = self._llm_unavailable_fallback()
         answer = self._sanitize_llm_answer(answer)
 
-        # Guard: base LLM path can also produce placeholders for complex requests
-        if self._is_progress_placeholder_answer(answer):
-            logger.info("base LLM produced placeholder, attempting direct tool route")
-            if not self._should_attempt_tool_planning(user_message):
-                logger.info("placeholder ignored for non-tool request")
-                return answer, used_memory_ids, rag_sources, tool_calls, artifacts
-            direct_steps = self._direct_route_from_message(user_message)
-            if direct_steps:
-                try:
-                    direct_calls = await tool_orchestrator_service.execute_tool_chain(
-                        db=db, user=user, steps=direct_steps, max_steps=3,
-                    )
-                    if self._has_meaningful_tool_output(direct_calls):
-                        tool_calls = [*tool_calls, *direct_calls]
-                        artifacts = self._extract_artifacts(tool_calls)
-                        answer = await self._compose_answer_with_retry(
-                            system_prompt=user.system_prompt_template,
-                            user_message=user_message,
-                            tool_calls=tool_calls,
-                            response_hint="Ответь по полученным данным.",
-                        )
-                        answer = self._sanitize_llm_answer(answer)
-                        return answer, used_memory_ids, rag_sources, tool_calls, artifacts
-                except Exception:
-                    logger.warning("direct route fallback in respond failed", exc_info=True)
-            logger.info("direct route produced no result; returning base LLM answer")
+        recovered = await self._maybe_recover_placeholder_answer(
+            db=db,
+            user=user,
+            user_message=user_message,
+            answer=answer,
+            used_memory_ids=used_memory_ids,
+            rag_sources=rag_sources,
+            tool_calls=tool_calls,
+            artifacts=artifacts,
+        )
+        if recovered:
+            return recovered
 
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
+
+    async def _maybe_recover_placeholder_answer(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        answer: str,
+        used_memory_ids: list[str],
+        rag_sources: list[str],
+        tool_calls: list[dict],
+        artifacts: list[dict],
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]] | None:
+        if not self._is_progress_placeholder_answer(answer):
+            return None
+
+        logger.info("base LLM produced placeholder, attempting direct tool route")
+        if not self._should_attempt_tool_planning(user_message):
+            logger.info("placeholder ignored for non-tool request")
+            return answer, used_memory_ids, rag_sources, tool_calls, artifacts
+
+        direct_steps = self._direct_route_from_message(user_message)
+        if not direct_steps:
+            logger.info("direct route produced no result; returning base LLM answer")
+            return None
+
+        try:
+            direct_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db, user=user, steps=direct_steps, max_steps=3,
+            )
+            if not self._has_meaningful_tool_output(direct_calls):
+                logger.info("direct route produced no meaningful data; returning base LLM answer")
+                return None
+
+            merged_calls = [*tool_calls, *direct_calls]
+            merged_artifacts = self._extract_artifacts(merged_calls)
+            retried = await self._compose_answer_with_retry(
+                system_prompt=user.system_prompt_template,
+                user_message=user_message,
+                tool_calls=merged_calls,
+                response_hint="Ответь по полученным данным.",
+            )
+            retried = self._sanitize_llm_answer(retried)
+            return retried, used_memory_ids, rag_sources, merged_calls, merged_artifacts
+        except Exception:
+            logger.warning("direct route fallback in respond failed", exc_info=True)
+            return None
 
 
 chat_service = ChatService()
