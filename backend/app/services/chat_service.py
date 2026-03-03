@@ -3,9 +3,11 @@ import re
 import asyncio
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models.cron_job import CronJob
 from app.models.user import User
 from app.services.memory_service import memory_service
 from app.services.ollama_client import ollama_client
@@ -23,6 +25,8 @@ _URL_RE = re.compile(
 
 
 class ChatService:
+    _TRIM_CHARS = " \t\n\r.,;:-"
+
     @staticmethod
     def _dev_verbose_log(event: str, **context: object) -> None:
         if not settings.DEV_VERBOSE_LOGGING:
@@ -366,7 +370,7 @@ class ChatService:
         if not schedule_text:
             return None
 
-        tail = raw[schedule_match.end() :].strip(" \t\n\r.,;:-")
+        tail = raw[schedule_match.end() :].strip(ChatService._TRIM_CHARS)
         tail = re.sub(r"^(?:что|чтобы)\s+", "", tail, flags=re.IGNORECASE)
         task_text = tail.strip()
         if not task_text:
@@ -393,7 +397,7 @@ class ChatService:
         if not reminder_intent:
             return None
 
-        tail = raw[reminder_intent.end() :].strip(" \t\n\r.,;:-")
+        tail = raw[reminder_intent.end() :].strip(ChatService._TRIM_CHARS)
         if not tail:
             return None
 
@@ -402,8 +406,8 @@ class ChatService:
         task_text = ""
 
         if split_match:
-            schedule_text = tail[: split_match.start()].strip(" \t\n\r.,;:-")
-            task_text = tail[split_match.end() :].strip(" \t\n\r.,;:-")
+            schedule_text = tail[: split_match.start()].strip(ChatService._TRIM_CHARS)
+            task_text = tail[split_match.end() :].strip(ChatService._TRIM_CHARS)
         else:
             natural_match = re.match(
                 r"^((?:сегодня|завтра|послезавтра|на\s+завтра|tomorrow|today|"
@@ -425,11 +429,11 @@ class ChatService:
                 )
                 if not task_first_match:
                     return None
-                task_text = task_first_match.group(1).strip(" \t\n\r.,;:-")
-                schedule_text = task_first_match.group(2).strip(" \t\n\r.,;:-")
+                task_text = task_first_match.group(1).strip(ChatService._TRIM_CHARS)
+                schedule_text = task_first_match.group(2).strip(ChatService._TRIM_CHARS)
             else:
-                schedule_text = natural_match.group(1).strip(" \t\n\r.,;:-")
-                task_text = natural_match.group(2).strip(" \t\n\r.,;:-")
+                schedule_text = natural_match.group(1).strip(ChatService._TRIM_CHARS)
+                task_text = natural_match.group(2).strip(ChatService._TRIM_CHARS)
 
         if not schedule_text or not task_text:
             return None
@@ -748,6 +752,120 @@ class ChatService:
             calls.append(remember_call)
 
         return calls
+
+    @staticmethod
+    def _is_short_followup_message(user_message: str) -> bool:
+        text = str(user_message or "").strip()
+        lowered = text.lower()
+        if not text or len(text) > 48:
+            return False
+        if any(ch.isdigit() for ch in text):
+            return False
+        if re.search(r"\b(?:напомни|запланируй|поставь|создай|удали|покажи|cron|remind|schedule|tomorrow|today|завтра|сегодня|через|at\s+\d)\b", lowered):
+            return False
+        return bool(re.match(r"^(?:с|со|для|про|о)\s+.+", lowered))
+
+    async def _maybe_apply_reminder_followup(
+        self,
+        db: AsyncSession,
+        user: User,
+        session_id: UUID,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]] | None:
+        followup_text = str(user_message or "").strip()
+        if not self._is_short_followup_message(followup_text):
+            return None
+
+        recent = await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=8)
+        if len(recent) < 3:
+            return None
+
+        last_user = recent[-1]
+        if str(last_user.role or "") != "user":
+            return None
+        if self._normalize_whitespace(str(last_user.content or "")) != self._normalize_whitespace(followup_text):
+            return None
+
+        cron_call: dict | None = None
+        for item in reversed(recent[:-1]):
+            if str(item.role or "") != "assistant":
+                continue
+            meta = item.meta if isinstance(item.meta, dict) else {}
+            tool_calls = meta.get("tool_calls") if isinstance(meta.get("tool_calls"), list) else []
+            for call in reversed(tool_calls):
+                if not isinstance(call, dict):
+                    continue
+                if str(call.get("tool") or "").strip().lower() != "cron_add":
+                    continue
+                if not bool(call.get("success")):
+                    continue
+                result = call.get("result") if isinstance(call.get("result"), dict) else {}
+                if str(result.get("id") or "").strip():
+                    cron_call = call
+                    break
+            if cron_call:
+                break
+
+        if not cron_call:
+            return None
+
+        result = cron_call.get("result") if isinstance(cron_call.get("result"), dict) else {}
+        cron_id_raw = str(result.get("id") or "").strip()
+        if not cron_id_raw:
+            return None
+        try:
+            cron_id = UUID(cron_id_raw)
+        except ValueError:
+            return None
+
+        cron_result = await db.execute(select(CronJob).where(CronJob.id == cron_id, CronJob.user_id == user.id, CronJob.is_active.is_(True)))
+        cron_job = cron_result.scalar_one_or_none()
+        if cron_job is None:
+            return None
+
+        payload = dict(cron_job.payload or {})
+        base_task = str(payload.get("message") or "").strip()
+        if not base_task:
+            return None
+
+        followup_suffix = followup_text.strip(self._TRIM_CHARS)
+        if not followup_suffix:
+            return None
+        if followup_suffix.lower() in base_task.lower():
+            return None
+
+        merged_task = f"{base_task} {followup_suffix}".strip()
+        payload["message"] = merged_task
+        cron_job.payload = payload
+        db.add(cron_job)
+        await db.flush()
+
+        tool_calls = [
+            *manual_tool_calls,
+            {
+                "tool": "cron_update",
+                "arguments": {"job_id": str(cron_job.id), "append_text": followup_suffix},
+                "success": True,
+                "result": {
+                    "id": str(cron_job.id),
+                    "name": cron_job.name,
+                    "cron_expression": cron_job.cron_expression,
+                    "action_type": cron_job.action_type,
+                    "payload": cron_job.payload,
+                },
+            },
+        ]
+
+        self._dev_verbose_log(
+            "followup_reminder_merged",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            cron_id=str(cron_job.id),
+            merged_task_preview=merged_task[:180],
+        )
+
+        return f"Готово: уточнил напоминание — {merged_task}.", [], [], tool_calls, []
 
     async def _run_planned_tools_with_plan(
         self,
@@ -1295,6 +1413,21 @@ class ChatService:
         manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
         tool_calls: list[dict] = list(manual_tool_calls)
         artifacts: list[dict] = []
+
+        followup_reminder = await self._maybe_apply_reminder_followup(
+            db=db,
+            user=user,
+            session_id=session_id,
+            user_message=user_message,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if followup_reminder:
+            self._dev_verbose_log(
+                "respond_followup_reminder",
+                user_id=str(user.id),
+                session_id=str(session_id),
+            )
+            return followup_reminder
 
         fast_shortcut = await self._try_fast_shortcuts(
             db=db,

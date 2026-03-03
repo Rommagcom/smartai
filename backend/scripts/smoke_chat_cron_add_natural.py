@@ -89,6 +89,34 @@ async def run() -> None:
         ensure(bool(task_first_cron_calls), f"cron_add not executed for task-first phrase: {task_first_body}")
         ensure(any(bool(call.get("success")) for call in task_first_cron_calls), f"cron_add failed for task-first phrase: {task_first_body}")
 
+        listed_after_task_first = client.get("/api/v1/cron", headers=headers)
+        ensure(listed_after_task_first.status_code == 200, f"cron list after task-first failed: {listed_after_task_first.text}")
+        jobs_after_task_first = listed_after_task_first.json() if isinstance(listed_after_task_first.json(), list) else []
+        ensure(len(jobs_after_task_first) == len(jobs) + 1, f"expected one extra cron after task-first, got {len(jobs_after_task_first)}")
+
+        followup_message = "С женой"
+        followup_response = client.post("/api/v1/chat", json={"message": followup_message}, headers=headers)
+        ensure(followup_response.status_code == 200, f"chat follow-up failed: {followup_response.text}")
+        followup_body = followup_response.json()
+        followup_calls = followup_body.get("tool_calls") if isinstance(followup_body.get("tool_calls"), list) else []
+        ensure(
+            any(str(c.get("tool") or "") == "cron_update" and bool(c.get("success")) for c in followup_calls),
+            f"follow-up did not update existing cron: {followup_body}",
+        )
+
+        listed_after_followup = client.get("/api/v1/cron", headers=headers)
+        ensure(listed_after_followup.status_code == 200, f"cron list after follow-up failed: {listed_after_followup.text}")
+        jobs_after_followup = listed_after_followup.json() if isinstance(listed_after_followup.json(), list) else []
+        ensure(
+            len(jobs_after_followup) == len(jobs_after_task_first),
+            f"follow-up unexpectedly changed cron count: before={len(jobs_after_task_first)}, after={len(jobs_after_followup)}",
+        )
+        newest_payload_message = str(((jobs_after_followup[0] if jobs_after_followup else {}).get("payload") or {}).get("message") or "")
+        ensure(
+            "встречу" in newest_payload_message.lower() and "с женой" in newest_payload_message.lower(),
+            f"follow-up message was not merged into latest reminder: {newest_payload_message}",
+        )
+
         invalid_message = "Напомни когда-нибудь"
         before_invalid_count = len(jobs)
         invalid_response = client.post("/api/v1/chat", json={"message": invalid_message}, headers=headers)
