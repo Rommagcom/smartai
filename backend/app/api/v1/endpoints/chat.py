@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from app.api.types import CurrentUser, CurrentUserId, DBSession
+from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
@@ -89,6 +90,19 @@ async def chat(
     db: DBSession,
     current_user: CurrentUser,
 ) -> ChatResponse:
+    if settings.DEV_VERBOSE_LOGGING:
+        logger.info(
+            "chat endpoint dev trace: request_start",
+            extra={
+                "context": {
+                    "component": "chat_endpoint",
+                    "event": "request_start",
+                    "user_id": str(current_user.id),
+                    "session_id": str(payload.session_id) if payload.session_id else None,
+                    "message_preview": str(payload.message or "")[:220],
+                }
+            },
+        )
     if not current_user.soul_configured:
         user_description = str(payload.message or "").strip()
         if not user_description:
@@ -127,6 +141,22 @@ async def chat(
         session.id,
         payload.message,
     )
+    if settings.DEV_VERBOSE_LOGGING:
+        logger.info(
+            "chat endpoint dev trace: response_ready",
+            extra={
+                "context": {
+                    "component": "chat_endpoint",
+                    "event": "response_ready",
+                    "user_id": str(current_user.id),
+                    "session_id": str(session.id),
+                    "tool_calls_count": len(tool_calls),
+                    "tools": [str(call.get("tool") or "") for call in tool_calls],
+                    "used_memory_ids_count": len(used_memory_ids),
+                    "rag_sources_count": len(rag_sources),
+                }
+            },
+        )
     await memory_service.append_message(
         db,
         current_user.id,
@@ -160,6 +190,19 @@ async def chat(
     )
     _background_tasks.add(stm_task)
     stm_task.add_done_callback(_background_tasks.discard)
+
+    if settings.DEV_VERBOSE_LOGGING:
+        logger.info(
+            "chat endpoint dev trace: request_complete",
+            extra={
+                "context": {
+                    "component": "chat_endpoint",
+                    "event": "request_complete",
+                    "user_id": str(current_user.id),
+                    "session_id": str(session.id),
+                }
+            },
+        )
 
     return ChatResponse(
         session_id=session.id,

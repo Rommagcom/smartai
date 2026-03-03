@@ -65,6 +65,13 @@ async def run() -> None:
             "message: Нужно домой 🏠\n"
             "```"
         )
+        message_three = "Напомни через 5 минут выключить плиту"
+        message_invalid = (
+            "Запланируй напоминание\n"
+            "```cron_add\n"
+            "time: sometime later\n"
+            "```"
+        )
 
         response_one = client.post("/api/v1/chat", json={"message": message_one}, headers=headers)
         ensure(response_one.status_code == 200, f"chat #1 failed: {response_one.text}")
@@ -78,10 +85,16 @@ async def run() -> None:
         calls_two = body_two.get("tool_calls") if isinstance(body_two.get("tool_calls"), list) else []
         ensure(any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in calls_two), f"cron_add not executed in chat #2: {body_two}")
 
+        response_three = client.post("/api/v1/chat", json={"message": message_three}, headers=headers)
+        ensure(response_three.status_code == 200, f"chat #3 failed: {response_three.text}")
+        body_three = response_three.json()
+        calls_three = body_three.get("tool_calls") if isinstance(body_three.get("tool_calls"), list) else []
+        ensure(any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in calls_three), f"cron_add not executed in chat #3: {body_three}")
+
         listed = client.get("/api/v1/cron", headers=headers)
         ensure(listed.status_code == 200, f"cron list failed: {listed.text}")
         jobs = listed.json() if isinstance(listed.json(), list) else []
-        ensure(len(jobs) >= 2, f"expected at least 2 cron jobs, got {len(jobs)}")
+        ensure(len(jobs) >= 3, f"expected at least 3 cron jobs, got {len(jobs)}")
 
         payload_messages = [
             str((item.get("payload") or {}).get("message") or "")
@@ -90,11 +103,30 @@ async def run() -> None:
         ]
         ensure(any("Пора идти домой" in text for text in payload_messages), f"first reminder not found in payloads: {payload_messages}")
         ensure(any("Нужно домой" in text for text in payload_messages), f"second reminder not found in payloads: {payload_messages}")
+        ensure(any("выключить плиту" in text for text in payload_messages), f"third reminder not found in payloads: {payload_messages}")
+
+        before_invalid_count = len(jobs)
+        invalid_response = client.post("/api/v1/chat", json={"message": message_invalid}, headers=headers)
+        ensure(invalid_response.status_code == 200, f"chat invalid failed: {invalid_response.text}")
+        invalid_body = invalid_response.json()
+        invalid_calls = invalid_body.get("tool_calls") if isinstance(invalid_body.get("tool_calls"), list) else []
+        ensure(
+            not any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in invalid_calls),
+            f"invalid cron_add unexpectedly succeeded: {invalid_body}",
+        )
+
+        listed_after_invalid = client.get("/api/v1/cron", headers=headers)
+        ensure(listed_after_invalid.status_code == 200, f"cron list after invalid failed: {listed_after_invalid.text}")
+        jobs_after_invalid = listed_after_invalid.json() if isinstance(listed_after_invalid.json(), list) else []
+        ensure(
+            len(jobs_after_invalid) == before_invalid_count,
+            f"invalid cron_add changed job count: before={before_invalid_count}, after={len(jobs_after_invalid)}",
+        )
 
     async with session_factory() as session:
         result = await session.execute(select(CronJob))
         rows = result.scalars().all()
-        ensure(len(rows) >= 2, f"DB check failed: expected >=2 cron rows, got {len(rows)}")
+        ensure(len(rows) >= 3, f"DB check failed: expected >=3 cron rows, got {len(rows)}")
 
     try:
         await engine.dispose()
