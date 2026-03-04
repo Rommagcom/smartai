@@ -10,6 +10,7 @@ pydantic-settings==2.10.1
 python-multipart==0.0.20
 httpx==0.28.1
 ollama==0.6.1
+pydantic-ai==1.65.0
 redis==5.2.1
 apscheduler==3.11.0
 pgvector==0.4.1
