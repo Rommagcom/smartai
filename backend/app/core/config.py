@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 30
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL_NAME: str = "kimi-k2.5:cloud"
+    OLLAMA_MODEL_NAME: str = "gpt-oss:120b-cloud"
     OLLAMA_TIMEOUT_SECONDS: int = 120
     OLLAMA_RETRY_ATTEMPTS: int = 3
     OLLAMA_RETRY_BASE_DELAY_SECONDS: float = 0.2

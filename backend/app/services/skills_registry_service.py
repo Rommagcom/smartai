@@ -335,11 +335,12 @@ class SkillsRegistryService:
                     "properties": {
                         "service_name": {"type": "string"},
                         "token": {"type": "string"},
-                        "token_optional": {"type": "string"},
                         "base_url": {"type": "string"},
-                        "base_url_optional": {"type": "string"},
+                        "method": {"type": "string", "description": "HTTP method (GET by default)"},
+                        "headers": {"type": "object", "description": "HTTP headers, e.g. {\"Accept\": \"application/json\"}"},
+                        "params": {"type": "object", "description": "Query params, e.g. {\"date\": \"{{today}}\"}"},
+                        "schedule": {"type": "string", "description": "Cron expression for auto-call, e.g. 0 6 * * *"},
                         "endpoints": {"type": "array"},
-                        "endpoints_optional": {"type": "array"},
                     },
                     "required": ["service_name"],
                     "additionalProperties": False,
@@ -362,6 +363,20 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "integrations_delete_all",
+                    "title": "Integrations Delete All",
+                    "description": "Удалить все интеграции пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_INTEGRATIONS_WRITE],
+            },
+            {
+                "manifest": {
                     "name": "integration_call",
                     "title": "Integration Call",
                     "description": "Вызов endpoint подключенной интеграции",
@@ -375,6 +390,7 @@ class SkillsRegistryService:
                         "method": {"type": "string"},
                         "payload": {"type": "object"},
                         "headers": {"type": "object"},
+                        "params": {"type": "object", "description": "URL template variables and query params, e.g. {\"fdate\": \"{{today}}\"}"},
                     },
                     "required": ["integration_id", "url", "method"],
                     "additionalProperties": False,

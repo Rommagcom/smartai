@@ -158,6 +158,23 @@ async def onboarding_save(
     return IntegrationOnboardingSaveResponse(draft_id=draft_id, step="saved", integration=integration, test=test_result)
 
 
+@router.delete("", response_model=dict)
+async def delete_all_integrations(
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    result = await db.execute(
+        select(ApiIntegration).where(ApiIntegration.user_id == current_user.id)
+    )
+    rows = result.scalars().all()
+    deleted = 0
+    for row in rows:
+        await db.delete(row)
+        deleted += 1
+    await db.commit()
+    return {"status": "deleted_all", "deleted_count": deleted}
+
+
 @router.get("", response_model=list[IntegrationOut])
 async def list_integrations(
     db: DBSession,
@@ -244,12 +261,24 @@ async def call_integration(
     endpoint = body.get("url")
     method = body.get("method", "GET")
     payload = body.get("payload")
+    call_params = body.get("params") if isinstance(body.get("params"), dict) else {}
     if not endpoint:
         raise HTTPException(status_code=400, detail="url is required")
+
+    # Merge stored endpoint params with call-time params
+    stored_params: dict = {}
+    for ep in (integration.endpoints or []):
+        if isinstance(ep, dict) and ep.get("url") and endpoint.startswith(ep["url"].split("{")[0]):
+            stored_params = ep.get("params", {}) if isinstance(ep.get("params"), dict) else {}
+            break
+    merged_params = {**stored_params, **call_params}
+
+    from app.services.api_executor import resolve_url_template
+    resolved_url = resolve_url_template(endpoint, merged_params)
 
     headers = body.get("headers", {})
     auth_data = await _resolve_integration_auth_data(db=db, integration=integration)
     if token := auth_data.get("token"):
         headers["Authorization"] = f"Bearer {token}"
 
-    return await api_executor.call(method=method, url=endpoint, headers=headers, body=payload)
+    return await api_executor.call(method=method, url=resolved_url, headers=headers, body=payload)

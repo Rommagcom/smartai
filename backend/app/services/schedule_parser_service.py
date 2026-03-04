@@ -111,6 +111,7 @@ WEEKDAY_INDEX = {
 MONTH_PATTERN = "|".join(sorted((re.escape(month) for month in MONTHS), key=len, reverse=True))
 DATE_PATTERN = re.compile(rf"(\d{{1,2}})\s+({MONTH_PATTERN})(?:\s+(\d{{4}}))?")
 TIME_HHMM_PATTERN = re.compile(r"в?\s*(\d{1,2}):(\d{2})")
+TIME_AMPM_PATTERN = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.IGNORECASE)
 TIME_SIMPLE_PATTERN = re.compile(r"в?\s*(\d{1,2})\s*(утра|дня|вечера|ночи)?")
 
 
@@ -211,16 +212,26 @@ class ScheduleParserService:
             hour = int(match.group(1))
             minute = int(match.group(2))
         else:
-            simple = TIME_SIMPLE_PATTERN.search(text)
-            if not simple:
-                return 9, 0
-            hour = int(simple.group(1))
-            minute = 0
-            marker = (simple.group(2) or "").strip()
-            if marker in {"дня", "вечера"} and hour < 12:
-                hour += 12
-            if marker == "ночи" and hour == 12:
-                hour = 0
+            ampm = TIME_AMPM_PATTERN.search(text)
+            if ampm:
+                hour = int(ampm.group(1))
+                minute = int(ampm.group(2) or "0")
+                marker = ampm.group(3).lower()
+                if marker == "pm" and hour < 12:
+                    hour += 12
+                elif marker == "am" and hour == 12:
+                    hour = 0
+            else:
+                simple = TIME_SIMPLE_PATTERN.search(text)
+                if not simple:
+                    return 9, 0
+                hour = int(simple.group(1))
+                minute = 0
+                marker = (simple.group(2) or "").strip()
+                if marker in {"дня", "вечера"} and hour < 12:
+                    hour += 12
+                if marker == "ночи" and hour == 12:
+                    hour = 0
 
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError("Некорректное время")
@@ -394,6 +405,12 @@ class ScheduleParserService:
         weekday_once = self._extract_weekday_once(text, now)
         if weekday_once:
             return weekday_once.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        # Fallback: explicit time mentioned (HH:MM or am/pm) but no date anchor
+        # → treat as today at that time; if already past, push to tomorrow.
+        if TIME_HHMM_PATTERN.search(text) or TIME_AMPM_PATTERN.search(text):
+            dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            return dt if dt > now else dt + timedelta(days=1)
 
         return None
 

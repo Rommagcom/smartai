@@ -1,7 +1,64 @@
 import asyncio
+import re
+from datetime import datetime, timezone
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from app.services.egress_policy_service import egress_policy_service
 from app.services.http_client_service import http_client_service
+
+_TEMPLATE_RE = re.compile(r"\{\{(\w+)\}\}")
+
+
+def _builtin_values() -> dict[str, str]:
+    now = datetime.now(timezone.utc)
+    return {
+        "today": now.strftime("%d.%m.%Y"),
+        "today_iso": now.strftime("%Y-%m-%d"),
+        "now": now.isoformat(),
+    }
+
+
+def resolve_url_template(url: str, params: dict | None = None) -> str:
+    """Resolve ``{key}`` placeholders in *url* from *params*.
+
+    Param values may contain built-in templates:
+    - ``{{today}}``     → DD.MM.YYYY
+    - ``{{today_iso}}`` → YYYY-MM-DD
+    - ``{{now}}``       → ISO-8601 UTC datetime
+
+    Params that do not match any URL placeholder are appended
+    as query-string parameters.
+    """
+    builtins = _builtin_values()
+
+    # ---- resolve {{template}} inside param values ----
+    resolved: dict[str, str] = {}
+    for k, v in (params or {}).items():
+        val = str(v)
+        val = _TEMPLATE_RE.sub(lambda m: builtins.get(m.group(1), m.group(0)), val)
+        resolved[k] = val
+
+    # ---- substitute {key} placeholders in URL ----
+    used: set[str] = set()
+    for k, v in resolved.items():
+        ph = "{" + k + "}"
+        if ph in url:
+            url = url.replace(ph, v)
+            used.add(k)
+
+    # also resolve bare built-in placeholders like {today} in URL
+    for bn, bv in builtins.items():
+        url = url.replace("{" + bn + "}", bv)
+
+    # ---- append unused params as query-string ----
+    leftover = {k: v for k, v in resolved.items() if k not in used}
+    if leftover:
+        parsed = urlparse(url)
+        sep = "&" if parsed.query else ""
+        new_query = (parsed.query + sep if parsed.query else "") + urlencode(leftover)
+        url = urlunparse(parsed._replace(query=new_query))
+
+    return url
 
 
 class ApiExecutor:
