@@ -461,8 +461,23 @@ class ChatService:
         ):
             return [{"tool": "integrations_delete_all", "arguments": {}}]
 
+        # integration_call by service name: "получи данные из интеграции <name>"
+        _int_call_m = re.search(
+            r"\b(?:получи|запроси|вызови|верни|дай)\b"
+            r".*\bинтеграци[юиейям\w]*\s+([\w][\w-]*)"
+            r"|\b(?:call|get|fetch|invoke)\b"
+            r".*\bintegration\s+([\w][\w-]*)",
+            lowered,
+        )
+        if _int_call_m:
+            _svc = (_int_call_m.group(1) or _int_call_m.group(2) or "").strip()
+            _stops = {"все", "всё", "всех", "мои", "мою", "данные", "результат"}
+            if _svc and _svc not in _stops:
+                return [{"tool": "integration_call", "arguments": {"service_name": _svc}}]
+
         if re.search(
-            r"\b(покажи|список|какие|мои)\b.*\bинтеграц"
+            r"\b(покажи|список|какие|мои|выведи|вывести)\b.*\bинтеграц"
+            r"|\bвсе\s+интеграц"
             r"|list\s+(?:my\s+)?integrations?"
             r"|show\s+(?:my\s+)?integrations?"
             r"|my\s+integrations",
@@ -1590,10 +1605,29 @@ class ChatService:
                 )
                 ep_count = len(result.get("endpoints") or [])
                 schedule = str(result.get("schedule") or "").strip()
+                int_id = str(result.get("id") or "").strip()
                 parts = [f"Готово: интеграция создана — {svc} ({ep_count} endpoint{'s' if ep_count != 1 else ''})."]
+                if int_id:
+                    parts.append(f"ID: {int_id}")
                 if schedule:
                     parts.append(f"Расписание: {schedule}")
                 return " ".join(parts)
+
+            if tool == "integration_call":
+                status_code = int(result.get("status_code") or 0)
+                body = str(result.get("body") or "").strip()
+                if status_code == 0 and not body:
+                    return "Запрос к интеграции не вернул данных."
+                if status_code >= 400:
+                    preview = body[:500] if body else ""
+                    return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
+                if not body:
+                    return f"Ответ интеграции (HTTP {status_code}): пустое тело."
+                max_len = 3000
+                preview = body[:max_len]
+                if len(body) > max_len:
+                    preview += f"\n…(обрезано, всего {len(body)} символов)"
+                return f"Ответ интеграции (HTTP {status_code}):\n```\n{preview}\n```"
 
             if tool == "integrations_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)

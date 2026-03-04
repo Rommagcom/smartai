@@ -923,19 +923,33 @@ class ToolOrchestratorService:
     async def _integration_call(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         from urllib.parse import urlparse
 
+        from sqlalchemy import func as sa_func
+
         from app.services.api_executor import resolve_url_template
 
         integration_id_raw = str(arguments.get("integration_id") or "").strip()
+        service_name_raw = str(arguments.get("service_name") or "").strip()
         endpoint = str(arguments.get("url") or "").strip()
         method = str(arguments.get("method") or "GET")
         payload = arguments.get("payload")
         headers = arguments.get("headers") if isinstance(arguments.get("headers"), dict) else {}
         call_params = arguments.get("params") if isinstance(arguments.get("params"), dict) else {}
-        if not integration_id_raw or not endpoint:
-            raise ValueError("integration_call requires integration_id and url")
+        if not integration_id_raw and not service_name_raw:
+            raise ValueError("integration_call requires integration_id or service_name")
 
-        integration_id = UUID(integration_id_raw)
-        result = await db.execute(select(ApiIntegration).where(ApiIntegration.id == integration_id, ApiIntegration.user_id == user.id))
+        # Look up integration by ID or service_name
+        if integration_id_raw:
+            integration_id = UUID(integration_id_raw)
+            result = await db.execute(select(ApiIntegration).where(ApiIntegration.id == integration_id, ApiIntegration.user_id == user.id))
+        else:
+            result = await db.execute(
+                select(ApiIntegration)
+                .where(
+                    sa_func.lower(ApiIntegration.service_name) == service_name_raw.lower(),
+                    ApiIntegration.user_id == user.id,
+                )
+                .limit(1)
+            )
         integration = result.scalar_one_or_none()
         if not integration:
             raise ValueError("Integration not found")
@@ -949,6 +963,17 @@ class ToolOrchestratorService:
             await db.flush()
 
         stored_base_url = str(auth_data.get("url") or "").strip()
+
+        # If no endpoint URL specified, pick the first stored endpoint
+        if not endpoint and integration.endpoints:
+            for ep in integration.endpoints:
+                if isinstance(ep, dict) and ep.get("url"):
+                    endpoint = str(ep["url"])
+                    break
+        if not endpoint:
+            endpoint = stored_base_url
+        if not endpoint:
+            raise ValueError("No endpoint URL available for this integration")
 
         # Match endpoint against stored endpoints (by full URL, path, or name)
         endpoint_path = urlparse(endpoint).path if endpoint.startswith("http") else endpoint
