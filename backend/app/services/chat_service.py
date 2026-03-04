@@ -625,8 +625,12 @@ class ChatService:
           - Добавь интеграцию nationalbank https://example.com/api
           - Создай интеграцию weather https://api.weather.com method=GET params={"q":"Moscow"}
           - add integration myapi https://… headers={"Accept":"text/xml"}
+
+        Query parameters in the URL (e.g. ``?fdate={{today}}``) are automatically
+        extracted into the ``params`` dict so they can be resolved at call time.
         """
         import json as _json
+        from urllib.parse import parse_qs, urlparse, urlunparse
 
         raw = str(user_message or "").strip()
         lowered = raw.lower()
@@ -647,6 +651,15 @@ class ChatService:
         if not url_match:
             return None
         base_url = url_match.group(1).rstrip(",.;:)")
+
+        # Extract query-string params from URL → params dict
+        url_params: dict = {}
+        parsed_url = urlparse(base_url)
+        if parsed_url.query:
+            for k, v in parse_qs(parsed_url.query).items():
+                url_params[k] = v[0] if len(v) == 1 else v
+            # Strip query string from the stored URL
+            base_url = urlunparse(parsed_url._replace(query=""))
 
         # Service name: word right after «интеграцию/api/integration»
         after_intent = raw[intent_match.end():]
@@ -692,6 +705,11 @@ class ChatService:
                                 result[field] = parsed
                         except Exception:
                             pass
+
+        # Merge URL query params as defaults (explicit params= override)
+        if url_params:
+            explicit_params = result.get("params", {})
+            result["params"] = {**url_params, **explicit_params} if explicit_params else url_params
 
         # schedule=...
         schedule_match = re.search(
@@ -1590,8 +1608,19 @@ class ChatService:
                 lines = ["Ваши интеграции:"]
                 for item in items[:8]:
                     svc_name = str(item.get("service_name") or "custom-api").strip()
-                    ep_count = len(item.get("endpoints") or [])
-                    lines.append(f"- {svc_name} ({ep_count} endpoint{'s' if ep_count != 1 else ''})")
+                    endpoints = item.get("endpoints") or []
+                    ep_count = len(endpoints)
+                    detail_parts = [f"- **{svc_name}** ({ep_count} endpoint{'s' if ep_count != 1 else ''})"]
+                    for ep in endpoints[:3]:
+                        if isinstance(ep, dict):
+                            ep_url = str(ep.get("url") or "").strip()
+                            ep_method = str(ep.get("method") or "GET").strip()
+                            ep_params = ep.get("params") if isinstance(ep.get("params"), dict) else {}
+                            ep_line = f"  URL: {ep_url} [{ep_method}]"
+                            if ep_params:
+                                ep_line += f"  params: {ep_params}"
+                            detail_parts.append(ep_line)
+                    lines.extend(detail_parts)
                 if len(items) > 8:
                     lines.append(f"- …и ещё {len(items) - 8}")
                 return "\n".join(lines)

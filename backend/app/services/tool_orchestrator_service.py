@@ -829,6 +829,8 @@ class ToolOrchestratorService:
         return {"status": "deleted_all", "deleted_count": deleted}
 
     async def _integration_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        from urllib.parse import parse_qs, urlparse, urlunparse
+
         service_name = str(arguments.get("service_name") or arguments.get("name") or "custom-api").strip()
         token = str(arguments.get("token") or "").strip()
         base_url = str(arguments.get("url") or arguments.get("base_url") or "").strip()
@@ -865,6 +867,16 @@ class ToolOrchestratorService:
                     params = parsed_p
             except Exception:
                 pass
+
+        # Extract query-string params from URL if present (e.g. ?fdate={{today}})
+        parsed_url = urlparse(base_url)
+        if parsed_url.query:
+            url_params: dict = {}
+            for k, v in parse_qs(parsed_url.query).items():
+                url_params[k] = v[0] if len(v) == 1 else v
+            # URL params as defaults, explicit params= as overrides
+            params = {**url_params, **params} if params else url_params
+            base_url = urlunparse(parsed_url._replace(query=""))
 
         schedule = str(arguments.get("schedule") or "").strip()
 
@@ -909,6 +921,8 @@ class ToolOrchestratorService:
         }
 
     async def _integration_call(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        from urllib.parse import urlparse
+
         from app.services.api_executor import resolve_url_template
 
         integration_id_raw = str(arguments.get("integration_id") or "").strip()
@@ -926,22 +940,51 @@ class ToolOrchestratorService:
         if not integration:
             raise ValueError("Integration not found")
 
-        # Merge stored endpoint params (defaults) with call-time params (overrides)
-        stored_params: dict = {}
-        for ep in (integration.endpoints or []):
-            if isinstance(ep, dict) and ep.get("url") and endpoint.startswith(ep["url"].split("{")[0]):
-                stored_params = ep.get("params", {}) if isinstance(ep.get("params"), dict) else {}
-                break
-        merged_params = {**stored_params, **call_params}
-
-        # Resolve URL templates: {key} placeholders + {{today}}/{{today_iso}}/{{now}}
-        resolved_url = resolve_url_template(endpoint, merged_params)
-
-        auth_data, rotated = auth_data_security_service.resolve_for_runtime(integration.auth_data)
+        # Resolve stored auth_data early to use base URL
+        auth_data_raw = integration.auth_data
+        auth_data, rotated = auth_data_security_service.resolve_for_runtime(auth_data_raw)
         if rotated is not None:
             integration.auth_data = rotated
             db.add(integration)
             await db.flush()
+
+        stored_base_url = str(auth_data.get("url") or "").strip()
+
+        # Match endpoint against stored endpoints (by full URL, path, or name)
+        endpoint_path = urlparse(endpoint).path if endpoint.startswith("http") else endpoint
+        stored_params: dict = {}
+        matched_ep_url: str = ""
+        for ep in (integration.endpoints or []):
+            if not isinstance(ep, dict):
+                continue
+            ep_url = str(ep.get("url") or "").strip()
+            ep_name = str(ep.get("name") or "").strip()
+            ep_path = urlparse(ep_url).path if ep_url.startswith("http") else ep_url
+            # Match by: exact URL, path match, or name match
+            if ep_url and (
+                endpoint == ep_url
+                or (endpoint_path and ep_path and endpoint_path.rstrip("/") == ep_path.rstrip("/"))
+                or (ep_name and endpoint.lower() == ep_name.lower())
+            ):
+                stored_params = ep.get("params", {}) if isinstance(ep.get("params"), dict) else {}
+                matched_ep_url = ep_url
+                if not method or method == "GET":
+                    method = str(ep.get("method") or method or "GET")
+                break
+
+        # If endpoint is a relative path, resolve against stored base URL
+        if not endpoint.startswith("http"):
+            if matched_ep_url and matched_ep_url.startswith("http"):
+                endpoint = matched_ep_url
+            elif stored_base_url and stored_base_url.startswith("http"):
+                # Combine base scheme+host with endpoint path
+                parsed_base = urlparse(stored_base_url)
+                endpoint = f"{parsed_base.scheme}://{parsed_base.netloc}{endpoint}"
+
+        merged_params = {**stored_params, **call_params}
+
+        # Resolve URL templates: {key} placeholders + {{today}}/{{today_iso}}/{{now}}
+        resolved_url = resolve_url_template(endpoint, merged_params)
 
         if token := auth_data.get("token"):
             headers["Authorization"] = f"Bearer {token}"
