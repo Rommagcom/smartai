@@ -259,7 +259,7 @@ class SkillsRegistryService:
                     "properties": {
                         "service_name": {"type": "string"},
                         "token": {"type": "string"},
-                        "base_url": {"type": "string"},
+                        "url": {"type": "string"},
                         "endpoints": {"type": "array"},
                         "healthcheck": {"type": "object"},
                     },
@@ -335,7 +335,7 @@ class SkillsRegistryService:
                     "properties": {
                         "service_name": {"type": "string"},
                         "token": {"type": "string"},
-                        "base_url": {"type": "string"},
+                        "url": {"type": "string", "description": "URL for API call"},
                         "method": {"type": "string", "description": "HTTP method (GET by default)"},
                         "headers": {"type": "object", "description": "HTTP headers, e.g. {\"Accept\": \"application/json\"}"},
                         "params": {"type": "object", "description": "Query params, e.g. {\"date\": \"{{today}}\"}"},

@@ -76,6 +76,15 @@
 			"label": "smoke-all-verify",
 			"type": "shell",
 			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_all"
+		},
+		{
+			"label": "smoke-all-rename-check",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_all"
+			]
 		}
 	]
 }

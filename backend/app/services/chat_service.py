@@ -59,7 +59,7 @@ _CRON_XML_STRIP_RE = re.compile(r"<cron_add>[\s\S]*?</cron_add>", re.IGNORECASE)
 _INTEGRATION_XML_RE = re.compile(
     r"<integration_add>\s*"
     r"<service_name>\s*(?P<service_name>[^<]+?)\s*</service_name>\s*"
-    r"(?:<base_url>\s*(?P<base_url>[^<]*?)\s*</base_url>\s*)?"
+    r"(?:<(?:url|base_url)>\s*(?P<url>[^<]*?)\s*</(?:url|base_url)>\s*)?"
     r"(?:<token>\s*(?P<token>[^<]*?)\s*</token>\s*)?"
     r"(?:<method>\s*(?P<method>[^<]*?)\s*</method>\s*)?"
     r"(?:<headers>\s*(?P<headers>[^<]*?)\s*</headers>\s*)?"
@@ -441,6 +441,16 @@ class ChatService:
         if re.search(r"\bудал[иь].*вс[её].*напомин|очист[иь].*(напомин|задач)|delete\s+all\s+reminder", lowered):
             return [{"tool": "cron_delete_all", "arguments": {}}]
 
+        # integration_add: "добавь интеграцию <name> <url> [params=... method=...]"
+        integration_add_args = ChatService._extract_integration_add_args(user_message)
+        if integration_add_args:
+            ChatService._dev_verbose_log(
+                "deterministic_route_integration_add",
+                service_name=str(integration_add_args.get("service_name") or ""),
+                url=str(integration_add_args.get("url") or ""),
+            )
+            return [{"tool": "integration_add", "arguments": integration_add_args}]
+
         if re.search(
             r"\bудал[иь].*вс[её].*интеграц"
             r"|очист[иь].*интеграц"
@@ -606,6 +616,93 @@ class ChatService:
         if lowered_cleaned in {"все", "всё", "all", "everything", "память", "memory"}:
             return None
         return cleaned or None
+
+    @staticmethod
+    def _extract_integration_add_args(user_message: str) -> dict | None:
+        """Parse integration_add arguments from a natural-language message.
+
+        Detects patterns like:
+          - Добавь интеграцию nationalbank https://example.com/api
+          - Создай интеграцию weather https://api.weather.com method=GET params={"q":"Moscow"}
+          - add integration myapi https://… headers={"Accept":"text/xml"}
+        """
+        import json as _json
+
+        raw = str(user_message or "").strip()
+        lowered = raw.lower()
+        if not raw:
+            return None
+
+        # Detect intent
+        intent_match = re.search(
+            r"\b(?:добав[ьи]|создай|подключи|connect|add|create)\b"
+            r".*?\b(?:интеграци\w*|api|integration)\b",
+            lowered,
+        )
+        if not intent_match:
+            return None
+
+        # Must contain a URL
+        url_match = re.search(r"(https?://\S+)", raw)
+        if not url_match:
+            return None
+        base_url = url_match.group(1).rstrip(",.;:)")
+
+        # Service name: word right after «интеграцию/api/integration»
+        after_intent = raw[intent_match.end():]
+        name_match = re.match(r"\s+([\w][\w-]*)", after_intent)
+        service_name = name_match.group(1) if name_match else "custom-api"
+        if service_name.lower().startswith("http"):
+            service_name = "custom-api"
+
+        result: dict = {"service_name": service_name, "url": base_url}
+
+        # method=GET/POST/…
+        method_match = re.search(r"\bmethod\s*=\s*(\w+)", raw, re.IGNORECASE)
+        if method_match:
+            result["method"] = method_match.group(1).upper()
+
+        # Parse JSON-dict fields: params=…, headers=…
+        for field in ("params", "headers"):
+            field_match = re.search(rf"\b{field}\s*=\s*", raw, re.IGNORECASE)
+            if not field_match:
+                continue
+            rest = raw[field_match.end():]
+            if rest.startswith("{"):
+                depth, end_idx = 0, 0
+                for i, ch in enumerate(rest):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = i + 1
+                            break
+                if end_idx:
+                    json_str = rest[:end_idx]
+                    try:
+                        parsed = _json.loads(json_str)
+                        if isinstance(parsed, dict):
+                            result[field] = parsed
+                    except Exception:
+                        # Try replacing single quotes → double quotes
+                        try:
+                            parsed = _json.loads(json_str.replace("'", '"'))
+                            if isinstance(parsed, dict):
+                                result[field] = parsed
+                        except Exception:
+                            pass
+
+        # schedule=...
+        schedule_match = re.search(
+            r"""\bschedule\s*=\s*(?:['"]([^'"]*?)['"]|(\S+))""",
+            raw,
+            re.IGNORECASE,
+        )
+        if schedule_match:
+            result["schedule"] = (schedule_match.group(1) or schedule_match.group(2) or "").strip()
+
+        return result
 
     @staticmethod
     def _live_data_unavailable_fallback() -> str:
@@ -782,7 +879,7 @@ class ChatService:
     def _extract_integration_xml_tags(text: str) -> dict | None:
         """Extract <integration_add> XML tags from LLM response.
 
-        Returns dict with 'service_name' and optionally 'base_url', 'token',
+        Returns dict with 'service_name' and optionally 'url', 'token',
         'method', 'headers', 'params', 'schedule'.
         Falls back to JSON code-block parsing if XML tags are absent.
         """
@@ -792,7 +889,7 @@ class ChatService:
             if not service_name:
                 return None
             result: dict = {"service_name": service_name}
-            for field in ("base_url", "token", "method", "schedule"):
+            for field in ("url", "token", "method", "schedule"):
                 val = (m.group(field) or "").strip()
                 if val:
                     result[field] = val
@@ -850,7 +947,7 @@ class ChatService:
             # Map common LLM field name variants to canonical names
             _FIELD_ALIASES: dict[str, list[str]] = {
                 "service_name": ["service_name", "name", "service", "serviceName"],
-                "base_url": ["base_url", "url", "baseUrl", "base-url", "endpoint"],
+                "url": ["url", "base_url", "baseUrl", "base-url", "endpoint"],
                 "token": ["token", "api_key", "apiKey", "auth_token", "key"],
                 "method": ["method", "http_method", "httpMethod"],
                 "schedule": ["schedule", "cron", "cron_expression"],
@@ -1236,7 +1333,17 @@ class ChatService:
             tool_calls=safe_tool_calls,
             response_hint=response_hint,
         )
-        return self._sanitize_llm_answer(answer), tool_calls, artifacts
+        sanitized = self._sanitize_llm_answer(answer)
+
+        # Safety-net: if compose/sanitize produced the generic error but tools
+        # actually succeeded, use the deterministic formatter instead.
+        _FALLBACK_PREFIX = "Не удалось сформировать итоговый текст ответа"
+        if sanitized.startswith(_FALLBACK_PREFIX) and any(c.get("success") for c in tool_calls):
+            deterministic = self._format_deterministic_tool_answer(tool_calls)
+            if deterministic:
+                return deterministic, tool_calls, artifacts
+
+        return sanitized, tool_calls, artifacts
 
     async def _compose_answer_with_retry(
         self,
@@ -2191,7 +2298,7 @@ class ChatService:
         self._dev_verbose_log(
             "llm_inline_integration_detected",
             service_name=parsed["service_name"],
-            base_url=parsed.get("base_url", ""),
+            url=parsed.get("url", ""),
         )
 
         try:
