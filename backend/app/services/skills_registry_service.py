@@ -385,14 +385,15 @@ class SkillsRegistryService:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "integration_id": {"type": "string"},
+                        "integration_id": {"type": "string", "description": "UUID of the integration"},
+                        "service_name": {"type": "string", "description": "Service name for lookup (alternative to integration_id)"},
                         "url": {"type": "string"},
                         "method": {"type": "string"},
                         "payload": {"type": "object"},
                         "headers": {"type": "object"},
                         "params": {"type": "object", "description": "URL template variables and query params, e.g. {\"fdate\": \"{{today}}\"}"},
                     },
-                    "required": ["integration_id", "url", "method"],
+                    "required": [],
                     "additionalProperties": False,
                 },
                 "permissions": ["integrations.call", PERMISSION_NETWORK_HTTP_READ, "network.http.write"],

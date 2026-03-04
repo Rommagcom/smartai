@@ -249,6 +249,11 @@ class ToolOrchestratorService:
                 coerced[key] = str(value)
                 continue
 
+            # None sent for an object field → empty dict
+            if expected == "object" and value is None:
+                coerced[key] = {}
+                continue
+
             # Dict sent for an array field → wrap in list
             if expected == "array" and isinstance(value, dict):
                 coerced[key] = [value]
