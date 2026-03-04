@@ -1,6 +1,7 @@
 import logging
 import re
 import asyncio
+import json
 from uuid import UUID
 
 from sqlalchemy import select
@@ -70,6 +71,31 @@ class ChatService:
             if norm_key and norm_value:
                 pairs[norm_key] = norm_value
         return pairs
+
+    @staticmethod
+    def _parse_json_object(raw: str) -> dict | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+
+        fenced_match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text, flags=re.IGNORECASE)
+        if fenced_match:
+            text = fenced_match.group(1).strip()
+
+        candidates = [text]
+        brace_start = text.find("{")
+        brace_end = text.rfind("}")
+        if brace_start != -1 and brace_end > brace_start:
+            candidates.append(text[brace_start : brace_end + 1])
+
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
 
     @staticmethod
     def _extract_cron_add_structured_args(user_message: str) -> dict | None:
@@ -191,9 +217,8 @@ class ChatService:
         )
         return result
 
-    async def _try_fast_shortcuts(
+    def _try_fast_shortcuts(
         self,
-        db: AsyncSession,
         user: User,
         user_message: str,
         manual_tool_calls: list[dict],
@@ -207,17 +232,7 @@ class ChatService:
         if self._is_timezone_query(user_message):
             return self._timezone_answer(user), [], [], tool_calls, artifacts
 
-        fast_tool_answer = await self._maybe_fast_tool_answer(
-            db=db,
-            user=user,
-            user_message=user_message,
-            manual_tool_calls=manual_tool_calls,
-        )
-        if not fast_tool_answer:
-            return None
-
-        answer, tool_calls, artifacts = fast_tool_answer
-        return answer, [], [], tool_calls, artifacts
+        return None
 
     @staticmethod
     def _should_attempt_tool_planning(user_message: str) -> bool:
@@ -240,6 +255,19 @@ class ChatService:
             r"\bмои\s+(?:задач|напоминан|cron)|список\s+(?:задач|напоминан)",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
+
+    @staticmethod
+    def _is_cron_add_intent(user_message: str) -> bool:
+        lowered = str(user_message or "").strip().lower()
+        if not lowered:
+            return False
+        cron_add_patterns = [
+            r"\bнапомни|напомин|запланир|поставь\s+напомин",
+            r"\bчерез\s+\d+\s*(?:мин|минут|час|часа|часов)",
+            r"\bin\s+\d+\s*(?:minutes?|hours?)",
+            r"\bcron\s*add|cron_add\b",
+        ]
+        return any(re.search(pattern, lowered) for pattern in cron_add_patterns)
 
     @staticmethod
     def _llm_unavailable_fallback() -> str:
@@ -859,7 +887,6 @@ class ChatService:
     ) -> tuple[list[dict], str] | None:
         try:
             if planner_task is not None:
-                import asyncio as _aio
                 planner = await planner_task  # type: ignore[misc]
             else:
                 planner = await tool_orchestrator_service.plan_tool_calls(
@@ -868,6 +895,17 @@ class ChatService:
                 )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
+            if not use_tools or not planned_steps:
+                planner_retry = await tool_orchestrator_service.plan_tool_calls(
+                    user_message=user_message,
+                    system_prompt=user.system_prompt_template,
+                )
+                retry_use_tools = bool(planner_retry.get("use_tools"))
+                retry_steps = planner_retry.get("steps") if isinstance(planner_retry.get("steps"), list) else []
+                if retry_use_tools and retry_steps:
+                    planner = planner_retry
+                    use_tools = retry_use_tools
+                    planned_steps = retry_steps
             self._dev_verbose_log(
                 "planner_result",
                 use_tools=use_tools,
@@ -903,20 +941,6 @@ class ChatService:
             return None
 
         planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
-        if not planned_result:
-            # Planner failed or returned no tools — try deterministic direct routing
-            direct_steps = self._direct_route_from_message(user_message)
-            if direct_steps:
-                logger.info("planner returned no plan, using direct route for: %.120s", user_message)
-                try:
-                    direct_calls = await tool_orchestrator_service.execute_tool_chain(
-                        db=db, user=user, steps=direct_steps, max_steps=3,
-                    )
-                    if self._has_meaningful_tool_output(direct_calls):
-                        planned_result = direct_calls, "Используй результаты для ответа."
-                except Exception:
-                    logger.warning("direct route execution failed", exc_info=True)
-
         if not planned_result:
             if self._is_live_data_intent(user_message):
                 return self._live_data_unavailable_fallback(), manual_tool_calls, []
@@ -1412,8 +1436,7 @@ class ChatService:
             )
             return followup_reminder
 
-        fast_shortcut = await self._try_fast_shortcuts(
-            db=db,
+        fast_shortcut = self._try_fast_shortcuts(
             user=user,
             user_message=user_message,
             manual_tool_calls=manual_tool_calls,
@@ -1475,9 +1498,58 @@ class ChatService:
             answer = self._llm_unavailable_fallback()
         answer = self._sanitize_llm_answer(answer)
 
-        recovered = await self._maybe_recover_placeholder_answer(
+        llm_hint_tool_answer = await self._maybe_execute_llm_tool_hint(
             db=db,
             user=user,
+            user_message=user_message,
+            llm_answer=answer,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if llm_hint_tool_answer:
+            hinted_answer, hinted_tool_calls, hinted_artifacts = llm_hint_tool_answer
+            self._dev_verbose_log(
+                "respond_llm_hint_tool_answer",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(hinted_tool_calls),
+            )
+            return hinted_answer, used_memory_ids, rag_sources, hinted_tool_calls, hinted_artifacts
+
+        llm_cron_inference_answer = await self._maybe_execute_llm_cron_inference(
+            db=db,
+            user=user,
+            user_message=user_message,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if llm_cron_inference_answer:
+            inferred_answer, inferred_tool_calls, inferred_artifacts = llm_cron_inference_answer
+            self._dev_verbose_log(
+                "respond_llm_cron_inference",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(inferred_tool_calls),
+            )
+            return inferred_answer, used_memory_ids, rag_sources, inferred_tool_calls, inferred_artifacts
+
+        if needs_tools and self._is_progress_placeholder_answer(answer):
+            planner_recovery_answer = await self._maybe_tool_answer_with_plan(
+                db=db,
+                user=user,
+                user_message=user_message,
+                manual_tool_calls=manual_tool_calls,
+                planner_task=None,
+            )
+            if planner_recovery_answer:
+                recovered_answer, recovered_tool_calls, recovered_artifacts = planner_recovery_answer
+                self._dev_verbose_log(
+                    "respond_placeholder_tool_recovery",
+                    user_id=str(user.id),
+                    session_id=str(session_id),
+                    tool_calls_count=len(recovered_tool_calls),
+                )
+                return recovered_answer, used_memory_ids, rag_sources, recovered_tool_calls, recovered_artifacts
+
+        recovered = self._maybe_recover_placeholder_answer(
             user_message=user_message,
             answer=answer,
             used_memory_ids=used_memory_ids,
@@ -1503,10 +1575,8 @@ class ChatService:
         )
         return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
-    async def _maybe_recover_placeholder_answer(
+    def _maybe_recover_placeholder_answer(
         self,
-        db: AsyncSession,
-        user: User,
         user_message: str,
         answer: str,
         used_memory_ids: list[str],
@@ -1517,36 +1587,149 @@ class ChatService:
         if not self._is_progress_placeholder_answer(answer):
             return None
 
-        logger.info("base LLM produced placeholder, attempting direct tool route")
+        logger.info("base LLM produced placeholder")
         if not self._should_attempt_tool_planning(user_message):
             logger.info("placeholder ignored for non-tool request")
             return answer, used_memory_ids, rag_sources, tool_calls, artifacts
 
-        direct_steps = self._direct_route_from_message(user_message)
-        if not direct_steps:
-            logger.info("direct route produced no result; returning base LLM answer")
+        logger.info("placeholder recovery keeps LLM-only tool decision mode")
+        return None
+
+    async def _maybe_execute_llm_tool_hint(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        llm_answer: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not self._should_attempt_tool_planning(user_message):
             return None
 
-        try:
-            direct_calls = await tool_orchestrator_service.execute_tool_chain(
-                db=db, user=user, steps=direct_steps, max_steps=3,
-            )
-            if not self._has_meaningful_tool_output(direct_calls):
-                logger.info("direct route produced no meaningful data; returning base LLM answer")
-                return None
+        cron_add_args = self._extract_cron_add_structured_args(llm_answer)
+        if not cron_add_args:
+            return None
 
-            merged_calls = [*tool_calls, *direct_calls]
-            merged_artifacts = self._extract_artifacts(merged_calls)
-            retried = await self._compose_answer_with_retry(
-                system_prompt=user.system_prompt_template,
-                user_message=user_message,
-                tool_calls=merged_calls,
-                response_hint="Ответь по полученным данным.",
+        planned_calls = await self._execute_single_cron_add(
+            db=db,
+            user=user,
+            cron_add_args=cron_add_args,
+            error_log_message="llm hint tool execution failed",
+        )
+        if planned_calls is None:
+            return None
+
+        if not any(bool(call.get("success")) for call in planned_calls):
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls) or self._sanitize_llm_answer(llm_answer)
+        self._dev_verbose_log(
+            "llm_tool_hint_executed",
+            user_id=str(user.id),
+            tools=[str(call.get("tool") or "") for call in planned_calls],
+        )
+        return answer, tool_calls, artifacts
+
+    async def _maybe_execute_llm_cron_inference(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        if not self._is_cron_add_intent(user_message):
+            return None
+
+        cron_add_args = await self._infer_cron_add_args_via_llm(user_message)
+        if not cron_add_args:
+            return None
+        schedule_text = str(cron_add_args.get("schedule_text") or "").strip()
+        task_text = str(cron_add_args.get("task_text") or "").strip()
+
+        planned_calls = await self._execute_single_cron_add(
+            db=db,
+            user=user,
+            cron_add_args=cron_add_args,
+            error_log_message="llm cron inference execution failed",
+        )
+        if planned_calls is None:
+            return None
+
+        if not any(bool(call.get("success")) for call in planned_calls):
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls) or "Готово: создал напоминание."
+        self._dev_verbose_log(
+            "llm_cron_inference_executed",
+            user_id=str(user.id),
+            schedule_text=schedule_text,
+            task_text_preview=task_text[:120],
+        )
+        return answer, tool_calls, artifacts
+
+    async def _infer_cron_add_args_via_llm(self, user_message: str) -> dict | None:
+        try:
+            inference_raw = await ollama_client.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты преобразуешь запрос пользователя в вызов cron_add. "
+                            "Верни строго JSON без markdown в формате: "
+                            '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
+                            "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments."
+                        ),
+                    },
+                    {"role": "user", "content": user_message},
+                ],
+                stream=False,
+                options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
             )
-            retried = self._sanitize_llm_answer(retried)
-            return retried, used_memory_ids, rag_sources, merged_calls, merged_artifacts
         except Exception:
-            logger.warning("direct route fallback in respond failed", exc_info=True)
+            logger.warning("llm cron inference failed", exc_info=True)
+            return None
+
+        payload = self._parse_json_object(inference_raw)
+        if not isinstance(payload, dict) or not bool(payload.get("use_tool")):
+            return None
+        raw_args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        return self._build_cron_add_args(raw_args)
+
+    @staticmethod
+    def _build_cron_add_args(raw_args: dict) -> dict | None:
+        if not isinstance(raw_args, dict):
+            return None
+        schedule_text = str(raw_args.get("schedule_text") or "").strip()
+        task_text = str(raw_args.get("task_text") or "").strip()
+        if not schedule_text or not task_text:
+            return None
+        return {
+            "schedule_text": schedule_text,
+            "task_text": task_text,
+            "name": str(raw_args.get("name") or "chat-reminder").strip() or "chat-reminder",
+            "action_type": str(raw_args.get("action_type") or "send_message").strip() or "send_message",
+        }
+
+    async def _execute_single_cron_add(
+        self,
+        db: AsyncSession,
+        user: User,
+        cron_add_args: dict,
+        error_log_message: str,
+    ) -> list[dict] | None:
+        try:
+            return await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=[{"tool": "cron_add", "arguments": cron_add_args}],
+                max_steps=1,
+            )
+        except Exception:
+            logger.warning(error_log_message, exc_info=True)
             return None
 
 
