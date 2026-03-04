@@ -3,6 +3,7 @@ import re
 import asyncio
 import json
 from uuid import UUID
+from pydantic import BaseModel
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,26 @@ from app.services.rag_service import rag_service
 from app.services.short_term_memory_service import short_term_memory_service
 from app.services.tool_orchestrator_service import tool_orchestrator_service
 
+try:
+    from pydantic_ai import Agent  # type: ignore[import-not-found]
+    from pydantic_ai.models.openai import OpenAIModel  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency
+    Agent = None
+    OpenAIModel = None
+
 logger = logging.getLogger(__name__)
+
+
+class _CronAddToolArguments(BaseModel):
+    schedule_text: str
+    task_text: str
+    name: str = "chat-reminder"
+    action_type: str = "send_message"
+
+
+class _CronAddToolDecision(BaseModel):
+    use_tool: bool = False
+    arguments: _CronAddToolArguments | None = None
 
 _URL_RE = re.compile(
     r"(?:https?://[^\s]+)"
@@ -270,6 +290,27 @@ class ChatService:
         return any(re.search(pattern, lowered) for pattern in cron_add_patterns)
 
     @staticmethod
+    def _extract_natural_reminder_task_text(user_message: str) -> str | None:
+        text = str(user_message or "").strip()
+        if not text or "```cron_add" in text.lower():
+            return None
+
+        match = re.search(
+            r"(?:через\s+\d+\s+(?:секунд|секунды|секунду|минут|минуты|минуту|час|часа|часов)|in\s+\d+\s+(?:seconds?|minutes?|hours?))\s+(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            natural_args = ChatService._extract_natural_reminder_args(text)
+            if isinstance(natural_args, dict):
+                task_text = str(natural_args.get("task_text") or "").strip().strip(" .,!?:;")
+                return task_text or None
+            return None
+
+        task_text = match.group(1).strip().strip(" .,!?:;")
+        return task_text or None
+
+    @staticmethod
     def _llm_unavailable_fallback() -> str:
         return (
             "Сервис генерации ответа сейчас временно недоступен. "
@@ -520,11 +561,13 @@ class ChatService:
         lowered = str(user_message or "").strip().lower()
         if not lowered:
             return False
+        if ChatService._is_cron_add_intent(user_message):
+            return False
         patterns = [
             r"\bкурс\b|\busd\b|\bkzt\b|\beur\b|\brub\b|\bвалют",
             r"\bакци|котиров|kase|нацбанк|рынок|бирж",
             r"\bпогод|новост|цена|стоимост|сегодня\b",
-            r"\bпосмотрел\b|\bглянул\b|\bну\s+что\b|\bтак\s+и\s+не\s+",
+            r"\bпосмотрел\b|\bглянул\b",
         ]
         return any(re.search(pattern, lowered) for pattern in patterns)
 
@@ -942,6 +985,8 @@ class ChatService:
 
         planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
         if not planned_result:
+            if self._is_cron_add_intent(user_message):
+                return None
             if self._is_live_data_intent(user_message):
                 return self._live_data_unavailable_fallback(), manual_tool_calls, []
             else:
@@ -1609,6 +1654,9 @@ class ChatService:
         cron_add_args = self._extract_cron_add_structured_args(llm_answer)
         if not cron_add_args:
             return None
+        natural_task_text = self._extract_natural_reminder_task_text(user_message)
+        if natural_task_text:
+            cron_add_args["task_text"] = natural_task_text
 
         planned_calls = await self._execute_single_cron_add(
             db=db,
@@ -1642,9 +1690,14 @@ class ChatService:
         if not self._is_cron_add_intent(user_message):
             return None
 
-        cron_add_args = await self._infer_cron_add_args_via_llm(user_message)
+        cron_add_args = await self._infer_cron_add_args_via_pydantic_ai_tool(user_message)
+        if not cron_add_args:
+            cron_add_args = await self._infer_cron_add_args_via_llm(user_message)
         if not cron_add_args:
             return None
+        natural_task_text = self._extract_natural_reminder_task_text(user_message)
+        if natural_task_text:
+            cron_add_args["task_text"] = natural_task_text
         schedule_text = str(cron_add_args.get("schedule_text") or "").strip()
         task_text = str(cron_add_args.get("task_text") or "").strip()
 
@@ -1671,33 +1724,107 @@ class ChatService:
         )
         return answer, tool_calls, artifacts
 
-    async def _infer_cron_add_args_via_llm(self, user_message: str) -> dict | None:
-        try:
-            inference_raw = await ollama_client.chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты преобразуешь запрос пользователя в вызов cron_add. "
-                            "Верни строго JSON без markdown в формате: "
-                            '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
-                            "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments."
-                        ),
-                    },
-                    {"role": "user", "content": user_message},
-                ],
-                stream=False,
-                options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
-            )
-        except Exception:
-            logger.warning("llm cron inference failed", exc_info=True)
+    async def _infer_cron_add_args_via_pydantic_ai_tool(self, user_message: str) -> dict | None:
+        if Agent is None or OpenAIModel is None:
             return None
 
-        payload = self._parse_json_object(inference_raw)
-        if not isinstance(payload, dict) or not bool(payload.get("use_tool")):
+        try:
+            model = OpenAIModel(
+                model_name=settings.OLLAMA_MODEL_NAME,
+                base_url=f"{settings.OLLAMA_BASE_URL.rstrip('/')}/v1",
+                api_key="ollama",
+            )
+            agent = Agent(
+                model=model,
+                result_type=_CronAddToolDecision,
+                system_prompt=(
+                    "Ты должен решить, вызывать ли инструмент cron_add. "
+                    "Если запрос пользователя содержит намерение создать напоминание/расписание, "
+                    "вызови tool cron_add с аргументами schedule_text и task_text. "
+                    "Если данных недостаточно, верни use_tool=false."
+                ),
+            )
+
+            def _cron_add_tool(
+                schedule_text: str,
+                task_text: str,
+                name: str = "chat-reminder",
+                action_type: str = "send_message",
+            ) -> _CronAddToolDecision:
+                return _CronAddToolDecision(
+                    use_tool=True,
+                    arguments=_CronAddToolArguments(
+                        schedule_text=schedule_text,
+                        task_text=task_text,
+                        name=name,
+                        action_type=action_type,
+                    ),
+                )
+
+            tool_registered = False
+            tool_plain = getattr(agent, "tool_plain", None)
+            if callable(tool_plain):
+                tool_plain(_cron_add_tool)
+                tool_registered = True
+            if not tool_registered:
+                tool = getattr(agent, "tool", None)
+                if callable(tool):
+                    tool(_cron_add_tool)
+                    tool_registered = True
+            if not tool_registered:
+                return None
+
+            result = await agent.run(user_message)
+            data = getattr(result, "data", None)
+            if isinstance(data, _CronAddToolDecision):
+                if not data.use_tool or data.arguments is None:
+                    return None
+                return self._build_cron_add_args(data.arguments.model_dump())
+            if isinstance(data, dict):
+                use_tool = bool(data.get("use_tool"))
+                if not use_tool:
+                    return None
+                raw_args = data.get("arguments") if isinstance(data.get("arguments"), dict) else {}
+                return self._build_cron_add_args(raw_args)
+        except Exception:
+            logger.debug("pydantic-ai cron tool inference unavailable, fallback to JSON inference", exc_info=True)
             return None
-        raw_args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
-        return self._build_cron_add_args(raw_args)
+
+        return None
+
+    async def _infer_cron_add_args_via_llm(self, user_message: str) -> dict | None:
+        system_prompt = (
+            "Ты преобразуешь запрос пользователя в вызов cron_add. "
+            "Верни строго JSON без markdown в формате: "
+            '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
+            "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments. "
+            "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
+            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'."
+        )
+
+        for _ in range(2):
+            try:
+                inference_raw = await ollama_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    stream=False,
+                    options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
+                )
+            except Exception:
+                logger.warning("llm cron inference failed", exc_info=True)
+                continue
+
+            payload = self._parse_json_object(inference_raw)
+            if not isinstance(payload, dict) or not bool(payload.get("use_tool")):
+                continue
+            raw_args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+            built_args = self._build_cron_add_args(raw_args)
+            if built_args:
+                return built_args
+
+        return None
 
     @staticmethod
     def _build_cron_add_args(raw_args: dict) -> dict | None:
