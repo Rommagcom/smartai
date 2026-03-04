@@ -463,15 +463,16 @@ class ChatService:
 
         # integration_call by service name: "получи данные из интеграции <name>"
         _int_call_m = re.search(
-            r"\b(?:получи|запроси|вызови|верни|дай)\b"
+            r"\b(?:получи|запроси|вызови|верни|дай|сделай)\b"
             r".*\bинтеграци[юиейям\w]*\s+([\w][\w-]*)"
+            r"|\b([\w][\w-]*)\s+(?:сделай|выполни)\s*(?:запрос|вызов)"
             r"|\b(?:call|get|fetch|invoke)\b"
             r".*\bintegration\s+([\w][\w-]*)",
             lowered,
         )
         if _int_call_m:
-            _svc = (_int_call_m.group(1) or _int_call_m.group(2) or "").strip()
-            _stops = {"все", "всё", "всех", "мои", "мою", "данные", "результат"}
+            _svc = (_int_call_m.group(1) or _int_call_m.group(2) or _int_call_m.group(3) or "").strip()
+            _stops = {"все", "всё", "всех", "мои", "мою", "данные", "результат", "интеграцию", "интеграции"}
             if _svc and _svc not in _stops:
                 return [{"tool": "integration_call", "arguments": {"service_name": _svc}}]
 
@@ -803,6 +804,9 @@ class ChatService:
         if isinstance(result, dict):
             items = result.get("results") if isinstance(result.get("results"), list) else None
             if items:
+                return True
+            # integration_call returns {status_code, headers, body}
+            if "status_code" in result or "body" in result:
                 return True
             text = str(result.get("text") or "").strip()
             if len(text) >= 80:
