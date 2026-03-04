@@ -355,7 +355,7 @@ class ToolOrchestratorService:
         await asyncio.sleep(0)
         service_name = str(arguments.get("service_name") or "custom-api").strip() or "custom-api"
         token = str(arguments.get("token") or "").strip() or None
-        base_url = str(arguments.get("base_url") or "").strip() or None
+        base_url = str(arguments.get("url") or arguments.get("base_url") or "").strip() or None
         endpoints_raw = arguments.get("endpoints")
         endpoints = [item for item in endpoints_raw if isinstance(item, dict)] if isinstance(endpoints_raw, list) else []
         healthcheck = arguments.get("healthcheck") if isinstance(arguments.get("healthcheck"), dict) else None
@@ -448,7 +448,7 @@ class ToolOrchestratorService:
         return integration_onboarding_service.build_draft(
             service_name=str(draft.get("service_name") or "custom-api"),
             token=str((draft.get("auth_data") or {}).get("token") or ""),
-            base_url=str((draft.get("auth_data") or {}).get("base_url") or ""),
+            base_url=str((draft.get("auth_data") or {}).get("url") or (draft.get("auth_data") or {}).get("base_url") or ""),
             endpoints=draft.get("endpoints") if isinstance(draft.get("endpoints"), list) else [],
             healthcheck=draft.get("healthcheck") if isinstance(draft.get("healthcheck"), dict) else None,
         )
@@ -831,7 +831,7 @@ class ToolOrchestratorService:
     async def _integration_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         service_name = str(arguments.get("service_name") or arguments.get("name") or "custom-api").strip()
         token = str(arguments.get("token") or "").strip()
-        base_url = str(arguments.get("base_url") or "").strip()
+        base_url = str(arguments.get("url") or arguments.get("base_url") or "").strip()
         method = str(arguments.get("method") or "GET").strip().upper()
         if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
             method = "GET"
@@ -887,7 +887,7 @@ class ToolOrchestratorService:
         if token:
             auth_data["token"] = token
         if base_url:
-            auth_data["base_url"] = base_url
+            auth_data["url"] = base_url
 
         integration = ApiIntegration(
             user_id=user.id,

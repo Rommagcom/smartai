@@ -73,7 +73,7 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 
 <integration_add>
 <service_name>НАЗВАНИЕ_СЕРВИСА</service_name>
-<base_url>URL_ЭНДПОИНТА</base_url>
+<url>URL_ЭНДПОИНТА</url>
 <method>GET</method>
 <headers>{"Accept": "application/json"}</headers>
 <params>{"key": "value"}</params>
@@ -85,7 +85,7 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 
 Поля:
 - service_name (обязательно) — короткое имя сервиса (напр. nationalbank-rates)
-- base_url — базовый URL для API-вызова
+- url — URL для API-вызова (полный путь, включая path)
 - method — HTTP-метод: GET (по умолчанию), POST, PUT, DELETE
 - headers — JSON-объект заголовков запроса. По умолчанию {"Accept": "application/json"}. Для XML API используй {"Accept": "application/xml"}
 - params — JSON-объект query-параметров. Поддерживаются шаблоны: {{today}} — текущая дата (DD.MM.YYYY), {{today_iso}} — дата (YYYY-MM-DD), {{now}} — текущее время ISO. При вызове integration_call параметры автоматически подставляются в URL-шаблоны {key} и добавляются как query-параметры
@@ -94,11 +94,11 @@ DEFAULT_SOUL_TEMPLATE = """Ты — персональный AI-ассистен
 
 ПРИМЕРЫ:
 - "Подключи API курсов https://api.example.com/rates" →
-  <integration_add><service_name>exchange-rates</service_name><base_url>https://api.example.com/rates</base_url><method>GET</method><headers>{"Accept": "application/json"}</headers><schedule></schedule></integration_add>
+  <integration_add><service_name>exchange-rates</service_name><url>https://api.example.com/rates</url><method>GET</method><headers>{"Accept": "application/json"}</headers><schedule></schedule></integration_add>
 - "Создай интеграцию nationalbank https://nationalbank.kz/rss/get_rates.cfm?fdate={date} где date текущая дата" →
-  <integration_add><service_name>nationalbank-rates</service_name><base_url>https://nationalbank.kz/rss/get_rates.cfm</base_url><method>GET</method><headers>{"Accept": "application/xml"}</headers><schedule></schedule><params>{"fdate": "{{today}}"}</params></integration_add>
+  <integration_add><service_name>nationalbank-rates</service_name><url>https://nationalbank.kz/rss/get_rates.cfm</url><method>GET</method><headers>{"Accept": "application/xml"}</headers><schedule></schedule><params>{"fdate": "{{today}}"}</params></integration_add>
 - "Подключи API курсов и вызывай каждый день в 6 утра" →
-  <integration_add><service_name>exchange-rates</service_name><base_url>https://api.example.com/rates</base_url><method>GET</method><headers>{"Accept": "application/json"}</headers><schedule>0 6 * * *</schedule></integration_add>
+  <integration_add><service_name>exchange-rates</service_name><url>https://api.example.com/rates</url><method>GET</method><headers>{"Accept": "application/json"}</headers><schedule>0 6 * * *</schedule></integration_add>
 
 Пиши user-friendly текст ответа ПЕРЕД или ПОСЛЕ блока <integration_add>.
 Блок <integration_add> будет автоматически обработан и скрыт от пользователя.
