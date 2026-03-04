@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import logging
 from time import perf_counter
 
+from redis.asyncio import Redis
 from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
@@ -24,6 +25,23 @@ logger = logging.getLogger(__name__)
 class SchedulerService:
     def __init__(self) -> None:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
+        self._redis: Redis | None = None
+
+    def _get_redis(self) -> Redis:
+        if self._redis is None:
+            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        return self._redis
+
+    async def _acquire_execution_lock(self, *, job_id: str, action_type: str) -> bool:
+        lock_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
+        lock_key = f"scheduler:exec-lock:{job_id}:{action_type}:{lock_bucket}"
+        try:
+            redis = self._get_redis()
+            acquired = await redis.set(lock_key, "1", nx=True, ex=90)
+            return bool(acquired)
+        except Exception:
+            logger.debug("scheduler execution lock unavailable", exc_info=True)
+            return True
 
     def start(self) -> None:
         started_at = perf_counter()
@@ -210,7 +228,12 @@ class SchedulerService:
                 trigger=trigger,
                 id=job_id,
                 replace_existing=True,
-                kwargs={"user_id": user_id, "action_type": action_type, "payload": payload},
+                kwargs={
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "action_type": action_type,
+                    "payload": payload,
+                },
             )
             success = True
             logger.info(
@@ -233,11 +256,27 @@ class SchedulerService:
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
 
-    async def execute_action(self, user_id: str, action_type: str, payload: dict) -> None:
+    async def execute_action(self, job_id: str, user_id: str, action_type: str, payload: dict) -> None:
         started_at = perf_counter()
         success = False
         now = datetime.now(timezone.utc).isoformat()
         try:
+            if not await self._acquire_execution_lock(job_id=str(job_id), action_type=str(action_type or "")):
+                logger.info(
+                    "scheduler duplicate execution skipped",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "execute_deduplicated",
+                            "job_id": str(job_id),
+                            "user_id": user_id,
+                            "action_type": action_type,
+                        }
+                    },
+                )
+                success = True
+                return
+
             if settings.DEV_VERBOSE_LOGGING:
                 logger.info(
                     "scheduler execute action start",
@@ -245,6 +284,7 @@ class SchedulerService:
                         "context": {
                             "component": "scheduler",
                             "event": "execute_start",
+                            "job_id": str(job_id),
                             "user_id": user_id,
                             "action_type": action_type,
                             "payload": payload,
@@ -290,6 +330,7 @@ class SchedulerService:
                         "context": {
                             "component": "scheduler",
                             "event": "execute_done",
+                            "job_id": str(job_id),
                             "user_id": user_id,
                             "action_type": action_type,
                         }
@@ -300,7 +341,7 @@ class SchedulerService:
                 component="scheduler",
                 severity="warning",
                 message="scheduler execute action failed",
-                details={"action_type": action_type, "user_id": user_id, "error": str(exc)},
+                details={"job_id": str(job_id), "action_type": action_type, "user_id": user_id, "error": str(exc)},
             )
             raise
         finally:
