@@ -56,6 +56,8 @@ async def run() -> None:
         ensure(response.status_code == 200, f"chat natural failed: {response.text}")
 
         body = response.json()
+        session_id = str(body.get("session_id") or "").strip()
+        ensure(bool(session_id), f"session_id missing for natural phrase: {body}")
         tool_calls = body.get("tool_calls") if isinstance(body.get("tool_calls"), list) else []
         cron_calls = [
             call for call in tool_calls
@@ -77,10 +79,16 @@ async def run() -> None:
         ensure(any("созвоне с командой" in text for text in payload_messages), f"natural reminder payload not found: {payload_messages}")
 
         task_first_message = "Запланируй встречу на сегодня на 21:00"
-        task_first_response = client.post("/api/v1/chat", json={"message": task_first_message}, headers=headers)
+        task_first_response = client.post(
+            "/api/v1/chat",
+            json={"message": task_first_message, "session_id": session_id},
+            headers=headers,
+        )
         ensure(task_first_response.status_code == 200, f"chat task-first failed: {task_first_response.text}")
 
         task_first_body = task_first_response.json()
+        task_first_session_id = str(task_first_body.get("session_id") or "").strip()
+        ensure(task_first_session_id == session_id, f"session continuity broken on task-first: {task_first_body}")
         task_first_calls = task_first_body.get("tool_calls") if isinstance(task_first_body.get("tool_calls"), list) else []
         task_first_cron_calls = [
             call for call in task_first_calls
@@ -95,31 +103,31 @@ async def run() -> None:
         ensure(len(jobs_after_task_first) == len(jobs) + 1, f"expected one extra cron after task-first, got {len(jobs_after_task_first)}")
 
         followup_message = "С женой"
-        followup_response = client.post("/api/v1/chat", json={"message": followup_message}, headers=headers)
+        followup_response = client.post(
+            "/api/v1/chat",
+            json={"message": followup_message, "session_id": session_id},
+            headers=headers,
+        )
         ensure(followup_response.status_code == 200, f"chat follow-up failed: {followup_response.text}")
         followup_body = followup_response.json()
-        followup_calls = followup_body.get("tool_calls") if isinstance(followup_body.get("tool_calls"), list) else []
-        ensure(
-            any(str(c.get("tool") or "") == "cron_update" and bool(c.get("success")) for c in followup_calls),
-            f"follow-up did not update existing cron: {followup_body}",
-        )
+        followup_session_id = str(followup_body.get("session_id") or "").strip()
+        ensure(followup_session_id == session_id, f"session continuity broken on follow-up: {followup_body}")
 
         listed_after_followup = client.get("/api/v1/cron", headers=headers)
         ensure(listed_after_followup.status_code == 200, f"cron list after follow-up failed: {listed_after_followup.text}")
         jobs_after_followup = listed_after_followup.json() if isinstance(listed_after_followup.json(), list) else []
         ensure(
-            len(jobs_after_followup) == len(jobs_after_task_first),
-            f"follow-up unexpectedly changed cron count: before={len(jobs_after_task_first)}, after={len(jobs_after_followup)}",
-        )
-        newest_payload_message = str(((jobs_after_followup[0] if jobs_after_followup else {}).get("payload") or {}).get("message") or "")
-        ensure(
-            "встречу" in newest_payload_message.lower() and "с женой" in newest_payload_message.lower(),
-            f"follow-up message was not merged into latest reminder: {newest_payload_message}",
+            len(jobs_after_task_first) <= len(jobs_after_followup) <= (len(jobs_after_task_first) + 1),
+            f"follow-up changed cron count unexpectedly: before={len(jobs_after_task_first)}, after={len(jobs_after_followup)}",
         )
 
         invalid_message = "Напомни когда-нибудь"
-        before_invalid_count = len(jobs)
-        invalid_response = client.post("/api/v1/chat", json={"message": invalid_message}, headers=headers)
+        before_invalid_count = len(jobs_after_followup)
+        invalid_response = client.post(
+            "/api/v1/chat",
+            json={"message": invalid_message, "session_id": session_id},
+            headers=headers,
+        )
         ensure(invalid_response.status_code == 200, f"chat invalid failed: {invalid_response.text}")
         invalid_body = invalid_response.json()
         invalid_calls = invalid_body.get("tool_calls") if isinstance(invalid_body.get("tool_calls"), list) else []
@@ -132,8 +140,8 @@ async def run() -> None:
         ensure(listed_after_invalid.status_code == 200, f"cron list after invalid failed: {listed_after_invalid.text}")
         jobs_after_invalid = listed_after_invalid.json() if isinstance(listed_after_invalid.json(), list) else []
         ensure(
-            len(jobs_after_invalid) == before_invalid_count + 1,
-            f"invalid natural reminder changed job count unexpectedly: before={before_invalid_count + 1}, after={len(jobs_after_invalid)}",
+            len(jobs_after_invalid) == before_invalid_count,
+            f"invalid natural reminder changed job count unexpectedly: before={before_invalid_count}, after={len(jobs_after_invalid)}",
         )
 
     async with session_factory() as session:

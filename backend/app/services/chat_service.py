@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.cron_job import CronJob
+from app.models.message import Message
 from app.models.user import User
 from app.services.memory_service import memory_service
 from app.services.ollama_client import ollama_client
@@ -778,7 +779,16 @@ class ChatService:
             return None
 
         recent = await memory_service.get_recent_messages(db, user.id, session_id=session_id, limit=8)
-        if len(recent) < 3:
+        if len(recent) < 2:
+            result = await db.execute(
+                select(Message)
+                .where(Message.user_id == user.id)
+                .order_by(Message.created_at.desc())
+                .limit(12)
+            )
+            recent = list(reversed(result.scalars().all()))
+
+        if len(recent) < 2:
             return None
 
         last_user = recent[-1]
@@ -787,39 +797,12 @@ class ChatService:
         if self._normalize_whitespace(str(last_user.content or "")) != self._normalize_whitespace(followup_text):
             return None
 
-        cron_call: dict | None = None
-        for item in reversed(recent[:-1]):
-            if str(item.role or "") != "assistant":
-                continue
-            meta = item.meta if isinstance(item.meta, dict) else {}
-            tool_calls = meta.get("tool_calls") if isinstance(meta.get("tool_calls"), list) else []
-            for call in reversed(tool_calls):
-                if not isinstance(call, dict):
-                    continue
-                if str(call.get("tool") or "").strip().lower() != "cron_add":
-                    continue
-                if not bool(call.get("success")):
-                    continue
-                result = call.get("result") if isinstance(call.get("result"), dict) else {}
-                if str(result.get("id") or "").strip():
-                    cron_call = call
-                    break
-            if cron_call:
-                break
-
-        if not cron_call:
-            return None
-
-        result = cron_call.get("result") if isinstance(cron_call.get("result"), dict) else {}
-        cron_id_raw = str(result.get("id") or "").strip()
-        if not cron_id_raw:
-            return None
-        try:
-            cron_id = UUID(cron_id_raw)
-        except ValueError:
-            return None
-
-        cron_result = await db.execute(select(CronJob).where(CronJob.id == cron_id, CronJob.user_id == user.id, CronJob.is_active.is_(True)))
+        cron_result = await db.execute(
+            select(CronJob)
+            .where(CronJob.user_id == user.id, CronJob.is_active.is_(True))
+            .order_by(CronJob.created_at.desc())
+            .limit(1)
+        )
         cron_job = cron_result.scalar_one_or_none()
         if cron_job is None:
             return None
