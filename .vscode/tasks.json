@@ -145,6 +145,29 @@
 				"cd backend && C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_chat_cron_add_natural"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "test-cron-natural",
+			"type": "shell",
+			"command": "cmd /c \"cd C:\\Repositories\\SmartAi\\backend&& set WORKER_ENABLED=0&& set WS_FANOUT_REDIS_ENABLED=0&& set SCHEDULER_ENABLED=0&& del /q smoke_chat_cron_add_natural.db 2>nul && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_cron_add_natural\""
+		},
+		{
+			"label": "test-cron-natural-v2",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_cron_add_natural"
+			]
+		},
+		{
+			"label": "test-cron-natural-v3",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_cron_add_natural"
+			]
 		}
 	]
 }

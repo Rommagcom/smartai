@@ -3,7 +3,7 @@ import re
 import asyncio
 import json
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,21 +29,46 @@ logger = logging.getLogger(__name__)
 
 
 class _CronAddToolArguments(BaseModel):
-    schedule_text: str
-    task_text: str
-    name: str = "chat-reminder"
-    action_type: str = "send_message"
+    schedule_text: str = Field(description="Текст расписания, например: 'каждый день в 9:00', 'через 30 минут', 'сегодня в 21:00'")
+    task_text: str = Field(description="Текст задачи или напоминания")
+    name: str = Field(default="chat-reminder", description="Имя задачи")
+    action_type: str = Field(default="send_message", description="Тип действия")
 
 
 class _CronAddToolDecision(BaseModel):
-    use_tool: bool = False
-    arguments: _CronAddToolArguments | None = None
+    use_tool: bool = Field(default=False, description="true если нужно создать напоминание/расписание")
+    arguments: _CronAddToolArguments | None = Field(default=None, description="Аргументы для cron_add")
 
 _URL_RE = re.compile(
     r"(?:https?://[^\s]+)"
     r"|(?:\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.(?:com|org|net|io|dev|kz|ru|ua|uk|de|fr|me|info|biz|pro|co|app|ai|cloud)\b)",
     re.IGNORECASE,
 )
+
+# Regex for parsing <cron_add> XML tags from LLM responses
+_CRON_XML_RE = re.compile(
+    r"<cron_add>\s*"
+    r"<cron_expression>\s*(?P<cron_expr>[^<]+?)\s*</cron_expression>\s*"
+    r"<message>\s*(?P<message>[^<]+?)\s*</message>\s*"
+    r"</cron_add>",
+    re.IGNORECASE | re.DOTALL,
+)
+_CRON_XML_STRIP_RE = re.compile(r"<cron_add>[\s\S]*?</cron_add>", re.IGNORECASE)
+
+# Regex for parsing <integration_add> XML tags from LLM responses
+_INTEGRATION_XML_RE = re.compile(
+    r"<integration_add>\s*"
+    r"<service_name>\s*(?P<service_name>[^<]+?)\s*</service_name>\s*"
+    r"(?:<base_url>\s*(?P<base_url>[^<]*?)\s*</base_url>\s*)?"
+    r"(?:<token>\s*(?P<token>[^<]*?)\s*</token>\s*)?"
+    r"(?:<method>\s*(?P<method>[^<]*?)\s*</method>\s*)?"
+    r"(?:<headers>\s*(?P<headers>[^<]*?)\s*</headers>\s*)?"
+    r"(?:<params>\s*(?P<params>[^<]*?)\s*</params>\s*)?"
+    r"(?:<schedule>\s*(?P<schedule>[^<]*?)\s*</schedule>\s*)?"
+    r"</integration_add>",
+    re.IGNORECASE | re.DOTALL,
+)
+_INTEGRATION_XML_STRIP_RE = re.compile(r"<integration_add>[\s\S]*?</integration_add>", re.IGNORECASE)
 
 
 class ChatService:
@@ -265,12 +290,17 @@ class ChatService:
             r"\bв\s+фоне\b",
             r"\bпостав[ьт].*очеред",
             r"\bнапомин|напомни|календар|расписан|запланир",
+            r"\bсоздай\b.*\b(?:на|в)\s+\d{1,2}",
+            r"\bremind(?:\s+me)?\b|\breminder\b|\bremainder\b|\bschedul(?:e|ed)\b|\bset\s+(?:a\s+)?reminder\b",
+            r"\b(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder)\b",
             r"\bcron(?:[_\s-]?(?:add|list|delete|delete_all))?\b",
             r"\bintegration|api\b",
+            r"интеграци|подключи.*(?:api|сервис|url)|создай.*(?:api|интеграци)",
             r"\bdoc[_\s-]?search|документ\b",
             r"\bexecute[_\s-]?python|python\b",
             r"\bпамят|(?:что\s+)?(?:ты\s+)?помниш|знаешь\s+обо\s+мне|мои\s+факт",
             r"\bудали|удалить|отмени|отключи|убери|убрать|останови|выключи\b",
+            r"\bdelete\b|\bremove\b|\blist\b|\bshow\b",
             r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
             r"\bмои\s+(?:задач|напоминан|cron)|список\s+(?:задач|напоминан)",
         ]
@@ -283,9 +313,15 @@ class ChatService:
             return False
         cron_add_patterns = [
             r"\bнапомни|напомин|запланир|поставь\s+напомин",
+            r"\bсоздай\b.*\b(?:на|в)\s+\d{1,2}",
             r"\bчерез\s+\d+\s*(?:мин|минут|час|часа|часов)",
-            r"\bin\s+\d+\s*(?:minutes?|hours?)",
+            r"\bin\s+\d+\s*(?:minutes?|hours?|seconds?|days?|weeks?)",
             r"\bcron\s*add|cron_add\b",
+            r"\bremind(?:\s+me)?\b|\breminder\b|\bremainder\b|\bschedul(?:e|ed)\b|\bset\s+(?:a\s+)?reminder\b",
+            r"\b(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder)\b",
+            r"\b(?:today|tomorrow)\s+at\s+\d",
+            r"\bat\s+\d{1,2}(?::\d{2})?\s+(?:am|pm)\b",
+            r"\bat\s+\d{1,2}:\d{2}\b",
         ]
         return any(re.search(pattern, lowered) for pattern in cron_add_patterns)
 
@@ -405,6 +441,25 @@ class ChatService:
         if re.search(r"\bудал[иь].*вс[её].*напомин|очист[иь].*(напомин|задач)|delete\s+all\s+reminder", lowered):
             return [{"tool": "cron_delete_all", "arguments": {}}]
 
+        if re.search(
+            r"\bудал[иь].*вс[её].*интеграц"
+            r"|очист[иь].*интеграц"
+            r"|отключ[иь].*вс[её].*интеграц"
+            r"|delete\s+all\s+(?:my\s+)?integrations?"
+            r"|remove\s+all\s+(?:my\s+)?integrations?",
+            lowered,
+        ):
+            return [{"tool": "integrations_delete_all", "arguments": {}}]
+
+        if re.search(
+            r"\b(покажи|список|какие|мои)\b.*\bинтеграц"
+            r"|list\s+(?:my\s+)?integrations?"
+            r"|show\s+(?:my\s+)?integrations?"
+            r"|my\s+integrations",
+            lowered,
+        ):
+            return [{"tool": "integrations_list", "arguments": {}}]
+
         if re.search(r"\b(покажи|список|какие)\b.*\b(напомин|задач|cron)\b|\bмои\s+(напомин|задач|cron)", lowered):
             return [{"tool": "cron_list", "arguments": {}}]
 
@@ -421,7 +476,8 @@ class ChatService:
             return None
 
         reminder_intent = re.search(
-            r"\b(?:напомни|напомин|запланируй|поставь\s+напомин|создай\s+напомин|remind|set\s+reminder)\b",
+            r"\b(?:напомни|напомин|запланируй|поставь\s+напомин|создай\s+напомин"
+            r"|remind|set\s+(?:a\s+)?reminder|(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder))\b",
             lowered,
         )
         if not reminder_intent:
@@ -460,7 +516,9 @@ class ChatService:
             return None
 
         reminder_intent = re.search(
-            r"\b(?:напомни(?:\s+мне)?|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?|запланируй|запланировать|remind\s+me|set\s+reminder|schedule)\b",
+            r"\b(?:напомни(?:\s+мне)?|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?|запланируй|запланировать"
+            r"|remind\s+me|set\s+(?:a\s+)?reminder|schedule"
+            r"|(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder))\b",
             raw,
             flags=re.IGNORECASE,
         )
@@ -698,6 +756,146 @@ class ChatService:
             "Не удалось сформировать итоговый текст ответа. "
             "Попробуйте уточнить запрос."
         )
+
+    @staticmethod
+    def _extract_cron_xml_tags(text: str) -> dict | None:
+        """Extract <cron_add> XML tags from LLM response.
+
+        Returns dict with 'cron_expression' and 'message' if found, else None.
+        """
+        m = _CRON_XML_RE.search(text or "")
+        if not m:
+            return None
+        cron_expr = m.group("cron_expr").strip()
+        message = m.group("message").strip()
+        if not cron_expr or not message:
+            return None
+        return {"cron_expression": cron_expr, "message": message}
+
+    @staticmethod
+    def _strip_cron_xml_tags(text: str) -> str:
+        """Remove <cron_add>...</cron_add> XML blocks from text."""
+        cleaned = _CRON_XML_STRIP_RE.sub("", text or "").strip()
+        return cleaned if cleaned else text
+
+    @staticmethod
+    def _extract_integration_xml_tags(text: str) -> dict | None:
+        """Extract <integration_add> XML tags from LLM response.
+
+        Returns dict with 'service_name' and optionally 'base_url', 'token',
+        'method', 'headers', 'params', 'schedule'.
+        Falls back to JSON code-block parsing if XML tags are absent.
+        """
+        m = _INTEGRATION_XML_RE.search(text or "")
+        if m:
+            service_name = (m.group("service_name") or "").strip()
+            if not service_name:
+                return None
+            result: dict = {"service_name": service_name}
+            for field in ("base_url", "token", "method", "schedule"):
+                val = (m.group(field) or "").strip()
+                if val:
+                    result[field] = val
+            # headers and params — try to parse as JSON dict
+            for json_field in ("headers", "params"):
+                raw = (m.group(json_field) or "").strip()
+                if raw:
+                    try:
+                        import json as _json
+                        parsed = _json.loads(raw)
+                        if isinstance(parsed, dict):
+                            result[json_field] = parsed
+                    except Exception:
+                        result[json_field] = raw
+            return result
+
+        # Fallback: detect JSON code blocks with integration_add command
+        return ChatService._extract_integration_json_fallback(text)
+
+    @staticmethod
+    def _extract_integration_json_fallback(text: str) -> dict | None:
+        """Parse JSON code-block fallback when LLM outputs integration_add as JSON
+        instead of XML tags. Handles formats like:
+          ```json\n{"command": "integration_add", "arguments": {...}}\n```
+        """
+        import json as _json
+
+        normalized = text or ""
+        # Find JSON code blocks
+        json_blocks = re.findall(
+            r"```(?:json)?\s*\n?(\{[\s\S]*?\})\s*```",
+            normalized,
+            re.IGNORECASE,
+        )
+        if not json_blocks:
+            return None
+
+        for block in json_blocks:
+            try:
+                data = _json.loads(block)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+
+            # Check if it's an integration_add command
+            cmd = str(data.get("command") or data.get("tool") or "").strip().lower()
+            if cmd not in ("integration_add", "integration-add", "integrationadd"):
+                continue
+
+            args = data.get("arguments") or data.get("args") or data.get("params") or {}
+            if not isinstance(args, dict):
+                continue
+
+            # Map common LLM field name variants to canonical names
+            _FIELD_ALIASES: dict[str, list[str]] = {
+                "service_name": ["service_name", "name", "service", "serviceName"],
+                "base_url": ["base_url", "url", "baseUrl", "base-url", "endpoint"],
+                "token": ["token", "api_key", "apiKey", "auth_token", "key"],
+                "method": ["method", "http_method", "httpMethod"],
+                "schedule": ["schedule", "cron", "cron_expression"],
+            }
+
+            result: dict = {}
+            for canonical, aliases in _FIELD_ALIASES.items():
+                for alias in aliases:
+                    val = args.get(alias)
+                    if val and isinstance(val, str):
+                        result[canonical] = val.strip()
+                        break
+
+            if not result.get("service_name"):
+                continue
+
+            # headers
+            for hdr_key in ("headers",):
+                hdr = args.get(hdr_key)
+                if isinstance(hdr, dict) and hdr:
+                    result["headers"] = hdr
+
+            # params
+            for prm_key in ("params", "query_params", "queryParams"):
+                prm = args.get(prm_key)
+                if isinstance(prm, dict) and prm:
+                    result["params"] = prm
+                    break
+
+            return result
+
+        return None
+
+    @staticmethod
+    def _strip_integration_xml_tags(text: str) -> str:
+        """Remove <integration_add>...</integration_add> XML blocks and JSON
+        code-blocks with integration_add command from text."""
+        cleaned = _INTEGRATION_XML_STRIP_RE.sub("", text or "").strip()
+        # Also strip JSON code blocks containing integration_add command
+        _JSON_INT_BLOCK = re.compile(
+            r'```(?:json)?\s*\n?\{[\s\S]*?["\x27](?:command|tool)["\x27]\s*:\s*["\x27]integration[_\-]?add["\x27][\s\S]*?\}\s*```',
+            re.IGNORECASE,
+        )
+        cleaned = _JSON_INT_BLOCK.sub("", cleaned).strip()
+        return cleaned if cleaned else text
 
     @staticmethod
     def _timezone_answer(user: User) -> str:
@@ -1261,6 +1459,36 @@ class ChatService:
                 )
                 return f"Готово: напоминание создано — {task_text}."
 
+            if tool == "integration_add":
+                svc = cls._truncate_text(
+                    str(result.get("service_name") or "custom-api"), 120,
+                )
+                ep_count = len(result.get("endpoints") or [])
+                schedule = str(result.get("schedule") or "").strip()
+                parts = [f"Готово: интеграция создана — {svc} ({ep_count} endpoint{'s' if ep_count != 1 else ''})."]
+                if schedule:
+                    parts.append(f"Расписание: {schedule}")
+                return " ".join(parts)
+
+            if tool == "integrations_delete_all":
+                deleted_count = int(result.get("deleted_count") or 0)
+                if deleted_count <= 0:
+                    return "У вас нет подключённых интеграций."
+                return f"Готово: удалил все интеграции ({deleted_count})."
+
+            if tool == "integrations_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "Сейчас подключённых интеграций нет."
+                lines = ["Ваши интеграции:"]
+                for item in items[:8]:
+                    svc_name = str(item.get("service_name") or "custom-api").strip()
+                    ep_count = len(item.get("endpoints") or [])
+                    lines.append(f"- {svc_name} ({ep_count} endpoint{'s' if ep_count != 1 else ''})")
+                if len(items) > 8:
+                    lines.append(f"- …и ещё {len(items) - 8}")
+                return "\n".join(lines)
+
             if tool == "memory_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)
                 if deleted_count <= 0:
@@ -1494,6 +1722,24 @@ class ChatService:
             )
             return fast_shortcut
 
+        # Deterministic: parse structured code-block tool calls from user
+        # message (e.g. ```cron_add ...```) before any LLM interaction.
+        fast_tool = await self._maybe_fast_tool_answer(
+            db=db,
+            user=user,
+            user_message=user_message,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if fast_tool:
+            answer, ft_tool_calls, ft_artifacts = fast_tool
+            self._dev_verbose_log(
+                "respond_fast_tool",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(ft_tool_calls),
+            )
+            return answer, [], [], ft_tool_calls, ft_artifacts
+
         # For tool-intent messages, try tool-chain first and avoid expensive
         # context building when the final answer can be produced from tools.
         needs_tools = self._should_attempt_tool_planning(user_message)
@@ -1542,6 +1788,40 @@ class ChatService:
             logger.warning("LLM chat call failed", exc_info=True)
             answer = self._llm_unavailable_fallback()
         answer = self._sanitize_llm_answer(answer)
+
+        # --- LLM inline <cron_add> XML: if LLM produced cron tags, execute them ---
+        inline_cron_result = await self._maybe_execute_llm_inline_cron(
+            db=db,
+            user=user,
+            llm_answer=answer,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if inline_cron_result:
+            ic_answer, ic_tool_calls, ic_artifacts = inline_cron_result
+            self._dev_verbose_log(
+                "respond_llm_inline_cron",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(ic_tool_calls),
+            )
+            return ic_answer, used_memory_ids, rag_sources, ic_tool_calls, ic_artifacts
+
+        # --- LLM inline <integration_add> XML: if LLM produced tags, execute them ---
+        inline_int_result = await self._maybe_execute_llm_inline_integration(
+            db=db,
+            user=user,
+            llm_answer=answer,
+            manual_tool_calls=manual_tool_calls,
+        )
+        if inline_int_result:
+            ii_answer, ii_tool_calls, ii_artifacts = inline_int_result
+            self._dev_verbose_log(
+                "respond_llm_inline_integration",
+                user_id=str(user.id),
+                session_id=str(session_id),
+                tool_calls_count=len(ii_tool_calls),
+            )
+            return ii_answer, used_memory_ids, rag_sources, ii_tool_calls, ii_artifacts
 
         llm_hint_tool_answer = await self._maybe_execute_llm_tool_hint(
             db=db,
@@ -1725,6 +2005,12 @@ class ChatService:
         return answer, tool_calls, artifacts
 
     async def _infer_cron_add_args_via_pydantic_ai_tool(self, user_message: str) -> dict | None:
+        """Use pydantic-ai Agent with output_type to extract cron_add arguments.
+
+        Under the hood pydantic-ai sends _CronAddToolDecision JSON-schema as
+        an output-tool to the LLM.  The model 'calls' this tool to produce the
+        structured result — which is the Pydantic AI Tool pattern.
+        """
         if Agent is None or OpenAIModel is None:
             return None
 
@@ -1736,58 +2022,32 @@ class ChatService:
             )
             agent = Agent(
                 model=model,
-                result_type=_CronAddToolDecision,
+                output_type=_CronAddToolDecision,
                 system_prompt=(
-                    "Ты должен решить, вызывать ли инструмент cron_add. "
-                    "Если запрос пользователя содержит намерение создать напоминание/расписание, "
-                    "вызови tool cron_add с аргументами schedule_text и task_text. "
+                    "Ты должен решить, нужно ли создать напоминание/cron-задачу. "
+                    "Если запрос пользователя содержит намерение создать напоминание или расписание, "
+                    "верни use_tool=true и заполни arguments с schedule_text и task_text. "
+                    "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
+                    "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
                     "Если данных недостаточно, верни use_tool=false."
                 ),
             )
 
-            def _cron_add_tool(
-                schedule_text: str,
-                task_text: str,
-                name: str = "chat-reminder",
-                action_type: str = "send_message",
-            ) -> _CronAddToolDecision:
-                return _CronAddToolDecision(
-                    use_tool=True,
-                    arguments=_CronAddToolArguments(
-                        schedule_text=schedule_text,
-                        task_text=task_text,
-                        name=name,
-                        action_type=action_type,
-                    ),
-                )
-
-            tool_registered = False
-            tool_plain = getattr(agent, "tool_plain", None)
-            if callable(tool_plain):
-                tool_plain(_cron_add_tool)
-                tool_registered = True
-            if not tool_registered:
-                tool = getattr(agent, "tool", None)
-                if callable(tool):
-                    tool(_cron_add_tool)
-                    tool_registered = True
-            if not tool_registered:
-                return None
-
             result = await agent.run(user_message)
-            data = getattr(result, "data", None)
-            if isinstance(data, _CronAddToolDecision):
-                if not data.use_tool or data.arguments is None:
+            decision = result.output
+
+            if isinstance(decision, _CronAddToolDecision):
+                if not decision.use_tool or decision.arguments is None:
                     return None
-                return self._build_cron_add_args(data.arguments.model_dump())
-            if isinstance(data, dict):
-                use_tool = bool(data.get("use_tool"))
+                return self._build_cron_add_args(decision.arguments.model_dump())
+            if isinstance(decision, dict):
+                use_tool = bool(decision.get("use_tool"))
                 if not use_tool:
                     return None
-                raw_args = data.get("arguments") if isinstance(data.get("arguments"), dict) else {}
+                raw_args = decision.get("arguments") if isinstance(decision.get("arguments"), dict) else {}
                 return self._build_cron_add_args(raw_args)
         except Exception:
-            logger.debug("pydantic-ai cron tool inference unavailable, fallback to JSON inference", exc_info=True)
+            logger.debug("pydantic-ai cron tool inference failed, fallback to JSON inference", exc_info=True)
             return None
 
         return None
@@ -1858,6 +2118,108 @@ class ChatService:
         except Exception:
             logger.warning(error_log_message, exc_info=True)
             return None
+
+    async def _maybe_execute_llm_inline_cron(
+        self,
+        db: AsyncSession,
+        user: User,
+        llm_answer: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        """If the LLM response contains <cron_add> XML tags, execute the cron
+        creation and return the cleaned answer with tag content stripped."""
+        parsed = self._extract_cron_xml_tags(llm_answer)
+        if not parsed:
+            return None
+
+        cron_expression = parsed["cron_expression"]
+        message = parsed["message"]
+
+        self._dev_verbose_log(
+            "llm_inline_cron_detected",
+            cron_expression=cron_expression,
+            message_preview=message[:120],
+        )
+
+        cron_add_args = {
+            "cron_expression": cron_expression,
+            "task_text": message,
+            "name": "chat-reminder",
+            "action_type": "send_message",
+        }
+
+        planned_calls = await self._execute_single_cron_add(
+            db=db,
+            user=user,
+            cron_add_args=cron_add_args,
+            error_log_message="llm inline cron execution failed",
+        )
+        if planned_calls is None:
+            return None
+
+        if not any(bool(call.get("success")) for call in planned_calls):
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+
+        # Strip the <cron_add> XML block from the answer shown to the user
+        clean_answer = self._strip_cron_xml_tags(llm_answer)
+        if not clean_answer.strip():
+            clean_answer = self._format_deterministic_tool_answer(planned_calls) or "Готово: создал напоминание."
+
+        self._dev_verbose_log(
+            "llm_inline_cron_executed",
+            cron_expression=cron_expression,
+            message_preview=message[:120],
+        )
+        return clean_answer, tool_calls, artifacts
+
+    async def _maybe_execute_llm_inline_integration(
+        self,
+        db: AsyncSession,
+        user: User,
+        llm_answer: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        """If the LLM response contains <integration_add> XML tags, execute the
+        integration creation and return the cleaned answer with tag content stripped."""
+        parsed = self._extract_integration_xml_tags(llm_answer)
+        if not parsed:
+            return None
+
+        self._dev_verbose_log(
+            "llm_inline_integration_detected",
+            service_name=parsed["service_name"],
+            base_url=parsed.get("base_url", ""),
+        )
+
+        try:
+            planned_calls = await self._tool_orchestrator.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=[{"tool": "integration_add", "arguments": parsed}],
+                max_steps=1,
+            )
+        except Exception:
+            logger.warning("llm inline integration_add execution failed", exc_info=True)
+            return None
+
+        if not planned_calls or not any(bool(c.get("success")) for c in planned_calls):
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+
+        clean_answer = self._strip_integration_xml_tags(llm_answer)
+        if not clean_answer.strip():
+            clean_answer = self._format_deterministic_tool_answer(planned_calls) or "Готово: интеграция создана."
+
+        self._dev_verbose_log(
+            "llm_inline_integration_executed",
+            service_name=parsed["service_name"],
+        )
+        return clean_answer, tool_calls, artifacts
 
 
 chat_service = ChatService()

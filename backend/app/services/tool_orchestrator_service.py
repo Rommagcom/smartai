@@ -126,6 +126,7 @@ class ToolOrchestratorService:
             _dev_verbose_log("step_start", tool=tool, arguments=arguments)
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
             arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
+            arguments = self._coerce_argument_types(tool, arguments)
             if tool not in handlers:
                 results.append(
                     {
@@ -208,6 +209,54 @@ class ToolOrchestratorService:
         if not merged.get("draft_id") and onboarding.get("draft_id"):
             merged["draft_id"] = onboarding["draft_id"]
         return merged
+
+    @staticmethod
+    def _coerce_argument_types(tool: str, arguments: dict) -> dict:
+        """Coerce LLM argument types to match the schema.
+
+        LLM planners sometimes send booleans for string fields (e.g.
+        ``token: true`` instead of omitting the field).  This pre-validation
+        step drops boolean values for string-typed schema properties so the
+        downstream ``validate_input`` doesn't reject them.
+        """
+        contract = skills_registry_service.get_contract(tool)
+        if not contract:
+            return arguments
+
+        schema = contract.get("input_schema")
+        if not isinstance(schema, dict):
+            return arguments
+
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return arguments
+
+        coerced: dict = {}
+        for key, value in arguments.items():
+            prop_schema = properties.get(key)
+            if not isinstance(prop_schema, dict):
+                coerced[key] = value
+                continue
+
+            expected = str(prop_schema.get("type") or "").strip()
+
+            # Boolean sent for a string field → meaningless, drop it
+            if expected == "string" and isinstance(value, bool):
+                continue
+
+            # Number/int sent for a string field → convert
+            if expected == "string" and isinstance(value, (int, float)):
+                coerced[key] = str(value)
+                continue
+
+            # Dict sent for an array field → wrap in list
+            if expected == "array" and isinstance(value, dict):
+                coerced[key] = [value]
+                continue
+
+            coerced[key] = value
+
+        return coerced
 
     @staticmethod
     def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
@@ -297,6 +346,7 @@ class ToolOrchestratorService:
             "integration_health": self._integration_health,
             "integration_add": self._integration_add,
             "integrations_list": self._integrations_list,
+            "integrations_delete_all": self._integrations_delete_all,
             "integration_call": self._integration_call,
         }
 
@@ -762,10 +812,61 @@ class ToolOrchestratorService:
             ]
         }
 
+    async def _integrations_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del arguments
+        result = await db.execute(
+            select(ApiIntegration).where(ApiIntegration.user_id == user.id)
+        )
+        rows = result.scalars().all()
+        if not rows:
+            return {"status": "nothing_to_delete", "deleted_count": 0}
+        deleted = 0
+        for row in rows:
+            await db.delete(row)
+            deleted += 1
+        await db.commit()
+        _dev_verbose_log("integrations_delete_all", user_id=str(user.id), deleted_count=deleted)
+        return {"status": "deleted_all", "deleted_count": deleted}
+
     async def _integration_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         service_name = str(arguments.get("service_name") or arguments.get("name") or "custom-api").strip()
-        token = str(arguments.get("token") or arguments.get("token_optional") or "").strip()
-        base_url = str(arguments.get("base_url") or arguments.get("base_url_optional") or "").strip()
+        token = str(arguments.get("token") or "").strip()
+        base_url = str(arguments.get("base_url") or "").strip()
+        method = str(arguments.get("method") or "GET").strip().upper()
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            method = "GET"
+
+        # Headers: accept dict or string
+        headers_raw = arguments.get("headers")
+        headers: dict = {}
+        if isinstance(headers_raw, dict):
+            headers = headers_raw
+        elif isinstance(headers_raw, str) and headers_raw.strip():
+            try:
+                import json as _json
+                parsed_h = _json.loads(headers_raw)
+                if isinstance(parsed_h, dict):
+                    headers = parsed_h
+            except Exception:
+                pass
+        if not headers:
+            headers = {"Accept": "application/json"}
+
+        # Params: accept dict or string
+        params_raw = arguments.get("params")
+        params: dict = {}
+        if isinstance(params_raw, dict):
+            params = params_raw
+        elif isinstance(params_raw, str) and params_raw.strip():
+            try:
+                import json as _json
+                parsed_p = _json.loads(params_raw)
+                if isinstance(parsed_p, dict):
+                    params = parsed_p
+            except Exception:
+                pass
+
+        schedule = str(arguments.get("schedule") or "").strip()
 
         endpoints_raw = arguments.get("endpoints")
         endpoints: list[dict] = []
@@ -773,7 +874,14 @@ class ToolOrchestratorService:
             endpoints = [item for item in endpoints_raw if isinstance(item, dict)]
 
         if not endpoints and base_url:
-            endpoints = [{"name": "default", "url": base_url, "method": "GET"}]
+            ep: dict = {"name": "default", "url": base_url, "method": method}
+            if headers:
+                ep["headers"] = headers
+            if params:
+                ep["params"] = params
+            if schedule:
+                ep["schedule"] = schedule
+            endpoints = [ep]
 
         auth_data: dict = {}
         if token:
@@ -797,14 +905,18 @@ class ToolOrchestratorService:
             "endpoints": integration.endpoints,
             "is_active": integration.is_active,
             "auth_keys": list(auth_data.keys()),
+            "schedule": schedule or None,
         }
 
     async def _integration_call(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        from app.services.api_executor import resolve_url_template
+
         integration_id_raw = str(arguments.get("integration_id") or "").strip()
         endpoint = str(arguments.get("url") or "").strip()
         method = str(arguments.get("method") or "GET")
         payload = arguments.get("payload")
         headers = arguments.get("headers") if isinstance(arguments.get("headers"), dict) else {}
+        call_params = arguments.get("params") if isinstance(arguments.get("params"), dict) else {}
         if not integration_id_raw or not endpoint:
             raise ValueError("integration_call requires integration_id and url")
 
@@ -814,6 +926,17 @@ class ToolOrchestratorService:
         if not integration:
             raise ValueError("Integration not found")
 
+        # Merge stored endpoint params (defaults) with call-time params (overrides)
+        stored_params: dict = {}
+        for ep in (integration.endpoints or []):
+            if isinstance(ep, dict) and ep.get("url") and endpoint.startswith(ep["url"].split("{")[0]):
+                stored_params = ep.get("params", {}) if isinstance(ep.get("params"), dict) else {}
+                break
+        merged_params = {**stored_params, **call_params}
+
+        # Resolve URL templates: {key} placeholders + {{today}}/{{today_iso}}/{{now}}
+        resolved_url = resolve_url_template(endpoint, merged_params)
+
         auth_data, rotated = auth_data_security_service.resolve_for_runtime(integration.auth_data)
         if rotated is not None:
             integration.auth_data = rotated
@@ -822,7 +945,7 @@ class ToolOrchestratorService:
 
         if token := auth_data.get("token"):
             headers["Authorization"] = f"Bearer {token}"
-        return await api_executor.call(method=method, url=endpoint, headers=headers, body=payload)
+        return await api_executor.call(method=method, url=resolved_url, headers=headers, body=payload)
 
     def _normalize_plan(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
