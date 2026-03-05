@@ -52,6 +52,8 @@ class ToolOrchestratorService:
         normalized = str(action_type or "send_message").strip().lower()
         if normalized in {"reminder", "notification", "daily_briefing"}:
             return "send_message"
+        if normalized in {"chat", "tool_call", "api_call", "integration", "integration_call", "execute", "display"}:
+            return "chat"
         return normalized
 
     async def plan_tool_calls(
@@ -111,6 +113,8 @@ class ToolOrchestratorService:
             "Правила: "
             "1) Для PDF отчета используй pdf_create. "
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
+            "Если задача требует выполнения инструмента (integration_call, API-вызов, получение данных) — устанавливай action_type='chat'. "
+            "Если задача — простое текстовое напоминание, action_type не указывай (по умолчанию send_message). "
             "3) Если пользователь просит 'подключить API' или 'запомни мой API', используй dynamic_tool_register с user_message. "
             "4) Для запросов 'возьми данные из моего API' или использования ранее подключённого API используй dyn:<имя_инструмента> с нужными аргументами. "
             "5) НИКОГДА не используй worker_enqueue для отключённых инструментов. "

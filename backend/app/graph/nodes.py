@@ -243,7 +243,9 @@ async def router_node(state: dict) -> dict:
         f"{integrations_block}"
         f"{retrieved_block}"
         "Правила:\n"
-        "1) Для напоминаний используй cron_add с schedule_text и task_text.\n"
+        "1) Для напоминаний используй cron_add с schedule_text и task_text. "
+        "Если задача требует вызова API/интеграции (курс валют, погода и т.д.) — добавь action_type='chat'. "
+        "Если обычное текстовое напоминание — action_type не нужен.\n"
         "2) Для PDF — pdf_create.\n"
         "3) Если просит подключить API — register_api_tool с user_message (полным сообщением пользователя).\n"
         "4) Для удаления всех напоминаний — cron_delete_all.\n"
@@ -677,8 +679,12 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             if isinstance(payload, dict):
                 task = payload.get("message", "")
                 cron_expr = tr.result.get("cron_expression", "")
+                action = tr.result.get("action_type", "send_message")
                 if task:
-                    return f"Напоминание создано: {task}" + (f" ({cron_expr})" if cron_expr else "")
+                    suffix = f" ({cron_expr})" if cron_expr else ""
+                    if action == "chat":
+                        return f"Задача запланирована: {task}{suffix}\nПо расписанию я выполню запрос и пришлю результат."
+                    return f"Напоминание создано: {task}{suffix}"
         if tr.tool == "cron_list":
             items = tr.result.get("items", [])
             if isinstance(items, list):

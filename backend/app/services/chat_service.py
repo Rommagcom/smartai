@@ -32,7 +32,7 @@ class _CronAddToolArguments(BaseModel):
     schedule_text: str = Field(description="Текст расписания, например: 'каждый день в 9:00', 'через 30 минут', 'сегодня в 21:00'")
     task_text: str = Field(description="Текст задачи или напоминания")
     name: str = Field(default="chat-reminder", description="Имя задачи")
-    action_type: str = Field(default="send_message", description="Тип действия")
+    action_type: str = Field(default="send_message", description="Тип действия: 'send_message' для текстового напоминания, 'chat' для выполнения инструмента (integration_call, API)")
 
 
 class _CronAddToolDecision(BaseModel):
@@ -592,11 +592,19 @@ class ChatService:
         if not schedule_text or not task_text:
             return None
 
+        action_type = "send_message"
+        if re.search(
+            r"\b(?:интеграц|integration|api|курс\s+валют|погод|weather|вызов|данные\s+из|fetch|запрос)\b",
+            task_text,
+            flags=re.IGNORECASE,
+        ):
+            action_type = "chat"
+
         return {
             "name": "chat-reminder",
             "schedule_text": schedule_text,
             "task_text": task_text,
-            "action_type": "send_message",
+            "action_type": action_type,
         }
 
     @staticmethod
@@ -2209,6 +2217,8 @@ class ChatService:
                     "верни use_tool=true и заполни arguments с schedule_text и task_text. "
                     "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
                     "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+                    "Если задача требует ВЫЗОВА API или интеграции (курс валют, погода и т.д.) — "
+                    "используй action_type='chat'. Если обычное текстовое напоминание — action_type='send_message'. "
                     "Если данных недостаточно, верни use_tool=false."
                 ),
             )
@@ -2239,7 +2249,10 @@ class ChatService:
             '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
             "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments. "
             "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
-            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'."
+            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+            "Если задача требует ВЫЗОВА API, интеграции или получения данных (курс валют, погода, и т.д.) — "
+            "используй action_type='chat' и в task_text опиши что нужно сделать (например 'вызови интеграцию nationalbank и покажи курсы валют'). "
+            "Если задача — просто текстовое напоминание (встреча, позвонить, купить), оставь action_type='send_message'."
         )
 
         for _ in range(2):

@@ -164,7 +164,7 @@ class SkillsRegistryService:
                 "manifest": {
                     "name": "cron_add",
                     "title": "Cron Add",
-                    "description": "Создание cron/reminder задачи",
+                    "description": "Создание cron/reminder задачи. Для задач с вызовом API/интеграции используй action_type='chat'",
                     "version": "1.0.0",
                 },
                 "input_schema": {
@@ -175,7 +175,7 @@ class SkillsRegistryService:
                         "schedule_text": {"type": "string"},
                         "schedule": {"type": "string", "_planner_hidden": True},
                         "natural_text": {"type": "string", "_planner_hidden": True},
-                        "action_type": {"type": "string"},
+                        "action_type": {"type": "string", "description": "send_message для текстового напоминания, chat для выполнения инструмента/API/интеграции"},
                         "payload": {"type": "object"},
                         "task_text": {"type": "string"},
                         "message": {"type": "string", "_planner_hidden": True},
