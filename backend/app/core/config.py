@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     LANGGRAPH_MAX_ITERATIONS: int = 3
     LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
 
+    # --- Tool Vector Registry (Milvus semantic tool search) ---
+    TOOL_RETRIEVER_TOP_K: int = 5
+    TOOL_VECTOR_COLLECTION: str = "tool_vectors"
+
 
 @lru_cache
 def get_settings() -> Settings:

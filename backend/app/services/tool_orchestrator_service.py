@@ -77,6 +77,28 @@ class ToolOrchestratorService:
             except Exception as exc:
                 logger.debug("failed to load dynamic tools for planner: %s", exc)
 
+        # Build user integrations context for planner
+        integrations_block = ""
+        if db is not None and user_id is not None:
+            try:
+                from app.models.api_integration import ApiIntegration
+                from sqlalchemy import select as sa_select
+                integ_result = await db.execute(
+                    sa_select(ApiIntegration).where(
+                        ApiIntegration.user_id == user_id,
+                        ApiIntegration.is_active.is_(True),
+                    )
+                )
+                integrations = integ_result.scalars().all()
+                if integrations:
+                    names = [integ.service_name for integ in integrations]
+                    integrations_block = (
+                        f"\nПодключённые интеграции пользователя (вызывай через integration_call с service_name): "
+                        f"{', '.join(names)}. "
+                    )
+            except Exception as exc:
+                logger.debug("failed to load integrations for planner: %s", exc)
+
         planner_prompt = (
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
             "Формат: {\"use_tools\": bool, \"steps\": [{\"tool\": \"...\", \"arguments\": {...}}], \"response_hint\": \"...\"}. "
@@ -85,6 +107,7 @@ class ToolOrchestratorService:
             "Доступные инструменты: "
             f"{skills_registry_service.planner_signatures()}. "
             f"{dynamic_tools_block}"
+            f"{integrations_block}"
             "Правила: "
             "1) Для PDF отчета используй pdf_create. "
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
@@ -99,7 +122,9 @@ class ToolOrchestratorService:
             "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
             "12) Для очистки памяти пользователя используй memory_delete_all. "
             "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
-            "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id."
+            "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id. "
+            "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
+            "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call."
         )
 
         try:
@@ -416,6 +441,8 @@ class ToolOrchestratorService:
             "dynamic_tool_list": self._dynamic_tool_list,
             "dynamic_tool_delete": self._dynamic_tool_delete,
             "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
+            # Register API Tool (with Milvus vector storage)
+            "register_api_tool": self._register_api_tool,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1244,6 +1271,24 @@ class ToolOrchestratorService:
         del arguments
         count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id)
         return {"deleted_count": count}
+
+    # ------------------------------------------------------------------ #
+    # Register API Tool (with Milvus vector storage)
+    # ------------------------------------------------------------------ #
+
+    async def _register_api_tool(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Register a new API tool via LLM extraction + DB + Milvus."""
+        from app.services.register_api_tool_service import register_api_tool_service
+
+        user_message = str(arguments.get("user_message") or "").strip()
+        if not user_message:
+            return {"success": False, "error": "Не указано описание API (user_message)."}
+
+        return await register_api_tool_service.register_from_message(
+            db=db,
+            user_id=user.id,
+            user_message=user_message,
+        )
 
     # ------------------------------------------------------------------ #
     # Dynamic tool dispatch for dyn: prefixed tools

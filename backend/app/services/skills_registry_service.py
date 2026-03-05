@@ -482,6 +482,24 @@ class SkillsRegistryService:
                 },
                 "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
             },
+            # ---- Register API Tool (with Milvus vector storage) ----
+            {
+                "manifest": {
+                    "name": "register_api_tool",
+                    "title": "Register API Tool",
+                    "description": "Зарегистрировать API-инструмент с семантическим поиском (Milvus vector storage)",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "user_message": {"type": "string", "description": "Полное сообщение пользователя с описанием API (URL, параметры, название)"},
+                    },
+                    "required": ["user_message"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
         ]
 
     def list_contracts(self) -> list[dict]:

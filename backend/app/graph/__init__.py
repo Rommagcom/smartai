@@ -14,6 +14,10 @@ Graph topology:
                          └──────┬───────┘
                                 │
                          ┌──────▼───────┐
+                         │  retriever   │  ← Milvus semantic tool search
+                         └──────┬───────┘
+                                │
+                         ┌──────▼───────┐
                     ┌────│   router     │────┐
                     │    └──────┬───────┘    │
                     │           │            │
@@ -52,6 +56,7 @@ from app.graph.nodes import (
     output_node,
     router_node,
     tool_execution_node,
+    tool_retriever_node,
 )
 from app.schemas.graph import (
     ExtractedEntity,
@@ -87,6 +92,9 @@ class GraphState(TypedDict, total=False):
     rag_context: Annotated[list[str], _replace_value]
     history_summary: Annotated[str | None, _replace_value]
     extracted_entities: Annotated[list[ExtractedEntity], _replace_value]
+
+    # Tool retrieval (Milvus semantic search)
+    retrieved_tools: Annotated[list[dict], _replace_value]
 
     # Tool execution
     tool_results: Annotated[list[ToolResult], _replace_value]
@@ -150,6 +158,7 @@ def build_agent_graph() -> StateGraph:
     # Add nodes
     workflow.add_node("guardrail", input_guardrail_node)
     workflow.add_node("memory", memory_node)
+    workflow.add_node("retriever", tool_retriever_node)
     workflow.add_node("router", router_node)
     workflow.add_node("tool_exec", tool_execution_node)
     workflow.add_node("chat", chat_node)
@@ -165,7 +174,8 @@ def build_agent_graph() -> StateGraph:
         "output": "output",
     })
 
-    workflow.add_edge("memory", "router")
+    workflow.add_edge("memory", "retriever")
+    workflow.add_edge("retriever", "router")
 
     workflow.add_conditional_edges("router", _route_after_router, {
         "tool_exec": "tool_exec",

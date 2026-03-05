@@ -155,6 +155,23 @@ class DynamicToolService:
             user_id,
             payload.api_endpoint,
         )
+
+        # Sync to Milvus for semantic retrieval
+        try:
+            from app.services.vector_tool_registry import vector_tool_registry
+            await vector_tool_registry.register_tool(
+                user_id=str(user_id),
+                tool_name=f"dyn:{name}",
+                tool_type="dynamic",
+                description=payload.description,
+                endpoint=payload.api_endpoint,
+                method=(payload.method or "GET").upper(),
+                parameters_schema=payload.parameters_schema or {},
+                metadata={"response_hint": payload.response_hint or ""},
+            )
+        except Exception as exc:
+            logger.debug("failed to sync dynamic tool to Milvus: %s", exc)
+
         return {
             "status": status,
             "tool": {
@@ -243,8 +260,15 @@ class DynamicToolService:
         tool = result.scalar_one_or_none()
         if not tool:
             return False
+        tool_name = tool.name
         await db.delete(tool)
         await db.commit()
+        # Remove from Milvus
+        try:
+            from app.services.vector_tool_registry import vector_tool_registry
+            vector_tool_registry.delete_tool(user_id=str(user_id), tool_name=f"dyn:{tool_name}")
+        except Exception as exc:
+            logger.debug("failed to delete tool vector: %s", exc)
         return True
 
     async def delete_all_tools(
@@ -259,6 +283,12 @@ class DynamicToolService:
         for t in tools:
             await db.delete(t)
         await db.commit()
+        # Remove all from Milvus
+        try:
+            from app.services.vector_tool_registry import vector_tool_registry
+            vector_tool_registry.delete_user_tools(user_id=str(user_id))
+        except Exception as exc:
+            logger.debug("failed to delete user tool vectors: %s", exc)
         return len(tools)
 
     # ------------------------------------------------------------------ #
