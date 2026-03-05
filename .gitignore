@@ -1,8 +1,12 @@
+# Python cache artifacts (workspace-wide)
 __pycache__/
-*.pyc
-.venv/
-.env
-.pytest_cache/
-.mypy_cache/
-postgres_data/
-milvus_data/
+*.py[cod]
+*$py.class
+
+# IDE/OS junk
+.DS_Store
+Thumbs.db
+
+# Root-level leftovers must not exist (real code lives in backend/)
+/integrations/
+/scripts/
