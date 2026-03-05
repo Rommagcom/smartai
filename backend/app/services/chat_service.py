@@ -1267,6 +1267,8 @@ class ChatService:
                 planner = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
@@ -1274,6 +1276,8 @@ class ChatService:
                 planner_retry = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
                 retry_use_tools = bool(planner_retry.get("use_tools"))
                 retry_steps = planner_retry.get("steps") if isinstance(planner_retry.get("steps"), list) else []
@@ -1928,6 +1932,8 @@ class ChatService:
                 tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             )
 

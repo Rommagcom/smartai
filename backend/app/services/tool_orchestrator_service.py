@@ -17,6 +17,7 @@ from app.models.cron_job import CronJob
 from app.models.user import User
 from app.services.api_executor import api_executor
 from app.services.auth_data_security_service import auth_data_security_service
+from app.services.dynamic_tool_service import dynamic_tool_service
 from app.services.memory_service import memory_service
 from app.services.integration_onboarding_service import integration_onboarding_service
 from app.services.ollama_client import ollama_client
@@ -53,8 +54,29 @@ class ToolOrchestratorService:
             return "send_message"
         return normalized
 
-    async def plan_tool_calls(self, user_message: str, system_prompt: str) -> dict:
+    async def plan_tool_calls(
+        self,
+        user_message: str,
+        system_prompt: str,
+        *,
+        db: AsyncSession | None = None,
+        user_id: UUID | None = None,
+    ) -> dict:
         del system_prompt
+
+        # Build dynamic tools suffix if DB context is available
+        dynamic_tools_block = ""
+        if db is not None and user_id is not None:
+            try:
+                dynamic_sigs = await dynamic_tool_service.get_tools_for_planner(db, user_id)
+                if dynamic_sigs:
+                    dynamic_tools_block = (
+                        f"\nПользовательские API-инструменты (динамические): {dynamic_sigs}. "
+                        "Вызывай их точно по имени с префиксом dyn: (например dyn:weather_api)."
+                    )
+            except Exception as exc:
+                logger.debug("failed to load dynamic tools for planner: %s", exc)
+
         planner_prompt = (
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
             "Формат: {\"use_tools\": bool, \"steps\": [{\"tool\": \"...\", \"arguments\": {...}}], \"response_hint\": \"...\"}. "
@@ -62,11 +84,12 @@ class ToolOrchestratorService:
             "Если нужны: 1..3 шага в порядке выполнения. "
             "Доступные инструменты: "
             f"{skills_registry_service.planner_signatures()}. "
+            f"{dynamic_tools_block}"
             "Правила: "
             "1) Для PDF отчета используй pdf_create. "
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
-            "3) Если пользователь просит 'подключить API', используй integration_add. "
-            "4) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
+            "3) Если пользователь просит 'подключить API' или 'запомни мой API', используй dynamic_tool_register с user_message. "
+            "4) Для запросов 'возьми данные из моего API' или использования ранее подключённого API используй dyn:<имя_инструмента> с нужными аргументами. "
             "5) НИКОГДА не используй worker_enqueue для отключённых инструментов. "
             "6) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
             "7) Не выдумывай аргументы, если их нет в сообщении. "
@@ -74,7 +97,9 @@ class ToolOrchestratorService:
             "9) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
             "10) Для просмотра списка напоминаний используй cron_list. "
             "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
-            "12) Для очистки памяти пользователя используй memory_delete_all."
+            "12) Для очистки памяти пользователя используй memory_delete_all. "
+            "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
+            "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id."
         )
 
         try:
@@ -129,6 +154,32 @@ class ToolOrchestratorService:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
             _dev_verbose_log("step_start", tool=tool, arguments=arguments)
+
+            # Dynamic tool dispatch: dyn:tool_name or dyn_tool_name
+            if self.is_dynamic_tool(tool):
+                try:
+                    result = await asyncio.wait_for(
+                        dynamic_tool_service.call_dynamic_tool(
+                            db=db,
+                            user_id=user.id,
+                            tool_name=tool,
+                            arguments=arguments,
+                        ),
+                        timeout=TOOL_STEP_TIMEOUT_SECONDS,
+                    )
+                    _dev_verbose_log("step_success_dynamic", tool=tool, result=result)
+                    results.append({
+                        "tool": tool,
+                        "arguments": arguments,
+                        "success": bool(result.get("success")),
+                        "result": result,
+                    })
+                except asyncio.TimeoutError:
+                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s"})
+                except Exception as exc:
+                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": str(exc)})
+                continue
+
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
             arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
             arguments = self._coerce_argument_types(tool, arguments)
@@ -359,6 +410,12 @@ class ToolOrchestratorService:
             "integrations_list": self._integrations_list,
             "integrations_delete_all": self._integrations_delete_all,
             "integration_call": self._integration_call,
+            # Dynamic Tool Injection
+            "dynamic_tool_register": self._dynamic_tool_register,
+            "dynamic_tool_call": self._dynamic_tool_call,
+            "dynamic_tool_list": self._dynamic_tool_list,
+            "dynamic_tool_delete": self._dynamic_tool_delete,
+            "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1060,7 +1117,8 @@ class ToolOrchestratorService:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
 
-            if tool in TOOL_NAMES:
+            # Accept static tools AND dynamic tools (dyn: or dyn_ prefix)
+            if tool in TOOL_NAMES or tool.startswith("dyn:") or tool.startswith("dyn_"):
                 normalized_steps.append({"tool": tool, "arguments": arguments})
         return normalized_steps
 
@@ -1127,6 +1185,73 @@ class ToolOrchestratorService:
 
         logger.warning("planner output JSON parse failed: %.300s", raw)
         return {"use_tools": False, "steps": [], "response_hint": ""}
+
+
+    # ------------------------------------------------------------------ #
+    # Dynamic Tool Injection handlers
+    # ------------------------------------------------------------------ #
+
+    async def _dynamic_tool_register(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Meta-tool: LLM-assisted registration of a new dynamic API tool."""
+        user_message = str(arguments.get("user_message") or arguments.get("description") or "").strip()
+        if not user_message:
+            raise ValueError("dynamic_tool_register requires user_message with API description")
+        return await dynamic_tool_service.register_from_user_message(
+            db=db, user_id=user.id, user_message=user_message,
+        )
+
+    async def _dynamic_tool_call(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Call a user-registered dynamic API tool by name."""
+        tool_name = str(arguments.get("tool_name") or "").strip()
+        if not tool_name:
+            raise ValueError("dynamic_tool_call requires tool_name")
+        call_args = arguments.get("arguments") if isinstance(arguments.get("arguments"), dict) else {}
+        return await dynamic_tool_service.call_dynamic_tool(
+            db=db, user_id=user.id, tool_name=tool_name, arguments=call_args,
+        )
+
+    async def _dynamic_tool_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """List all registered dynamic tools for the user."""
+        del arguments
+        tools = await dynamic_tool_service.list_tools(db=db, user_id=user.id)
+        return {
+            "items": [
+                {
+                    "id": str(t.id),
+                    "name": t.name,
+                    "description": t.description,
+                    "endpoint": t.endpoint,
+                    "method": t.method,
+                    "parameters_schema": t.parameters_schema,
+                    "is_active": t.is_active,
+                }
+                for t in tools
+            ]
+        }
+
+    async def _dynamic_tool_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Delete a specific dynamic tool by id."""
+        tool_id_raw = str(arguments.get("tool_id") or "").strip()
+        if not tool_id_raw:
+            raise ValueError("dynamic_tool_delete requires tool_id")
+        deleted = await dynamic_tool_service.delete_tool(
+            db=db, user_id=user.id, tool_id=UUID(tool_id_raw),
+        )
+        return {"deleted": deleted}
+
+    async def _dynamic_tool_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Delete all dynamic tools for the user."""
+        del arguments
+        count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id)
+        return {"deleted_count": count}
+
+    # ------------------------------------------------------------------ #
+    # Dynamic tool dispatch for dyn: prefixed tools
+    # ------------------------------------------------------------------ #
+
+    def is_dynamic_tool(self, tool_name: str) -> bool:
+        """Check if a tool name refers to a dynamic (dyn:) tool."""
+        return tool_name.startswith("dyn:") or tool_name.startswith("dyn_")
 
 
 tool_orchestrator_service = ToolOrchestratorService()

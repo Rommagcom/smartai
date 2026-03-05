@@ -24,7 +24,10 @@ async def lifespan(app: FastAPI):
     worker_task: asyncio.Task | None = None
     try:
         connection_manager.start()
-        milvus_service.ensure_collection()
+        await asyncio.wait_for(
+            asyncio.to_thread(milvus_service.ensure_collection),
+            timeout=15.0,
+        )
     except Exception as exc:
         logger.warning("Milvus init skipped", extra={"context": {"error": str(exc)}})
         alerting_service.emit(component="startup", severity="warning", message="Milvus init skipped", details={"error": str(exc)})

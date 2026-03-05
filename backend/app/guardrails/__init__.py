@@ -75,7 +75,7 @@ def check_input(text: str) -> GuardrailResult:
             )
             return GuardrailResult(
                 verdict=GuardrailVerdict.BLOCK,
-                reason=f"Potential prompt injection detected",
+                reason="Potential prompt injection detected",
             )
 
     return GuardrailResult(verdict=GuardrailVerdict.PASS)
