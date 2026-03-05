@@ -1,0 +1,173 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run-smoke-all",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_all"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": false
+			}
+		},
+		{
+			"label": "alembic-upgrade-head",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"alembic",
+				"upgrade",
+				"head"
+			]
+		},
+		{
+			"label": "run-smoke-worker-queue",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_worker_queue"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
+		},
+		{
+			"label": "run-smoke-worker-chat-flow",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_worker_chat_flow"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
+		},
+		{
+			"label": "run-smoke-memory-docs",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_memory_docs"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
+		},
+		{
+			"label": "run-smoke-chat-tools-reminders",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_tools_reminders"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "smoke-all-via-just",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && just smoke-all"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "multi-up-via-just",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && just multi-up"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "multi-up-direct",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-self-service",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_self_service"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-admin-access",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_admin_access"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-cron-add-natural",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_chat_cron_add_natural"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "test-cron-natural",
+			"type": "shell",
+			"command": "cmd /c \"cd C:\\Repositories\\SmartAi\\backend&& set WORKER_ENABLED=0&& set WS_FANOUT_REDIS_ENABLED=0&& set SCHEDULER_ENABLED=0&& del /q smoke_chat_cron_add_natural.db 2>nul && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_cron_add_natural\""
+		},
+		{
+			"label": "test-cron-natural-v2",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_cron_add_natural"
+			]
+		},
+		{
+			"label": "test-cron-natural-v3",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_cron_add_natural"
+			]
+		}
+	]
+}
