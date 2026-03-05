@@ -1631,7 +1631,7 @@ class ChatService:
                     return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
                 if not body:
                     return f"Ответ интеграции (HTTP {status_code}): пустое тело."
-                max_len = 3000
+                max_len = 12000
                 preview = body[:max_len]
                 if len(body) > max_len:
                     preview += f"\n…(обрезано, всего {len(body)} символов)"
