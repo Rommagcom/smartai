@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+import logging
+from time import perf_counter
+from typing import Any
+
+import httpx
+
+from app.services.http_client_service import http_client_service
+from integrations.messengers.common.auth_bridge import build_backend_credentials
+from integrations.messengers.telegram.settings import get_telegram_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_payload(payload: Any, max_len: int = 1200) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        text = str(payload)
+    return text if len(text) <= max_len else f"{text[:max_len]}..."
+
+
+class BackendApiClient:
+    def __init__(self, base_url: str, bridge_secret: str) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.bridge_secret = bridge_secret
+        self._verbose_logging = bool(get_telegram_settings().DEV_VERBOSE_LOGGING)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        token: str | None = None,
+        json: dict | None = None,
+        params: dict | None = None,
+        files: dict | None = None,
+        extra_headers: dict | None = None,
+    ) -> dict[str, Any]:
+        started_at = perf_counter()
+        headers = dict(extra_headers or {})
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        if self._verbose_logging:
+            logger.info(
+                "telegram bridge request",
+                extra={
+                    "context": {
+                        "component": "telegram_bridge",
+                        "event": "api_request",
+                        "method": method.upper(),
+                        "path": path,
+                        "has_json": bool(json),
+                        "has_params": bool(params),
+                        "has_files": bool(files),
+                    }
+                },
+            )
+
+        client = http_client_service.get()
+        response = await client.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            json=json,
+            params=params,
+            headers=headers,
+            files=files,
+            timeout=60,
+        )
+        payload: Any
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {"raw": response.text}
+        if self._verbose_logging:
+            logger.info(
+                "telegram bridge response",
+                extra={
+                    "context": {
+                        "component": "telegram_bridge",
+                        "event": "api_response",
+                        "method": method.upper(),
+                        "path": path,
+                        "status": response.status_code,
+                        "latency_ms": round((perf_counter() - started_at) * 1000, 2),
+                        "payload": _safe_payload(payload),
+                    }
+                },
+            )
+        return {"status": response.status_code, "payload": payload}
+
+    async def is_telegram_allowed(self, telegram_user_id: int) -> bool:
+        result = await self._request(
+            "GET",
+            f"/telegram/access/check/{telegram_user_id}",
+            extra_headers={"X-Telegram-Bridge-Secret": self.bridge_secret},
+        )
+        if result["status"] != 200:
+            return False
+        return bool(result["payload"].get("allowed", False))
+
+    async def ensure_auth(self, telegram_user_id: int) -> tuple[str, str]:
+        username, password = build_backend_credentials(telegram_user_id, self.bridge_secret)
+        login_res = await self._request("POST", "/auth/login", json={"username": username, "password": password})
+        if login_res["status"] == 200:
+            return login_res["payload"]["access_token"], username
+
+        register_res = await self._request("POST", "/auth/register", json={"username": username, "password": password})
+        if register_res["status"] != 200:
+            raise RuntimeError(f"Auth failed: {register_res['payload']}")
+
+        return register_res["payload"]["access_token"], username
+
+    async def get_me(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/users/me", token=token)
+
+    async def get_onboarding_next_step(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/users/me/onboarding-next-step", token=token)
+
+    async def soul_status(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/users/me/soul/status", token=token)
+
+    async def soul_setup(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/users/me/soul/setup", token=token, json=body)
+
+    async def soul_adapt_task(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/users/me/soul/adapt-task", token=token, json=body)
+
+    async def chat_history(self, token: str, session_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/chat/history/{session_id}", token=token)
+
+    async def chat(self, token: str, message: str, session_id: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"message": message}
+        if session_id:
+            body["session_id"] = session_id
+        return await self._request("POST", "/chat", token=token, json=body)
+
+    async def chat_self_improve(self, token: str) -> dict[str, Any]:
+        return await self._request("POST", "/chat/self-improve", token=token)
+
+    async def execute_python(self, token: str, code: str) -> dict[str, Any]:
+        return await self._request("POST", "/chat/execute-python", token=token, json={"code": code})
+
+    async def worker_results_poll(self, token: str, limit: int = 20) -> dict[str, Any]:
+        return await self._request("GET", "/chat/worker-results/poll", token=token, params={"limit": limit})
+
+    async def pdf_create(self, token: str, title: str, content: str, filename: str = "document.pdf") -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/chat/tools/pdf-create",
+            token=token,
+            json={"title": title, "content": content, "filename": filename},
+        )
+
+    async def memory_add(self, token: str, fact_type: str, content: str, importance_score: float) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/memory",
+            token=token,
+            json={"fact_type": fact_type, "content": content, "importance_score": importance_score},
+        )
+
+    async def memory_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/memory", token=token)
+
+    async def documents_upload(self, token: str, filename: str, content: bytes) -> dict[str, Any]:
+        files = {"file": (filename, content)}
+        return await self._request("POST", "/documents/upload", token=token, files=files)
+
+    async def documents_search(self, token: str, query: str, top_k: int = 5) -> dict[str, Any]:
+        return await self._request("GET", "/documents/search", token=token, params={"query": query, "top_k": top_k})
+
+    async def documents_list(self, token: str, limit: int = 200) -> dict[str, Any]:
+        return await self._request("GET", "/documents", token=token, params={"limit": limit})
+
+    async def documents_delete(self, token: str, source_doc: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/documents/{source_doc}", token=token)
+
+    async def documents_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/documents/all", token=token)
+
+    async def cron_add(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/cron", token=token, json=body)
+
+    async def cron_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/cron", token=token)
+
+    async def cron_delete(self, token: str, job_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/cron/{job_id}", token=token)
+
+    async def integrations_add(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/integrations", token=token, json=body)
+
+    async def integrations_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/integrations", token=token)
+
+    async def integrations_call(self, token: str, integration_id: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", f"/integrations/{integration_id}/call", token=token, json=body)
