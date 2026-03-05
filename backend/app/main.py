@@ -29,6 +29,21 @@ async def lifespan(app: FastAPI):
         logger.warning("Milvus init skipped", extra={"context": {"error": str(exc)}})
         alerting_service.emit(component="startup", severity="warning", message="Milvus init skipped", details={"error": str(exc)})
 
+    # Warm-up LangGraph agent compilation
+    try:
+        from app.graph import agent_graph  # noqa: F401
+        logger.info("LangGraph agent compiled", extra={"context": {"component": "langgraph", "event": "ready"}})
+    except Exception as exc:
+        logger.warning("LangGraph init skipped: %s", exc)
+        alerting_service.emit(component="startup", severity="warning", message="LangGraph init skipped", details={"error": str(exc)})
+
+    # Warm-up LiteLLM provider
+    try:
+        from app.llm import llm_provider  # noqa: F401
+        logger.info("LiteLLM provider ready", extra={"context": {"component": "litellm", "event": "ready", "model": settings.LITELLM_MODEL}})
+    except Exception as exc:
+        logger.warning("LiteLLM init skipped: %s", exc)
+
     if settings.SCHEDULER_ENABLED:
         scheduler_service.start()
         try:
