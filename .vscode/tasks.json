@@ -4,15 +4,26 @@
 		{
 			"label": "run-smoke-all",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_all.py"
-			]
+				"-m",
+				"scripts.smoke_all"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false,
+			"presentation": {
+				"reveal": "always",
+				"panel": "dedicated",
+				"clear": true,
+				"focus": false
+			}
 		},
 		{
 			"label": "alembic-upgrade-head",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
 				"-m",
 				"alembic",
@@ -23,43 +34,131 @@
 		{
 			"label": "run-smoke-worker-queue",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"scripts/smoke_worker_queue.py"
-			]
+				"-m",
+				"scripts.smoke_worker_queue"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
 		},
 		{
 			"label": "run-smoke-worker-chat-flow",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"scripts/smoke_worker_chat_flow.py"
-			]
+				"-m",
+				"scripts.smoke_worker_chat_flow"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
 		},
 		{
 			"label": "run-smoke-memory-docs",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
 				"-m",
 				"scripts.smoke_memory_docs"
-			]
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			}
 		},
 		{
-			"label": "run-smoke-all-once",
+			"label": "run-smoke-chat-tools-reminders",
 			"type": "shell",
-			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
 			"args": [
-				"scripts/smoke_all.py"
+				"-m",
+				"scripts.smoke_chat_tools_reminders"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "smoke-all-via-just",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && just smoke-all"
 			],
 			"isBackground": false
 		},
 		{
-			"label": "just smoke-all",
+			"label": "multi-up-via-just",
 			"type": "shell",
-			"command": "just",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
 			"args": [
-				"smoke-all"
+				"/c",
+				"cd backend && just multi-up"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "tmp-smoke-worker-queue",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_queue.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-self-service",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_self_service"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-admin-access",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_admin_access"
+			],
+			"options": {
+				"cwd": "c:/Repositories/SmartAi/backend"
+			},
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-cron-add-natural",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_chat_cron_add_natural"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "smoke-all-check",
+			"type": "shell",
+			"command": "C:/Repositories/SmartAi/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_all.py"
+			]
+		},
+		{
+			"label": "smoke-worker-chat-flow",
+			"type": "shell",
+			"command": "C:/Repositories/ИИ Ассистент проект/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/smoke_worker_chat_flow.py"
 			],
 			"isBackground": false
 		}
