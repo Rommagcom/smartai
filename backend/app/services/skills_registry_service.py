@@ -594,6 +594,10 @@ class SkillsRegistryService:
     def _validate_type(key: str, value: Any, expected_type: str) -> str | None:
         if not expected_type:
             return None
+        # Allow None for optional fields — the caller (validate_input)
+        # already checks required fields separately.
+        if value is None:
+            return None
 
         validators = {
             "string": lambda v: isinstance(v, str),
