@@ -91,6 +91,9 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
 # ---------------------------------------------------------------------------
 
 
+_MIME_JSON = "application/json"
+
+
 @mcp_server.list_resources()
 async def list_resources() -> list[Resource]:
     """List available MCP resources."""
@@ -99,19 +102,19 @@ async def list_resources() -> list[Resource]:
             uri="smartai://memory/long-term",
             name="Long-term Memory",
             description="User's long-term memory facts (pgvector)",
-            mimeType="application/json",
+            mimeType=_MIME_JSON,
         ),
         Resource(
             uri="smartai://memory/short-term",
             name="Short-term Memory",
             description="Current session context (Redis STM)",
-            mimeType="application/json",
+            mimeType=_MIME_JSON,
         ),
         Resource(
             uri="smartai://tools/registry",
             name="Tool Registry",
             description="Available tool definitions and schemas",
-            mimeType="application/json",
+            mimeType=_MIME_JSON,
         ),
     ]
 

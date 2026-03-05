@@ -6,6 +6,9 @@ from typing import Any
 PERMISSION_NETWORK_HTTP_READ = "network.http.read"
 PERMISSION_INTEGRATIONS_WRITE = "integrations.write"
 PERMISSION_INTEGRATIONS_READ = "integrations.read"
+PERMISSION_DYNAMIC_TOOLS_WRITE = "dynamic_tools.write"
+PERMISSION_DYNAMIC_TOOLS_READ = "dynamic_tools.read"
+PERMISSION_DYNAMIC_TOOLS_CALL = "dynamic_tools.call"
 
 
 class SkillsRegistryService:
@@ -397,6 +400,87 @@ class SkillsRegistryService:
                     "additionalProperties": False,
                 },
                 "permissions": ["integrations.call", PERMISSION_NETWORK_HTTP_READ, "network.http.write"],
+            },
+            # ---- Dynamic Tool Injection ----
+            {
+                "manifest": {
+                    "name": "dynamic_tool_register",
+                    "title": "Dynamic Tool Register",
+                    "description": "Зарегистрировать пользовательский API как инструмент (Dynamic Tool Injection)",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "user_message": {"type": "string", "description": "Описание API от пользователя (URL, параметры, название)"},
+                    },
+                    "required": ["user_message"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_call",
+                    "title": "Dynamic Tool Call",
+                    "description": "Вызвать зарегистрированный пользовательский API-инструмент",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "Имя динамического инструмента"},
+                        "arguments": {"type": "object", "description": "Аргументы для вызова API"},
+                    },
+                    "required": ["tool_name"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_CALL, PERMISSION_NETWORK_HTTP_READ],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_list",
+                    "title": "Dynamic Tool List",
+                    "description": "Список зарегистрированных пользовательских API-инструментов",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_READ],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_delete",
+                    "title": "Dynamic Tool Delete",
+                    "description": "Удалить зарегистрированный пользовательский API-инструмент",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_id": {"type": "string", "description": "UUID инструмента для удаления"},
+                    },
+                    "required": ["tool_id"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_delete_all",
+                    "title": "Dynamic Tool Delete All",
+                    "description": "Удалить все пользовательские API-инструменты",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
             },
         ]
 

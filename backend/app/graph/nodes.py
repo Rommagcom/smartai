@@ -175,7 +175,7 @@ async def router_node(state: dict) -> dict:
         "3) Если просит подключить API — integration_add.\n"
         "4) Для удаления всех напоминаний — cron_delete_all.\n"
         "5) Не выдумывай аргументы.\n"
-        "6) steps — максимум 3 шага.\n"
+        "6) steps — максимум 5 шагов.\n"
         "7) Для удаления факта: memory_search → memory_delete.\n"
     )
 
@@ -539,6 +539,36 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             return "Все напоминания удалены."
         if tr.tool == "memory_delete_all":
             return "Память очищена."
+        # Dynamic Tool Injection responses
+        if tr.tool == "dynamic_tool_register":
+            msg = tr.result.get("message", "")
+            if msg:
+                return msg
+            status = tr.result.get("status", "")
+            tool_info = tr.result.get("tool", {})
+            name = tool_info.get("name", "unknown") if isinstance(tool_info, dict) else "unknown"
+            return f"Инструмент {name} {'обновлён' if status == 'updated' else 'зарегистрирован'}."
+        if tr.tool == "dynamic_tool_list":
+            items = tr.result.get("items", [])
+            if isinstance(items, list):
+                if not items:
+                    return "У вас пока нет зарегистрированных пользовательских API."
+                lines = ["Ваши пользовательские API-инструменты:"]
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        name = item.get("name", "")
+                        desc = item.get("description", "")
+                        endpoint = item.get("endpoint", "")
+                        lines.append(f"- **{name}**: {desc} ({endpoint})")
+                return "\n".join(lines)
+        if tr.tool == "dynamic_tool_delete":
+            return "Пользовательский API-инструмент удалён."
+        if tr.tool == "dynamic_tool_delete_all":
+            count = tr.result.get("deleted_count", 0)
+            return f"Все пользовательские API-инструменты удалены ({count})."
+        if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
+            # Let compose_node handle rich formatting via LLM
+            pass
         if tr.tool == "memory_list":
             items = tr.result.get("items", [])
             if isinstance(items, list):

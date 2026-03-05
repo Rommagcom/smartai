@@ -185,7 +185,7 @@ class LLMProvider:
                 )
                 parsed = self._parse_structured_response(raw, response_model)
                 return parsed
-            except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            except (ValidationError, json.JSONDecodeError) as exc:
                 last_exc = exc
                 logger.warning(
                     "structured parse attempt %d/%d failed: %s",
