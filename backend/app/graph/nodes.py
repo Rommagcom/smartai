@@ -6,6 +6,8 @@ Node architecture:
   ├─────────┤
   │ memory  │ → gather all memory layers
   ├─────────┤
+  │retriever│ → Milvus semantic tool search
+  ├─────────┤
   │ router  │ → decide: tool | chat | memory | clarify
   ├─────────┤
   │tool_exec│ → execute tool chain
@@ -29,6 +31,8 @@ from app.schemas.graph import (
     AgentState,
     GuardrailResult,
     GuardrailVerdict,
+    IntegrationCallArgs,
+    IntegrationInfo,
     RouterDecision,
     RouterOutput,
     ToolResult,
@@ -135,7 +139,42 @@ async def memory_node(state: dict) -> dict:
 
 
 # ======================================================================
-# Node: Router (LLM-based intent classification)
+# Node: Tool Retriever (Milvus semantic search)
+# ======================================================================
+
+
+async def tool_retriever_node(state: dict) -> dict:
+    """Search Milvus for relevant tools based on the user query.
+
+    This node runs BEFORE the router so the planner LLM only sees
+    tools that are semantically relevant to the current request,
+    enabling the system to scale to thousands of tools.
+    """
+    from app.services.vector_tool_registry import vector_tool_registry
+
+    user_message = state["user_message"]
+    user_id = state.get("user_id")
+
+    if not user_id:
+        return {"retrieved_tools": []}
+
+    _dev_log("retriever_start", user_id=str(user_id))
+
+    try:
+        hits = await vector_tool_registry.get_relevant_tools(
+            user_query=user_message,
+            user_id=user_id,
+            top_k=settings.TOOL_RETRIEVER_TOP_K,
+        )
+        _dev_log("retriever_done", hits_count=len(hits))
+        return {"retrieved_tools": hits}
+    except Exception as exc:
+        logger.warning("Tool retriever failed: %s", exc)
+        return {"retrieved_tools": []}
+
+
+# ======================================================================
+# Node: Router / Planner (LLM-based intent classification)
 # ======================================================================
 
 
@@ -144,11 +183,19 @@ async def router_node(state: dict) -> dict:
 
     Uses LiteLLM with structured output to guarantee valid RouterOutput.
     Falls back to deterministic pattern matching if LLM fails.
+
+    The planner prompt includes:
+    - Static built-in tools from skills_registry
+    - User integrations (from DB)
+    - User dynamic tools (from DB)
+    - **Semantically retrieved tools** (from Milvus via retriever node)
     """
     from app.llm import llm_provider
     from app.services.skills_registry_service import skills_registry_service
 
     user_message = state["user_message"]
+    user_id = state.get("user_id")
+    retrieved_tools: list[dict] = state.get("retrieved_tools") or []
     _dev_log("router_start", message_preview=user_message[:120])
 
     # 1. Try deterministic shortcuts first (fast path, no LLM call)
@@ -160,7 +207,30 @@ async def router_node(state: dict) -> dict:
             "next_step": deterministic.decision.value,
         }
 
-    # 2. LLM-based routing via structured output
+    # 2. Load user integrations & dynamic tools for context
+    integrations_block = ""
+    dynamic_tools_block = ""
+    if user_id:
+        integrations_block, dynamic_tools_block = await _load_user_tool_context(user_id)
+
+    # 3. Build retrieved-tools block from Milvus results
+    retrieved_block = ""
+    if retrieved_tools:
+        from app.schemas.tool_registry import RetrievedTool
+        lines = []
+        for hit in retrieved_tools:
+            try:
+                rt = RetrievedTool(**hit)
+                lines.append(f"  - {rt.to_planner_signature()} [score={rt.score:.2f}]")
+            except Exception:
+                continue
+        if lines:
+            retrieved_block = (
+                "\nСемантически найденные инструменты (наиболее релевантны запросу):\n"
+                + "\n".join(lines) + "\n"
+            )
+
+    # 4. LLM-based routing via structured output
     planner_model = settings.LITELLM_PLANNER_MODEL or None
     planner_prompt = (
         "Ты роутер AI-ассистента. Определи намерение пользователя.\n"
@@ -169,14 +239,23 @@ async def router_node(state: dict) -> dict:
         "'memory' — операция с памятью, 'clarify' — нужно уточнение.\n"
         "Доступные инструменты:\n"
         f"{skills_registry_service.planner_signatures()}\n"
+        f"{dynamic_tools_block}"
+        f"{integrations_block}"
+        f"{retrieved_block}"
         "Правила:\n"
         "1) Для напоминаний используй cron_add с schedule_text и task_text.\n"
         "2) Для PDF — pdf_create.\n"
-        "3) Если просит подключить API — integration_add.\n"
+        "3) Если просит подключить API — register_api_tool с user_message (полным сообщением пользователя).\n"
         "4) Для удаления всех напоминаний — cron_delete_all.\n"
         "5) Не выдумывай аргументы.\n"
         "6) steps — максимум 5 шагов.\n"
         "7) Для удаления факта: memory_search → memory_delete.\n"
+        "8) Для ВЫЗОВА подключённой интеграции используй integration_call "
+        "с service_name из списка интеграций пользователя. "
+        "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют из nationalbank' — "
+        "это integration_call с service_name=X.\n"
+        "9) Для пользовательских динамических API используй dyn:<имя> с нужными аргументами.\n"
+        "10) Если в 'семантически найденных инструментах' есть подходящий — предпочитай его.\n"
     )
 
     try:
@@ -354,20 +433,34 @@ async def compose_node(state: dict) -> dict:
     if deterministic:
         return {"final_answer": deterministic, "next_step": "output"}
 
+    # Detect integration_call in results for specialised LLM formatting
+    has_integration = any(
+        t.tool == "integration_call" and t.success and t.result
+        for t in tool_results
+    )
+
     # All failed → honest error
     all_failed = all(not t.success for t in tool_results) if tool_results else True
 
-    summary_prompt = (
-        "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-    )
-    if all_failed:
-        summary_prompt += (
+    if has_integration and not all_failed:
+        summary_prompt = (
+            "Ты получил ответ от внешнего API (интеграции). "
+            "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
+            "Если данные в XML/JSON — извлеки ключевые значения и представь "
+            "в удобном виде (таблица, список, текст). "
+            "НЕ выводи сырой XML/JSON. НЕ обрезай данные — покажи ВСЕ основные записи. "
+            "Если пользователь просил конкретные данные — выдели их."
+        )
+    elif all_failed:
+        summary_prompt = (
+            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
             "ВСЕ инструменты завершились с ошибкой. "
             "Объясни пользователю, что произошло, и предложи конкретный следующий шаг. "
-            "НЕ притворяйся, что данные доступны."
+            "НЕ притворяйся, что данные доступны и не придумывай результаты. Будь честным и конкретным."
         )
     else:
-        summary_prompt += (
+        summary_prompt = (
+            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
             "Если были ошибки, честно сообщи и предложи следующий шаг."
         )
 
@@ -452,6 +545,60 @@ async def output_node(state: dict) -> dict:
 
 
 import re
+
+
+async def _load_user_tool_context(user_id) -> tuple[str, str]:
+    """Load user integrations and dynamic tools for router context.
+
+    Returns (integrations_block, dynamic_tools_block) as prompt fragments.
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.models.api_integration import ApiIntegration
+    from app.services.dynamic_tool_service import dynamic_tool_service
+    from sqlalchemy import select
+
+    integrations_block = ""
+    dynamic_tools_block = ""
+
+    try:
+        async with AsyncSessionLocal() as db:
+            # Load user integrations
+            result = await db.execute(
+                select(ApiIntegration).where(
+                    ApiIntegration.user_id == user_id,
+                    ApiIntegration.is_active.is_(True),
+                )
+            )
+            integrations = result.scalars().all()
+            if integrations:
+                lines: list[str] = []
+                for integ in integrations:
+                    eps = []
+                    for ep in (integ.endpoints or []):
+                        if isinstance(ep, dict) and ep.get("url"):
+                            eps.append(str(ep["url"]))
+                    ep_info = f" (endpoints: {', '.join(eps[:3])})" if eps else ""
+                    lines.append(f"  - {integ.service_name}{ep_info}")
+                integrations_block = (
+                    "\nПодключённые интеграции пользователя "
+                    "(вызывай через integration_call с service_name):\n"
+                    + "\n".join(lines) + "\n"
+                )
+
+            # Load dynamic tools
+            try:
+                dynamic_sigs = await dynamic_tool_service.get_tools_for_planner(db, user_id)
+                if dynamic_sigs:
+                    dynamic_tools_block = (
+                        f"\nПользовательские API-инструменты (динамические): {dynamic_sigs}. "
+                        "Вызывай их точно по имени с префиксом dyn: (например dyn:weather_api).\n"
+                    )
+            except Exception as exc:
+                logger.debug("failed to load dynamic tools for planner: %s", exc)
+    except Exception as exc:
+        logger.debug("failed to load user tool context: %s", exc)
+
+    return integrations_block, dynamic_tools_block
 
 
 def _deterministic_route(user_message: str) -> RouterOutput | None:
@@ -550,6 +697,11 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             return "Память очищена."
         # Dynamic Tool Injection responses
         if tr.tool == "dynamic_tool_register":
+            msg = tr.result.get("message", "")
+            if msg:
+                return msg
+        # Register API Tool (with Milvus)
+        if tr.tool == "register_api_tool":
             msg = tr.result.get("message", "")
             if msg:
                 return msg

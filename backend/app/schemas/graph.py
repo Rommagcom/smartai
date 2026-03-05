@@ -30,6 +30,21 @@ class ToolStep(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict, description="Validated arguments for the tool")
 
 
+class IntegrationCallArgs(BaseModel):
+    """Structured arguments for integration_call extracted by the router LLM."""
+    service_name: str = Field(description="Service name of the target integration")
+    url: str | None = Field(default=None, description="Specific endpoint URL (optional, uses default if omitted)")
+    method: str = Field(default="GET", description="HTTP method")
+    params: dict[str, Any] = Field(default_factory=dict, description="Query / URL template params")
+    payload: dict[str, Any] | None = Field(default=None, description="JSON body for POST/PUT")
+
+
+class IntegrationInfo(BaseModel):
+    """Compact integration descriptor injected into the router context."""
+    service_name: str
+    endpoints: list[str] = Field(default_factory=list, description="Available endpoint URLs")
+
+
 class RouterOutput(BaseModel):
     """Structured output the router LLM must return."""
     decision: RouterDecision = Field(description="'tool' — invoke tools, 'chat' — direct reply, 'memory' — memory op, 'clarify' — ask user")
