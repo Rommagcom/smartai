@@ -371,8 +371,17 @@ async def compose_node(state: dict) -> dict:
             "Если были ошибки, честно сообщи и предложи следующий шаг."
         )
 
+    # Strip HTTP headers from tool results to maximise body/content budget for LLM
+    sanitised_results = []
+    for t in tool_results:
+        d = t.model_dump()
+        res = d.get("result")
+        if isinstance(res, dict) and "body" in res and "headers" in res:
+            d["result"] = {k: v for k, v in res.items() if k != "headers"}
+        sanitised_results.append(d)
+
     tool_calls_json = json.dumps(
-        [t.model_dump() for t in tool_results],
+        sanitised_results,
         ensure_ascii=False,
         default=str,
     )[:16000]
@@ -569,6 +578,18 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
         if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
             # Let compose_node handle rich formatting via LLM
             pass
+        if tr.tool == "integration_call":
+            status_code = int(tr.result.get("status_code") or 0)
+            body = str(tr.result.get("body") or "").strip()
+            if status_code == 0 and not body:
+                return "Запрос к интеграции не вернул данных."
+            if status_code >= 400:
+                preview = body[:2000] if body else ""
+                return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
+            if not body:
+                return f"Ответ интеграции (HTTP {status_code}): пустое тело."
+            # Let compose_node format with LLM for rich responses
+            pass
         if tr.tool == "memory_list":
             items = tr.result.get("items", [])
             if isinstance(items, list):
@@ -591,9 +612,13 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
             continue
         msg = tr.result.get("message", "")
         if msg:
-            parts.append(str(msg)[:500])
+            parts.append(str(msg)[:8000])
         elif tr.result:
-            parts.append(json.dumps(tr.result, ensure_ascii=False, default=str)[:500])
+            # Strip headers from HTTP responses to save space for body
+            dump_data = tr.result
+            if "body" in tr.result and "headers" in tr.result:
+                dump_data = {k: v for k, v in tr.result.items() if k != "headers"}
+            parts.append(json.dumps(dump_data, ensure_ascii=False, default=str)[:8000])
 
     if not parts:
         return "Не удалось получить данные. Повторите запрос позже."
