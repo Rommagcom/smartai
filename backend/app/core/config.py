@@ -108,6 +108,25 @@ class Settings(BaseSettings):
     STM_MAX_ITEMS: int = 40               # max context snippets per user
     STM_REDIS_KEY_PREFIX: str = "assistant:stm"
 
+    # --- LiteLLM unified LLM gateway ---
+    LITELLM_MODEL: str = "ollama_chat/gpt-oss:120b-cloud"
+    LITELLM_PLANNER_MODEL: str = ""       # empty = same as LITELLM_MODEL
+    LITELLM_EMBEDDING_MODEL: str = ""     # empty = Ollama nomic-embed-text fallback
+    LITELLM_TIMEOUT_SECONDS: int = 120
+    LITELLM_OPENAI_API_KEY: str = ""
+    LITELLM_ANTHROPIC_API_KEY: str = ""
+    LITELLM_TEMPERATURE: float = 0.7
+    LITELLM_PLANNER_TEMPERATURE: float = 0.0
+
+    # --- Guardrails ---
+    GUARDRAILS_ENABLED: bool = True
+    GUARDRAILS_MAX_INPUT_LENGTH: int = 16000
+    GUARDRAILS_BLOCK_PROMPT_INJECTION: bool = True
+
+    # --- LangGraph ---
+    LANGGRAPH_MAX_ITERATIONS: int = 3
+    LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -2395,5 +2395,82 @@ class ChatService:
         )
         return clean_answer, tool_calls, artifacts
 
+    # ==================================================================
+    # Graph-based respond — new LangGraph architecture
+    # ==================================================================
+
+    async def respond_via_graph(
+        self,
+        db: AsyncSession,
+        user: User,
+        session_id: UUID,
+        user_message: str,
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+        """Process a chat request through the LangGraph agent pipeline.
+
+        This is the new architecture entry point that replaces the monolithic
+        respond() method with a graph-based flow:
+          guardrail → memory → router → (tool_exec|chat) → compose → output
+
+        Returns the same tuple as respond() for backward compatibility.
+        """
+        from app.graph import agent_graph
+
+        initial_state = {
+            "user_id": user.id,
+            "session_id": session_id,
+            "user_message": user_message,
+            "system_prompt": user.system_prompt_template,
+            "permissions": [],
+            "history_messages": [],
+            "stm_context": [],
+            "ltm_context": [],
+            "rag_context": [],
+            "history_summary": None,
+            "extracted_entities": [],
+            "router_output": None,
+            "tool_results": [],
+            "artifacts": [],
+            "input_guardrail": None,
+            "output_guardrail": None,
+            "final_answer": "",
+            "tool_calls_log": [],
+            "next_step": "",
+            "iteration": 0,
+            "max_iterations": settings.LANGGRAPH_MAX_ITERATIONS,
+            "error": None,
+        }
+
+        self._dev_verbose_log(
+            "graph_respond_start",
+            user_id=str(user.id),
+            session_id=str(session_id),
+        )
+
+        try:
+            result = await agent_graph.ainvoke(initial_state)
+        except Exception:
+            logger.exception("LangGraph agent failed, falling back to legacy respond")
+            return await self.respond(db, user, session_id, user_message)
+
+        # Extract results in the legacy format
+        final_answer = str(result.get("final_answer") or "")
+        tool_calls_log = result.get("tool_calls_log") or []
+        artifacts = result.get("artifacts") or []
+
+        # Memory IDs from LTM context (for tracking)
+        used_memory_ids: list[str] = []
+        rag_sources: list[str] = []
+
+        self._dev_verbose_log(
+            "graph_respond_done",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            tool_calls_count=len(tool_calls_log),
+            answer_length=len(final_answer),
+        )
+
+        return final_answer, used_memory_ids, rag_sources, tool_calls_log, artifacts
+
 
 chat_service = ChatService()

@@ -78,13 +78,18 @@ class ToolOrchestratorService:
         )
 
         try:
-            planner_raw = await ollama_client.chat(
+            # Use LiteLLM via unified provider (supports OpenAI, Anthropic, Ollama, etc.)
+            from app.llm import llm_provider
+            planner_model = settings.LITELLM_PLANNER_MODEL or None
+
+            planner_raw = await llm_provider.chat(
                 messages=[
                     {"role": "system", "content": planner_prompt},
                     {"role": "user", "content": user_message},
                 ],
-                stream=False,
-                options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
+                model=planner_model,
+                temperature=settings.LITELLM_PLANNER_TEMPERATURE,
+                max_tokens=settings.OLLAMA_NUM_PREDICT_PLANNER,
             )
             plan = self._normalize_plan(self._parse_json(planner_raw))
             if not plan.get("use_tools"):
@@ -316,7 +321,8 @@ class ToolOrchestratorService:
             )
             
         compact = json.dumps(tool_calls, ensure_ascii=False)[:16000]
-        return await ollama_client.chat(
+        from app.llm import llm_provider
+        return await llm_provider.chat(
             messages=[
                 {"role": "system", "content": f"{system_prompt}\n\n{summary_prompt}"},
                 {
@@ -328,7 +334,7 @@ class ToolOrchestratorService:
                     ),
                 },
             ],
-            stream=False,
+            temperature=settings.LITELLM_TEMPERATURE,
         )
 
     def _handlers(self) -> dict:

@@ -23,3 +23,7 @@ cryptography==46.0.1
 aiofiles==24.1.0
 aiosqlite==0.20.0
 python-telegram-bot==21.6
+# --- LangGraph + LiteLLM Architecture ---
+langgraph>=0.4.1
+litellm>=1.60.0
+mcp>=1.6.0
