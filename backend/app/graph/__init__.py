@@ -18,18 +18,21 @@ Graph topology:
                          └──────┬───────┘
                                 │
                          ┌──────▼───────┐
-                    ┌────│   router     │────┐
-                    │    └──────┬───────┘    │
-                    │           │            │
-              ┌─────▼──┐ ┌─────▼──┐  ┌──────▼─────┐
-              │  tool   │ │  chat  │  │  clarify   │
-              └────┬────┘ └────┬───┘  └─────┬──────┘
-                   │           │            │
-              ┌────▼────┐     │            │
-              │ compose  │     │            │
-              └────┬────┘     │            │
-                   │           │            │
-                   └─────┬─────┘────────────┘
+                    ┌────│   router     │────┬───────────┐
+                    │    └──────┬───────┘    │           │
+                    │           │            │           │
+              ┌─────▼──┐ ┌─────▼──┐  ┌──────▼───┐ ┌────▼─────┐
+              │  tool   │ │  chat  │  │  clarify │ │web_search│
+              └────┬────┘ └────┬───┘  └─────┬────┘ └────┬─────┘
+                   │           │            │           │
+              ┌────▼────┐     │            │     ┌─────▼─────┐
+              │ compose  │     │            │     │ web_fetch │
+              └────┬────┘     │            │     └─────┬─────┘
+                   │           │            │           │
+                   │           │            │     ┌─────▼─────┐
+                   │           │            │     │  compose   │
+                   │           │            │     └─────┬─────┘
+                   └─────┬─────┘────────────┘───────────┘
                          │
                   ┌──────▼───────┐
                   │   output     │
@@ -57,6 +60,8 @@ from app.graph.nodes import (
     router_node,
     tool_execution_node,
     tool_retriever_node,
+    web_fetch_node,
+    web_search_node,
 )
 from app.schemas.graph import (
     ExtractedEntity,
@@ -100,6 +105,10 @@ class GraphState(TypedDict, total=False):
     tool_results: Annotated[list[ToolResult], _replace_value]
     artifacts: Annotated[list[dict], _replace_value]
 
+    # Web search
+    web_search_results: Annotated[list[dict], _replace_value]
+    web_fetch_content: Annotated[str, _replace_value]
+
     # Guardrails
     input_guardrail: Annotated[GuardrailResult | None, _replace_value]
     output_guardrail: Annotated[GuardrailResult | None, _replace_value]
@@ -110,8 +119,9 @@ class GraphState(TypedDict, total=False):
 
     # Control
     next_step: Annotated[str, _replace_value]
-    iteration: int
-    max_iterations: int
+    iteration: Annotated[int, _replace_value]
+    max_iterations: Annotated[int, _replace_value]
+    is_complete: Annotated[bool, _replace_value]
     error: Annotated[str | None, _replace_value]
 
 
@@ -135,6 +145,8 @@ def _route_after_router(state: dict) -> str:
         decision = router_output.decision.value
         if decision == "tool":
             return "tool_exec"
+        if decision == "web_search":
+            return "web_search"
         if decision == "memory":
             return "chat"
         if decision == "clarify":
@@ -147,28 +159,46 @@ def _route_after_tool_exec(state: dict) -> str:
     return "compose"
 
 
-def build_agent_graph() -> StateGraph:
-    """Build and compile the LangGraph agent.
+_MAX_REFINEMENT_ITERATIONS = 3
 
-    Returns a compiled graph that can be invoked with:
-        result = await graph.ainvoke(initial_state)
+
+def _should_we_finish(state: dict) -> str:
+    """Decide whether the compose result is complete or needs another loop.
+
+    Returns 'finish' → output, 'continue' → router for more data.
+    Hard cap at _MAX_REFINEMENT_ITERATIONS to prevent infinite loops.
     """
+    iteration = state.get("iteration", 1)
+    if iteration >= _MAX_REFINEMENT_ITERATIONS:
+        logger.info("Refinement cap reached (iteration=%d), finishing", iteration)
+        return "finish"
+
+    if state.get("is_complete", True):
+        return "finish"
+
+    return "continue"
+
+
+def build_agent_graph() -> StateGraph:
+    """Build and compile the LangGraph agent with cyclic refinement."""
     workflow = StateGraph(GraphState)
 
-    # Add nodes
+    # 1. Добавление узлов
     workflow.add_node("guardrail", input_guardrail_node)
     workflow.add_node("memory", memory_node)
     workflow.add_node("retriever", tool_retriever_node)
     workflow.add_node("router", router_node)
     workflow.add_node("tool_exec", tool_execution_node)
     workflow.add_node("chat", chat_node)
+    workflow.add_node("web_search", web_search_node)
+    workflow.add_node("web_fetch", web_fetch_node)
     workflow.add_node("compose", compose_node)
     workflow.add_node("output", output_node)
 
-    # Set entry point
+    # 2. Точка входа
     workflow.set_entry_point("guardrail")
 
-    # Conditional edges
+    # 3. Переходы
     workflow.add_conditional_edges("guardrail", _route_after_guardrail, {
         "memory": "memory",
         "output": "output",
@@ -177,18 +207,27 @@ def build_agent_graph() -> StateGraph:
     workflow.add_edge("memory", "retriever")
     workflow.add_edge("retriever", "router")
 
+    # Роутер теперь направляет в действия
     workflow.add_conditional_edges("router", _route_after_router, {
         "tool_exec": "tool_exec",
         "chat": "chat",
+        "web_search": "web_search",
         "output": "output",
     })
 
-    workflow.add_conditional_edges("tool_exec", _route_after_tool_exec, {
-        "compose": "compose",
+    # Путь инструментов и веб-поиска теперь ВСЕГДА ведет в compose
+    workflow.add_edge("tool_exec", "compose")
+    workflow.add_edge("web_search", "web_fetch")
+    workflow.add_edge("web_fetch", "compose")
+    workflow.add_edge("chat", "compose") # Чат тоже синтезируется для единообразия
+
+    # 4. Циклическая проверка: возвращаемся в роутер или идем в output?
+    # Вам нужно реализовать функцию _should_we_finish(state)
+    workflow.add_conditional_edges("compose", _should_we_finish, {
+        "finish": "output",
+        "continue": "router", 
     })
 
-    workflow.add_edge("chat", "output")
-    workflow.add_edge("compose", "output")
     workflow.add_edge("output", END)
 
     return workflow.compile()

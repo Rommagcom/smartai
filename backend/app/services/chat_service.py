@@ -1644,6 +1644,16 @@ class ChatService:
 
     @classmethod
     def _format_deterministic_tool_answer(cls, tool_calls: list[dict]) -> str | None:
+        # Mixed chains (data-fetching + artifact-creation) → skip, let LLM compose
+        _data_tools = {"integration_call", "dynamic_tool_call"}
+        _artifact_tools = {"pdf_create", "excel_create"}
+        tools_in_chain = {
+            str(c.get("tool") or "").strip().lower()
+            for c in tool_calls if c.get("success")
+        }
+        if tools_in_chain & _data_tools and tools_in_chain & _artifact_tools:
+            return None
+
         for call in tool_calls:
             if not call.get("success"):
                 continue

@@ -47,6 +47,54 @@ def _dev_verbose_log(event: str, **context: object) -> None:
     )
 
 
+# ---- Prompt-like content detection for PDF/Excel ----
+
+_PROMPT_VERBS = re.compile(
+    r"^(расскажи|напиши|опиши|составь|сгенерируй|создай|подготовь|придумай|"
+    r"сделай|объясни|перечисли|покажи|дай|выведи|"
+    r"write|tell|describe|generate|create|explain|list|show|make|prepare)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_prompt(text: str) -> bool:
+    """Check if short text looks like an instruction/prompt rather than ready content."""
+    return bool(_PROMPT_VERBS.match(text.strip()))
+
+
+async def _expand_prompt_to_content(prompt_text: str, title_hint: str = "") -> str:
+    """Expand a prompt-like instruction into actual document content via LLM."""
+    try:
+        from app.llm import llm_provider
+        system = (
+            "Ты готовишь содержимое для документа (PDF/Excel). "
+            "Пользователь дал инструкцию, что написать. "
+            "Напиши развёрнутый, информативный текст на русском языке. "
+            "Используй абзацы, списки где уместно. "
+            "НЕ пиши 'Вот текст для PDF' — просто выдай сам контент."
+        )
+        if title_hint:
+            system += f"\nТема документа: {title_hint}"
+
+        result = await asyncio.wait_for(
+            llm_provider.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt_text},
+                ],
+                temperature=0.5,
+                retries=1,
+            ),
+            timeout=60,
+        )
+        expanded = (result or "").strip()
+        if expanded and len(expanded) > len(prompt_text):
+            return expanded
+    except Exception:
+        logger.warning("LLM expand prompt for document failed", exc_info=True)
+    return prompt_text
+
+
 # ---- $prev / $step[N] placeholder resolution ----
 
 _PREV_RE = re.compile(r"^\$prev(?:\.(\w+))?$")
@@ -198,10 +246,7 @@ class ToolOrchestratorService:
             "16) Для списка загруженных документов — doc_list. "
             "17) Для удаления одного документа — doc_delete с source_doc (имя файла). "
             "18) Для удаления всех документов — doc_delete_all. "
-            "19) Для поиска информации в интернете используй web_search с query. "
-            "Если пользователь просит 'найди в интернете', 'загугли', 'поищи в сети' — это web_search. "
-            "Для регулярного поиска данных — cron_add с action_type='chat' и task_text='найди в интернете ...'. "
-            "20) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+            "19) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
             "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
             "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
             "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
@@ -540,8 +585,6 @@ class ToolOrchestratorService:
             "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
             # Register API Tool (with Milvus vector storage)
             "register_api_tool": self._register_api_tool,
-            # Web Search
-            "web_search": self._web_search,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -699,7 +742,8 @@ class ToolOrchestratorService:
 
     async def _pdf_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db, user
-        content = str(arguments.get("content") or "").strip()
+        raw_content = arguments.get("content")
+        content = await self._maybe_summarize_content(raw_content, arguments.get("title") or "")
         if not content:
             raise ValueError("pdf_create requires content")
         title = str(arguments.get("title") or "Generated document").strip()
@@ -713,11 +757,73 @@ class ToolOrchestratorService:
             filename,
         )
 
+    @staticmethod
+    async def _maybe_summarize_content(raw_content: object, title_hint: str = "") -> str:
+        """If content is a raw API dict/large JSON, summarize with LLM.
+        If content is a short prompt-like string, expand it with LLM."""
+        # Already a clean string — check if it needs expansion or is ready
+        if isinstance(raw_content, str):
+            text = raw_content.strip()
+            # Heuristic: if it looks like stringified dict from $prev, try to parse
+            if text.startswith("{") and ("status_code" in text or "body" in text):
+                try:
+                    raw_content = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    return text
+            # Heuristic: if short text looks like a prompt/instruction, expand with LLM
+            elif len(text) < 200 and not any(ch in text for ch in "\n|;") and _looks_like_prompt(text):
+                return await _expand_prompt_to_content(text, title_hint)
+            else:
+                return text
+
+        if not isinstance(raw_content, dict):
+            return str(raw_content or "").strip()
+
+        # Extract the meaningful payload from API response dicts
+        body = raw_content.get("body") or raw_content.get("result") or raw_content
+        body_text = json.dumps(body, ensure_ascii=False, default=str) if not isinstance(body, str) else body
+        if not body_text.strip():
+            return str(raw_content)
+
+        # Summarize with LLM
+        try:
+            from app.llm import llm_provider
+            prompt = (
+                "Ты создаёшь документа (PDF/Excel). "
+                "Проанализируй данные ниже и сформируй КРАТКИЙ, но ИНФОРМАТИВНЫЙ текст. "
+                "НЕ выводи сырой JSON/XML. Извлеки ключевые значения. "
+                "Используй списки, абзацы. Будь лаконичным."
+            )
+            if title_hint:
+                prompt += f"\nТема документа: {title_hint}"
+
+            result = await asyncio.wait_for(
+                llm_provider.chat(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": body_text[:12000]},
+                    ],
+                    temperature=0.3,
+                    retries=1,
+                ),
+                timeout=60,
+            )
+            summary = (result or "").strip()
+            if summary:
+                return summary
+        except Exception:
+            logger.warning("LLM summarize for document creation failed", exc_info=True)
+
+        # Fallback: use raw text
+        return body_text[:8000]
+
     async def _excel_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db, user
         from app.services.excel_service import excel_service
 
-        content = str(arguments.get("content") or "").strip()
+        raw_content = arguments.get("content")
+        content = await self._maybe_summarize_content(raw_content, arguments.get("title") or "")
+        content = content.strip()
         if not content:
             raise ValueError("excel_create requires content")
         title = str(arguments.get("title") or "Generated document").strip()
@@ -1442,20 +1548,6 @@ class ToolOrchestratorService:
             user_id=user.id,
             user_message=user_message,
         )
-
-    # ------------------------------------------------------------------ #
-    # Web Search
-    # ------------------------------------------------------------------ #
-
-    async def _web_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        from app.services.web_search_service import web_search_service
-
-        query = str(arguments.get("query") or "").strip()
-        if not query:
-            raise ValueError("web_search requires query")
-        max_results = int(arguments.get("max_results") or 5)
-        return await web_search_service.search(query, max_results=max_results)
 
     # ------------------------------------------------------------------ #
     # Dynamic tool dispatch for dyn: prefixed tools

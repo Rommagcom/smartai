@@ -98,6 +98,7 @@ class LLMProvider:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         stream: bool = False,
+        retries: int = 2,
     ) -> str:
         """Send messages to the LLM and return the text response."""
         params = self._base_params(model)
@@ -107,10 +108,22 @@ class LLMProvider:
             params["max_tokens"] = max_tokens
         params["stream"] = False
 
-        async with self._semaphore:
-            response = await litellm.acompletion(**params)
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                async with self._semaphore:
+                    response = await litellm.acompletion(**params)
+                return response.choices[0].message.content or ""
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "LLM chat attempt %d/%d failed: %s",
+                    attempt, retries, exc,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(1.0 * attempt)
 
-        return response.choices[0].message.content or ""
+        raise last_exc  # type: ignore[misc]
 
     async def stream_chat(
         self,
