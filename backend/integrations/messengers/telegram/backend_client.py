@@ -37,6 +37,7 @@ class BackendApiClient:
         params: dict | None = None,
         files: dict | None = None,
         extra_headers: dict | None = None,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         started_at = perf_counter()
         headers = dict(extra_headers or {})
@@ -59,6 +60,7 @@ class BackendApiClient:
                 },
             )
 
+        effective_timeout = timeout if timeout is not None else get_telegram_settings().TELEGRAM_DEFAULT_TIMEOUT_SECONDS
         client = http_client_service.get()
         response = await client.request(
             method=method,
@@ -67,7 +69,7 @@ class BackendApiClient:
             params=params,
             headers=headers,
             files=files,
-            timeout=60,
+            timeout=effective_timeout,
         )
         payload: Any
         try:
@@ -135,7 +137,10 @@ class BackendApiClient:
         body: dict[str, Any] = {"message": message}
         if session_id:
             body["session_id"] = session_id
-        return await self._request("POST", "/chat", token=token, json=body)
+        return await self._request(
+            "POST", "/chat", token=token, json=body,
+            timeout=get_telegram_settings().TELEGRAM_CHAT_TIMEOUT_SECONDS,
+        )
 
     async def chat_self_improve(self, token: str) -> dict[str, Any]:
         return await self._request("POST", "/chat/self-improve", token=token)
