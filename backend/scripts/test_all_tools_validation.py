@@ -151,7 +151,7 @@ def test_handler_coverage():
 
     handlers = tool_orchestrator_service._handlers()
     expected = [
-        "pdf_create", "excel_create", "execute_python",
+        "pdf_create", "excel_create",
         "memory_add", "memory_list", "memory_search", "memory_delete", "memory_delete_all",
         "doc_search", "doc_list", "doc_delete", "doc_delete_all",
         "cron_add", "cron_list", "cron_delete", "cron_delete_all",
