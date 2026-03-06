@@ -56,6 +56,8 @@ services:
       - redis
       - milvus-standalone
       - ollama
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       CHROME_EXECUTABLE_PATH: /usr/bin/chromium
 

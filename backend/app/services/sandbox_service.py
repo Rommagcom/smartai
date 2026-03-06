@@ -15,6 +15,7 @@ class SandboxService:
         async with aiofiles.open(script_path, mode="w", encoding="utf-8") as file:
             await file.write(code)
 
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 "docker",
@@ -44,6 +45,12 @@ class SandboxService:
                 "user_id": str(user_id),
             }
         except TimeoutError:
+            if process and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
             return {
                 "stdout": "",
                 "stderr": f"Execution timeout after {settings.SANDBOX_TIMEOUT_SECONDS} seconds",
@@ -52,7 +59,10 @@ class SandboxService:
                 "user_id": str(user_id),
             }
         finally:
-            os.unlink(script_path)
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
 
 
 sandbox_service = SandboxService()

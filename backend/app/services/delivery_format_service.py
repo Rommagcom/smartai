@@ -21,8 +21,8 @@ def _next_action_hint(job_type: str, preview: dict | None) -> str | None:
     if not preview.get("artifact_ready"):
         return None
 
-    if str(job_type) == "pdf_create":
-        return "Файл готов. Чтобы получить PDF-файл, запусти задачу напрямую без фоновой очереди (например через /make_pdf или обычный chat tool flow)."
+    if str(job_type) in ("pdf_create", "excel_create"):
+        return "Файл готов. Чтобы получить файл, повтори задачу без фразы про фон/очередь — тогда артефакт вернётся сразу в ответе."
 
     return "Файл готов. Чтобы получить файл, повтори задачу без фразы про фон/очередь — тогда артефакт вернётся сразу в ответе."
 
