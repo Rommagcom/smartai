@@ -627,7 +627,21 @@ class TelegramAdapter(MessengerAdapter):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            await application.bot.send_message(chat_id=chat_id, text=self._format_worker_item(item))
+
+            # Deliver actual file document if file_base64 is present in the result
+            file_sent = await self._try_send_worker_artifact(
+                bot=application.bot,
+                chat_id=chat_id,
+                item=item,
+            )
+
+            # Always send the text notification (unless the file was sent and
+            # the text would just be a generic "task done" message).
+            if not file_sent:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=self._format_worker_item(item),
+                )
         success = True
         observability_metrics_service.record(
             component="telegram_bridge",
@@ -636,6 +650,42 @@ class TelegramAdapter(MessengerAdapter):
             latency_ms=(perf_counter() - started_at) * 1000,
         )
         return True
+
+    @staticmethod
+    async def _try_send_worker_artifact(
+        bot: Bot,
+        chat_id: int,
+        item: dict[str, Any],
+    ) -> bool:
+        """Extract file_base64 from a worker result item and send it as a Telegram document.
+
+        Returns True if a file was successfully sent.
+        """
+        result = item.get("result") or item.get("result_preview") or {}
+        if not isinstance(result, dict):
+            return False
+
+        file_b64 = result.get("file_base64")
+        if not file_b64:
+            return False
+
+        try:
+            file_bytes = base64.b64decode(file_b64)
+            file_name = str(result.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+            bio = BytesIO(file_bytes)
+            bio.name = file_name
+
+            job_type = str(item.get("job_type") or "document")
+            caption = f"\u2705 \u0413\u043e\u0442\u043e\u0432\u043e ({job_type}): {file_name}"
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(bio, filename=file_name),
+                caption=caption[:200],
+            )
+            return True
+        except Exception:
+            logger.warning("Failed to send worker artifact as Telegram document", exc_info=True)
+            return False
 
     @staticmethod
     def _format_worker_item(item: dict[str, Any]) -> str:
@@ -663,6 +713,10 @@ class TelegramAdapter(MessengerAdapter):
         preview = item.get("result_preview")
         if preview is None:
             preview = item.get("result", {})
+
+        # Strip file_base64 from text display (it's delivered as a document)
+        if isinstance(preview, dict) and "file_base64" in preview:
+            preview = {k: v for k, v in preview.items() if k != "file_base64"}
 
         # Try to extract a readable message from preview dict.
         if isinstance(preview, dict):
@@ -693,16 +747,8 @@ class TelegramAdapter(MessengerAdapter):
         if not preview.get("artifact_ready"):
             return ""
 
-        if str(job_type) == "pdf_create":
-            return (
-                "Файл готов. Чтобы получить сам PDF в Telegram, запусти задачу напрямую без фоновой очереди, "
-                "например командой /make_pdf <title>|<content>."
-            )
-
-        return (
-            "Файл готов. Чтобы получить файл в Telegram, повтори задачу через /chat без фразы про фон/очередь "
-            "(выполнение пойдёт сразу и вернёт артефакт)."
-        )
+        # Files are now delivered automatically as Telegram documents.
+        return ""
 
     @staticmethod
     def _sanitize_reply_payload(payload: Any) -> Any:

@@ -739,21 +739,41 @@ class ToolOrchestratorService:
         }
 
     async def _pdf_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        raw_content = arguments.get("content")
-        content = await self._maybe_summarize_content(raw_content, arguments.get("title") or "")
-        if not content:
-            raise ValueError("pdf_create requires content")
+        """Delegate PDF creation to background worker to avoid chat timeout."""
+        del db
         title = str(arguments.get("title") or "Generated document").strip()
+        raw_content = arguments.get("content")
         filename = str(arguments.get("filename") or "document.pdf").strip()
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
-        return await to_thread.run_sync(
-            pdf_service.create_pdf_base64,
-            title,
-            content,
-            filename,
+
+        # Serialize content for the worker payload
+        if isinstance(raw_content, dict):
+            content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
+        else:
+            content_str = str(raw_content or "")
+
+        payload = {
+            "title": title,
+            "content": content_str,
+            "filename": filename,
+            "__user_id": str(user.id),
+            "__priority": "high",
+        }
+        enqueue_result = await worker_service.enqueue(
+            job_type=WorkerJobType.PDF_CREATE,
+            payload=payload,
+            priority="high",
         )
+        deduplicated = bool(enqueue_result.get("deduplicated"))
+        return {
+            "status": "queued" if not deduplicated else "deduplicated",
+            "message": (
+                "📄 Документ готовится в фоновом режиме. Отправлю PDF как только будет готов."
+                if not deduplicated
+                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
+            ),
+        }
 
     @staticmethod
     async def _maybe_summarize_content(raw_content: object, title_hint: str = "") -> str:
@@ -816,28 +836,48 @@ class ToolOrchestratorService:
         return body_text[:8000]
 
     async def _excel_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        from app.services.excel_service import excel_service
+        """Delegate Excel creation to background worker to avoid chat timeout."""
+        del db
 
-        raw_content = arguments.get("content")
-        content = await self._maybe_summarize_content(raw_content, arguments.get("title") or "")
-        content = content.strip()
-        if not content:
-            raise ValueError("excel_create requires content")
         title = str(arguments.get("title") or "Generated document").strip()
+        raw_content = arguments.get("content")
         filename = str(arguments.get("filename") or "document.xlsx").strip()
         if not filename.lower().endswith(".xlsx"):
             filename = f"{filename}.xlsx"
+
+        if isinstance(raw_content, dict):
+            content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
+        else:
+            content_str = str(raw_content or "")
+
+        payload = {
+            "title": title,
+            "content": content_str,
+            "filename": filename,
+            "__user_id": str(user.id),
+            "__priority": "high",
+        }
         columns = arguments.get("columns")
         rows = arguments.get("rows")
-        return await to_thread.run_sync(
-            excel_service.create_excel_base64,
-            title,
-            content,
-            filename,
-            columns if isinstance(columns, list) else None,
-            rows if isinstance(rows, list) else None,
+        if isinstance(columns, list):
+            payload["columns"] = columns
+        if isinstance(rows, list):
+            payload["rows"] = rows
+
+        enqueue_result = await worker_service.enqueue(
+            job_type=WorkerJobType.EXCEL_CREATE,
+            payload=payload,
+            priority="high",
         )
+        deduplicated = bool(enqueue_result.get("deduplicated"))
+        return {
+            "status": "queued" if not deduplicated else "deduplicated",
+            "message": (
+                "📊 Документ готовится в фоновом режиме. Отправлю Excel как только будет готов."
+                if not deduplicated
+                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
+            ),
+        }
 
     async def _memory_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         fact_type = str(arguments.get("fact_type") or "fact")
