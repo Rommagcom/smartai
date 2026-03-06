@@ -1664,6 +1664,12 @@ class ChatService:
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
                 return f"Документ {fname} создан{size_kb}."
 
+            if tool == "excel_create":
+                fname = str(result.get("file_name") or "document.xlsx")
+                size = int(result.get("size_bytes") or 0)
+                size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+                return f"Документ {fname} создан{size_kb}."
+
             if tool == "integrations_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)
                 if deleted_count <= 0:

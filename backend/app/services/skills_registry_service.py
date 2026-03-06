@@ -41,6 +41,27 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "excel_create",
+                    "title": "Excel Create",
+                    "description": "Генерация Excel (.xlsx) файла из текста или структурированных данных",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "content": {"type": "string", "description": "Текстовые данные (TSV/CSV/точка-с-запятой)"},
+                        "filename": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Заголовки столбцов"},
+                        "rows": {"type": "array", "items": {"type": "array"}, "description": "Строки данных (массив массивов)"},
+                    },
+                    "required": ["content"],
+                    "additionalProperties": False,
+                },
+                "permissions": ["files.generate"],
+            },
+            {
+                "manifest": {
                     "name": "execute_python",
                     "title": "Execute Python",
                     "description": "Выполнение python-кода в sandbox",
@@ -241,7 +262,7 @@ class SkillsRegistryService:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "job_type": {"type": "string", "enum": ["pdf_create"]},
+                        "job_type": {"type": "string", "enum": ["pdf_create", "excel_create"]},
                         "payload": {"type": "object"},
                         "priority": {"type": "string", "enum": ["normal", "high"]},
                     },

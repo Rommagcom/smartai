@@ -112,6 +112,7 @@ class ToolOrchestratorService:
             f"{integrations_block}"
             "Правила: "
             "1) Для PDF отчета используй pdf_create. "
+            "1a) Для Excel/таблицы используй excel_create. "
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
             "Если задача требует выполнения инструмента (integration_call, API-вызов, получение данных) — устанавливай action_type='chat'. "
             "Если задача — простое текстовое напоминание, action_type не указывай (по умолчанию send_message). "
@@ -420,6 +421,7 @@ class ToolOrchestratorService:
     def _handlers(self) -> dict:
         return {
             "pdf_create": self._pdf_create,
+            "excel_create": self._excel_create,
             "execute_python": self._execute_python,
             "memory_add": self._memory_add,
             "memory_list": self._memory_list,
@@ -581,10 +583,11 @@ class ToolOrchestratorService:
 
         mapping = {
             "pdf_create": WorkerJobType.PDF_CREATE,
+            "excel_create": WorkerJobType.EXCEL_CREATE,
         }
         job_type = mapping.get(job_type_raw)
         if not job_type:
-            raise ValueError("worker_enqueue supports only: pdf_create")
+            raise ValueError("worker_enqueue supports only: pdf_create, excel_create")
 
         payload["__user_id"] = str(user.id)
         payload["__requested_job_type"] = job_type_raw
@@ -615,6 +618,28 @@ class ToolOrchestratorService:
             title,
             content,
             filename,
+        )
+
+    async def _excel_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, user
+        from app.services.excel_service import excel_service
+
+        content = str(arguments.get("content") or "").strip()
+        if not content:
+            raise ValueError("excel_create requires content")
+        title = str(arguments.get("title") or "Generated document").strip()
+        filename = str(arguments.get("filename") or "document.xlsx").strip()
+        if not filename.lower().endswith(".xlsx"):
+            filename = f"{filename}.xlsx"
+        columns = arguments.get("columns")
+        rows = arguments.get("rows")
+        return await to_thread.run_sync(
+            excel_service.create_excel_base64,
+            title,
+            content,
+            filename,
+            columns if isinstance(columns, list) else None,
+            rows if isinstance(rows, list) else None,
         )
 
     async def _execute_python(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1105,7 +1130,13 @@ class ToolOrchestratorService:
                 parsed_base = urlparse(stored_base_url)
                 endpoint = f"{parsed_base.scheme}://{parsed_base.netloc}{endpoint}"
 
+        # Merge params: call_params override stored, EXCEPT stored template values
+        # (e.g. fdate={{today}}) which should always win so the date format is correct.
         merged_params = {**stored_params, **call_params}
+        for k, v in stored_params.items():
+            sv = str(v)
+            if "{{" in sv or re.search(r"\{(?:today|today_iso|now)\}", sv):
+                merged_params[k] = sv  # template takes priority
 
         # Resolve URL templates: {key} placeholders + {{today}}/{{today_iso}}/{{now}}
         resolved_url = resolve_url_template(endpoint, merged_params)

@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class WorkerJobType(StrEnum):
     PDF_CREATE = "pdf_create"
+    EXCEL_CREATE = "excel_create"
 
 
 class WorkerJobStatus(StrEnum):
