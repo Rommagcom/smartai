@@ -263,7 +263,10 @@ async def router_node(state: dict) -> dict:
         "11) Для списка загруженных документов — doc_list.\n"
         "12) Для удаления одного документа — doc_delete с source_doc (имя файла).\n"
         "13) Для удаления всех документов — doc_delete_all.\n"
-        "14) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+        "14) Для поиска информации в интернете используй web_search с query. "
+        "Если пользователь просит 'найди в интернете', 'загугли', 'поищи в сети' — это web_search. "
+        "Для регулярного получения данных из интернета — cron_add с action_type='chat' и task_text='найди в интернете ...'. "
+        "15) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
         "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
         "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
         "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
@@ -461,10 +464,23 @@ async def compose_node(state: dict) -> dict:
         for t in tool_results
     )
 
+    # Detect web_search in results for specialised LLM formatting
+    has_web_search = any(
+        t.tool == "web_search" and t.success and t.result
+        for t in tool_results
+    )
+
     # All failed → honest error
     all_failed = all(not t.success for t in tool_results) if tool_results else True
 
-    if has_integration and not all_failed:
+    if has_web_search and not all_failed:
+        summary_prompt = (
+            "Ты получил результаты поиска в интернете (DuckDuckGo). "
+            "Проанализируй найденные данные и сформируй ПОЛЕЗНЫЙ и ИНФОРМАТИВНЫЙ ответ. "
+            "Указывай источники (ссылки) для ключевых фактов. "
+            "Если данных мало или не по теме — честно скажи."
+        )
+    elif has_integration and not all_failed:
         summary_prompt = (
             "Ты получил ответ от внешнего API (интеграции). "
             "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "

@@ -566,6 +566,25 @@ class SkillsRegistryService:
                 },
                 "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
             },
+            # ---- Web Search (DuckDuckGo) ----
+            {
+                "manifest": {
+                    "name": "web_search",
+                    "title": "Web Search",
+                    "description": "Поиск информации в интернете через DuckDuckGo",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Поисковый запрос"},
+                        "max_results": {"type": "integer", "description": "Максимум результатов (1-10, по умолчанию 5)"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_NETWORK_HTTP_READ],
+            },
         ]
 
     def list_contracts(self) -> list[dict]:

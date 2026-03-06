@@ -198,7 +198,10 @@ class ToolOrchestratorService:
             "16) Для списка загруженных документов — doc_list. "
             "17) Для удаления одного документа — doc_delete с source_doc (имя файла). "
             "18) Для удаления всех документов — doc_delete_all. "
-            "19) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+            "19) Для поиска информации в интернете используй web_search с query. "
+            "Если пользователь просит 'найди в интернете', 'загугли', 'поищи в сети' — это web_search. "
+            "Для регулярного поиска данных — cron_add с action_type='chat' и task_text='найди в интернете ...'. "
+            "20) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
             "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
             "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
             "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
@@ -537,6 +540,8 @@ class ToolOrchestratorService:
             "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
             # Register API Tool (with Milvus vector storage)
             "register_api_tool": self._register_api_tool,
+            # Web Search
+            "web_search": self._web_search,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1437,6 +1442,20 @@ class ToolOrchestratorService:
             user_id=user.id,
             user_message=user_message,
         )
+
+    # ------------------------------------------------------------------ #
+    # Web Search
+    # ------------------------------------------------------------------ #
+
+    async def _web_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, user
+        from app.services.web_search_service import web_search_service
+
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("web_search requires query")
+        max_results = int(arguments.get("max_results") or 5)
+        return await web_search_service.search(query, max_results=max_results)
 
     # ------------------------------------------------------------------ #
     # Dynamic tool dispatch for dyn: prefixed tools
