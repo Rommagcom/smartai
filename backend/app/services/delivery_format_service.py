@@ -8,10 +8,10 @@ def _result_preview(result: dict | None) -> dict:
         return {"raw": str(result)}
 
     preview = dict(result)
-    file_base64 = preview.pop("file_base64", None)
-    if file_base64 is not None:
+    # Keep file_base64 in the payload so Telegram and WebSocket clients can
+    # deliver the actual file to the user (instead of just a hint to "retry").
+    if "file_base64" in preview:
         preview["artifact_ready"] = True
-        preview["artifact_note"] = "Результат содержит файл. Для передачи файла используйте чатовый tool-вызов без фоновой очереди."
     return preview
 
 
@@ -22,9 +22,9 @@ def _next_action_hint(job_type: str, preview: dict | None) -> str | None:
         return None
 
     if str(job_type) in ("pdf_create", "excel_create"):
-        return "Файл готов. Чтобы получить файл, повтори задачу без фразы про фон/очередь — тогда артефакт вернётся сразу в ответе."
+        return "Файл готов и будет отправлен автоматически."
 
-    return "Файл готов. Чтобы получить файл, повтори задачу без фразы про фон/очередь — тогда артефакт вернётся сразу в ответе."
+    return "Файл готов и будет отправлен автоматически."
 
 
 def build_worker_delivery_payload(

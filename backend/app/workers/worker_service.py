@@ -465,24 +465,46 @@ class WorkerService:
 
     async def _handle_pdf_create(self, payload: dict) -> dict:
         title = str(payload.get("title") or "Generated document")
-        content = str(payload.get("content") or "").strip()
+        raw_content = str(payload.get("content") or "").strip()
         filename = str(payload.get("filename") or "document.pdf")
-        if not content:
+        if not raw_content:
             raise ValueError("pdf_create job requires content")
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
+
+        # Expand prompt-like content via LLM before generating PDF
+        try:
+            from app.services.tool_orchestrator_service import ToolOrchestratorService
+            content = await ToolOrchestratorService._maybe_summarize_content(raw_content, title)
+            if not content:
+                content = raw_content
+        except Exception:
+            logger.warning("worker pdf content expansion failed, using raw", exc_info=True)
+            content = raw_content
+
         return await asyncio.to_thread(pdf_service.create_pdf_base64, title, content, filename)
 
     async def _handle_excel_create(self, payload: dict) -> dict:
         from app.services.excel_service import excel_service
 
         title = str(payload.get("title") or "Generated document")
-        content = str(payload.get("content") or "").strip()
+        raw_content = str(payload.get("content") or "").strip()
         filename = str(payload.get("filename") or "document.xlsx")
-        if not content:
+        if not raw_content:
             raise ValueError("excel_create job requires content")
         if not filename.lower().endswith(".xlsx"):
             filename = f"{filename}.xlsx"
+
+        # Expand prompt-like content via LLM before generating Excel
+        try:
+            from app.services.tool_orchestrator_service import ToolOrchestratorService
+            content = await ToolOrchestratorService._maybe_summarize_content(raw_content, title)
+            if not content:
+                content = raw_content
+        except Exception:
+            logger.warning("worker excel content expansion failed, using raw", exc_info=True)
+            content = raw_content
+
         columns = payload.get("columns")
         rows = payload.get("rows")
         return await asyncio.to_thread(
