@@ -27,3 +27,4 @@ class User(UUIDTimestampMixin, Base):
     cron_jobs = relationship("CronJob", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)
     code_snippets = relationship("CodeSnippet", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)
     api_integrations = relationship("ApiIntegration", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)
+    dynamic_tools = relationship("DynamicTool", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     OLLAMA_NUM_PREDICT: int = 2048
     OLLAMA_NUM_PREDICT_PLANNER: int = 512
     OLLAMA_KEEP_ALIVE: str = "10m"
-    CONTEXT_MAX_PROMPT_TOKENS: int = 5000
+    CONTEXT_MAX_PROMPT_TOKENS: int = 16000
     CONTEXT_ALWAYS_KEEP_LAST_MESSAGES: int = 6
     CONTEXT_SUMMARY_MAX_ITEMS: int = 8
     CONTEXT_SUMMARY_ITEM_MAX_CHARS: int = 220
@@ -107,6 +107,29 @@ class Settings(BaseSettings):
     STM_TTL_SECONDS: int = 86400          # short-term memory TTL — 24 hours
     STM_MAX_ITEMS: int = 40               # max context snippets per user
     STM_REDIS_KEY_PREFIX: str = "assistant:stm"
+
+    # --- LiteLLM unified LLM gateway ---
+    LITELLM_MODEL: str = "ollama_chat/gpt-oss:120b-cloud"
+    LITELLM_PLANNER_MODEL: str = ""       # empty = same as LITELLM_MODEL
+    LITELLM_EMBEDDING_MODEL: str = ""     # empty = Ollama nomic-embed-text fallback
+    LITELLM_TIMEOUT_SECONDS: int = 120
+    LITELLM_OPENAI_API_KEY: str = ""
+    LITELLM_ANTHROPIC_API_KEY: str = ""
+    LITELLM_TEMPERATURE: float = 0.7
+    LITELLM_PLANNER_TEMPERATURE: float = 0.0
+
+    # --- Guardrails ---
+    GUARDRAILS_ENABLED: bool = True
+    GUARDRAILS_MAX_INPUT_LENGTH: int = 16000
+    GUARDRAILS_BLOCK_PROMPT_INJECTION: bool = True
+
+    # --- LangGraph ---
+    LANGGRAPH_MAX_ITERATIONS: int = 3
+    LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
+
+    # --- Tool Vector Registry (Milvus semantic tool search) ---
+    TOOL_RETRIEVER_TOP_K: int = 5
+    TOOL_VECTOR_COLLECTION: str = "tool_vectors"
 
 
 @lru_cache

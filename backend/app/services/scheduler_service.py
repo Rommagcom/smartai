@@ -11,6 +11,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from sqlalchemy import select as sa_select
+
 from app.services.alerting_service import alerting_service
 from app.core.config import settings
 from app.services.delivery_format_service import build_worker_delivery_payload
@@ -320,6 +322,13 @@ class SchedulerService:
                     human_message=f"⏰ Напоминание: {message_text}",
                 )
                 await worker_result_service.push(user_id=user_id, payload=delivery_payload)
+            elif normalized_action_type == "chat":
+                await self._execute_chat_action(
+                    job_id=job_id,
+                    user_id=user_id,
+                    payload=payload,
+                    now=now,
+                )
             else:
                 raise ValueError(f"Unsupported scheduler action_type: {action_type}")
             success = True
@@ -351,6 +360,90 @@ class SchedulerService:
                 success=success,
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
+
+    async def _execute_chat_action(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        payload: dict,
+        now: str,
+    ) -> None:
+        """Run a full LangGraph chat pipeline for the cron job payload.
+
+        This allows scheduled tasks to execute actual tool calls (integration_call,
+        dynamic tools, etc.) and deliver the resulting answer to the user.
+        """
+        from uuid import UUID as _UUID
+
+        from app.models.user import User
+        from app.services.chat_service import chat_service
+
+        task_text = str(
+            payload.get("message")
+            or payload.get("task_text")
+            or payload.get("text")
+            or ""
+        ).strip()
+        if not task_text:
+            raise ValueError("chat action requires non-empty task_text in payload")
+
+        user_uuid = _UUID(user_id)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                sa_select(User).where(User.id == user_uuid)
+            )
+            user = result.scalar_one_or_none()
+            if not user:
+                raise ValueError(f"user {user_id} not found for scheduled chat action")
+
+            session = await memory_service.get_or_create_session(db, user_uuid, None)
+            await memory_service.append_message(db, user_uuid, session.id, "user", task_text)
+            await db.commit()
+
+            response_text, _mem_ids, _rag, _tools, _arts = await chat_service.respond_via_graph(
+                db, user, session.id, task_text,
+            )
+
+            await memory_service.append_message(db, user_uuid, session.id, "assistant", response_text)
+            await db.commit()
+
+        if not response_text:
+            response_text = "(нет результата)"
+
+        await connection_manager.send_to_user(
+            user_id,
+            {
+                "type": "proactive_message",
+                "message": response_text,
+                "timestamp": now,
+            },
+        )
+        delivery_payload = build_worker_delivery_payload(
+            job_type="cron_chat",
+            is_success=True,
+            result={
+                "message": str(response_text),
+                "source": "scheduler",
+                "timestamp": now,
+            },
+            human_message=response_text,
+        )
+        await worker_result_service.push(user_id=user_id, payload=delivery_payload)
+
+        logger.info(
+            "scheduler chat action executed",
+            extra={
+                "context": {
+                    "component": "scheduler",
+                    "event": "chat_action_done",
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "answer_len": len(response_text),
+                }
+            },
+        )
 
     async def _run_memory_decay(self) -> None:
         started_at = perf_counter()

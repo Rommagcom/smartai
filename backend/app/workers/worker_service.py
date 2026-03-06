@@ -33,6 +33,7 @@ class WorkerService:
         self._redis: Redis | None = None
         self._handlers: dict[WorkerJobType, WorkerHandler] = {
             WorkerJobType.PDF_CREATE: self._handle_pdf_create,
+            WorkerJobType.EXCEL_CREATE: self._handle_excel_create,
         }
 
     def register_handler(self, job_type: WorkerJobType, handler: WorkerHandler) -> None:
@@ -471,6 +472,27 @@ class WorkerService:
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
         return await asyncio.to_thread(pdf_service.create_pdf_base64, title, content, filename)
+
+    async def _handle_excel_create(self, payload: dict) -> dict:
+        from app.services.excel_service import excel_service
+
+        title = str(payload.get("title") or "Generated document")
+        content = str(payload.get("content") or "").strip()
+        filename = str(payload.get("filename") or "document.xlsx")
+        if not content:
+            raise ValueError("excel_create job requires content")
+        if not filename.lower().endswith(".xlsx"):
+            filename = f"{filename}.xlsx"
+        columns = payload.get("columns")
+        rows = payload.get("rows")
+        return await asyncio.to_thread(
+            excel_service.create_excel_base64,
+            title,
+            content,
+            filename,
+            columns if isinstance(columns, list) else None,
+            rows if isinstance(rows, list) else None,
+        )
 
     async def _notify_user(self, job: WorkerTask) -> None:
         payload_data = job.payload if isinstance(job.payload, dict) else {}
