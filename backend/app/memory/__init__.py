@@ -259,8 +259,8 @@ class MemoryManager:
         from app.services.memory_service import memory_service
 
         try:
-            memories = await memory_service.search_long_term_memory(
-                db, user_id, query=query, limit=limit
+            memories = await memory_service.retrieve_relevant_memories(
+                db, user_id, query=query, top_k=limit
             )
             return [str(m.content or "") for m in memories if str(m.content or "").strip()]
         except Exception:

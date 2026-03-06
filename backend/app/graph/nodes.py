@@ -196,6 +196,7 @@ async def router_node(state: dict) -> dict:
     user_message = state["user_message"]
     user_id = state.get("user_id")
     retrieved_tools: list[dict] = state.get("retrieved_tools") or []
+    history: list[dict] = state.get("history_messages") or []
     _dev_log("router_start", message_preview=user_message[:120])
 
     # 1. Try deterministic shortcuts first (fast path, no LLM call)
@@ -260,12 +261,18 @@ async def router_node(state: dict) -> dict:
         "10) Если в 'семантически найденных инструментах' есть подходящий — предпочитай его.\n"
     )
 
+    # Build messages with recent history for context continuity
+    router_messages: list[dict[str, str]] = [{"role": "system", "content": planner_prompt}]
+    # Include last few messages so the router understands references like
+    # "сделай то же самое", "а теперь в PDF", etc.
+    recent = history[-settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES:]
+    if recent:
+        router_messages.extend(recent)
+    router_messages.append({"role": "user", "content": user_message})
+
     try:
         router_output = await llm_provider.chat_structured(
-            messages=[
-                {"role": "system", "content": planner_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=router_messages,
             response_model=RouterOutput,
             model=planner_model,
             temperature=settings.LITELLM_PLANNER_TEMPERATURE,
@@ -426,6 +433,11 @@ async def compose_node(state: dict) -> dict:
 
     user_message = state["user_message"]
     system_prompt = state.get("system_prompt", "")
+    history: list[dict] = state.get("history_messages") or []
+    stm: list[str] = state.get("stm_context") or []
+    ltm: list[str] = state.get("ltm_context") or []
+    rag: list[str] = state.get("rag_context") or []
+    summary: str | None = state.get("history_summary")
     tool_results: list[ToolResult] = state.get("tool_results", [])
     router_output: RouterOutput | None = state.get("router_output")
     response_hint = router_output.response_hint if router_output else ""
@@ -481,19 +493,29 @@ async def compose_node(state: dict) -> dict:
         default=str,
     )[:16000]
 
+    # Build context-enriched system prompt so compose sees conversation history
+    enriched_system = _build_enriched_system_prompt(
+        system_prompt=f"{system_prompt}\n\n{summary_prompt}",
+        stm=stm,
+        ltm=ltm,
+        rag=rag,
+        summary=summary,
+    )
+
+    compose_messages: list[dict[str, str]] = [{"role": "system", "content": enriched_system}]
+    compose_messages.extend(history[-settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES:])
+    compose_messages.append({
+        "role": "user",
+        "content": (
+            f"User message: {user_message}\n"
+            f"Response hint: {response_hint}\n"
+            f"Tool calls JSON: {tool_calls_json}"
+        ),
+    })
+
     try:
         answer = await llm_provider.chat(
-            messages=[
-                {"role": "system", "content": f"{system_prompt}\n\n{summary_prompt}"},
-                {
-                    "role": "user",
-                    "content": (
-                        f"User message: {user_message}\n"
-                        f"Response hint: {response_hint}\n"
-                        f"Tool calls JSON: {tool_calls_json}"
-                    ),
-                },
-            ],
+            messages=compose_messages,
             temperature=settings.LITELLM_TEMPERATURE,
         )
         answer = _sanitize_llm_answer(answer)
@@ -528,12 +550,18 @@ async def output_node(state: dict) -> dict:
     else:
         result = GuardrailResult(verdict=GuardrailVerdict.PASS)
 
-    # Append to STM
+    # Append to STM + extract facts to LTM
     if user_id and final_answer:
         try:
             await memory_manager.append_stm(user_id, user_message, final_answer)
         except Exception:
             logger.debug("STM append failed", exc_info=True)
+
+        # Background LTM fact extraction (fire-and-forget)
+        try:
+            await _extract_facts_to_ltm(user_id, user_message, final_answer)
+        except Exception:
+            logger.debug("LTM extraction in output_node failed", exc_info=True)
 
     return {
         "final_answer": final_answer,
@@ -547,6 +575,24 @@ async def output_node(state: dict) -> dict:
 
 
 import re
+
+
+async def _extract_facts_to_ltm(user_id, user_message: str, assistant_response: str) -> None:
+    """Background LTM fact extraction — runs after each response."""
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.services.memory_service import memory_service
+
+        async with AsyncSessionLocal() as db:
+            await asyncio.wait_for(
+                memory_service.extract_and_store_facts(
+                    db, user_id, user_message, assistant_response
+                ),
+                timeout=15,
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.debug("LTM fact extraction failed: %s", exc)
 
 
 async def _load_user_tool_context(user_id) -> tuple[str, str]:
@@ -646,10 +692,20 @@ def _build_enriched_system_prompt(
 def _sanitize_llm_answer(text: str) -> str:
     """Remove dangerous patterns from LLM output."""
     cleaned = str(text or "")
-    cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, re.IGNORECASE)
-    cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, re.IGNORECASE)
+    if not cleaned.strip():
+        return "Не удалось сформировать ответ. Попробуйте уточнить запрос."
+
+    original = cleaned
+    cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip()
-    return cleaned or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
+    if cleaned:
+        return cleaned
+
+    # Aggressive strip removed all content — fallback: strip only the tags themselves
+    logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
+    fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
+    return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
 
 
 def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
