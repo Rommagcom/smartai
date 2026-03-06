@@ -307,7 +307,21 @@ async def router_node(state: dict) -> dict:
             "next_step": router_output.decision.value,
         }
     except Exception as exc:
-        logger.warning("Router LLM failed: %s, falling back to chat", exc)
+        logger.warning("Router LLM failed: %s, using fallback routing", exc)
+        # If the message clearly asks for web search, don't lose the intent
+        if _is_web_search_intent(user_message):
+            query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
+            _dev_log("router_fallback_web_search", query=query[:120])
+            fallback = RouterOutput(
+                decision=RouterDecision.WEB_SEARCH,
+                steps=[ToolStep(tool="web_search", arguments={"query": query})],
+                response_hint="Выполни поиск в интернете",
+                confidence=0.5,
+            )
+            return {
+                "router_output": fallback,
+                "next_step": "web_search",
+            }
         fallback = RouterOutput(decision=RouterDecision.CHAT, confidence=0.3)
         return {
             "router_output": fallback,
@@ -833,6 +847,32 @@ async def _load_user_tool_context(user_id) -> tuple[str, str]:
     return integrations_block, dynamic_tools_block
 
 
+# Regex for deterministic web search detection — fast path, no LLM needed
+_WEB_SEARCH_RE = re.compile(
+    r"\b(?:"
+    r"найди\s+в\s+(?:интернет|сет[ий]|гугл|google)"
+    r"|поищи\s+в\s+(?:интернет|сет[ий]|гугл|google)"
+    r"|загугли|погугли"
+    r"|поищи\s+в\s+сети"
+    r"|найди\s+(?:мне\s+)?(?:в\s+)?(?:интернет|онлайн)"
+    r"|search\s+(?:the\s+)?(?:web|internet|online)"
+    r"|web\s*search"
+    r"|поиск\s+в\s+интернет"
+    r"|ищи\s+в\s+(?:интернет|сет[ий])"
+    r"|найди\s+(?:в\s+)?инете"
+    r"|поищи\s+(?:в\s+)?инете"
+    r"|найди\s+информацию"
+    r"|поищи\s+информацию"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_web_search_intent(user_message: str) -> bool:
+    """Check if user message clearly asks for a web search."""
+    return bool(_WEB_SEARCH_RE.search(user_message or ""))
+
+
 def _deterministic_route(user_message: str) -> RouterOutput | None:
     """Pattern-match deterministic tool routes without LLM."""
     from app.services.chat_service import ChatService
@@ -848,6 +888,21 @@ def _deterministic_route(user_message: str) -> RouterOutput | None:
             steps=tool_steps,
             confidence=0.95,
         )
+
+    # Deterministic web search: catch obvious "search the web" patterns
+    if _is_web_search_intent(user_message):
+        # Extract search query by stripping the web-search prefix phrases
+        query = _WEB_SEARCH_RE.sub("", user_message).strip()
+        if not query:
+            query = user_message
+        _dev_log("deterministic_web_search", query=query[:120])
+        return RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint="Выполни поиск в интернете и представь результаты",
+            confidence=0.95,
+        )
+
     return None
 
 
