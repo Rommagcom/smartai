@@ -303,6 +303,9 @@ class ChatService:
             r"\bdelete\b|\bremove\b|\blist\b|\bshow\b",
             r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
             r"\bмои\s+(?:задач|напоминан|cron)|список\s+(?:задач|напоминан)",
+            r"\b(?:найди|поищи|загугли|погугли|ищи|нагугли)\b.*\b(?:интернет|сети|гугл|google|инет)",
+            r"\bweb\s+search|search\s+(?:the\s+)?(?:web|internet|online)\b",
+            r"\bзагугли|погугли\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 

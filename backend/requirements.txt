@@ -19,6 +19,7 @@ pypdf==6.0.0
 pdfkit==1.0.0
 openpyxl==3.1.5
 beautifulsoup4==4.13.3
+ddgs>=9.0.0
 playwright==1.51.0
 cryptography==46.0.1
 aiofiles==24.1.0
