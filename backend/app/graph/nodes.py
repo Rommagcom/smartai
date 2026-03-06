@@ -8,11 +8,17 @@ Node architecture:
   ├─────────┤
   │retriever│ → Milvus semantic tool search
   ├─────────┤
-  │ router  │ → decide: tool | chat | memory | clarify
+  │ router  │ → decide: tool | chat | memory | clarify | web_search
   ├─────────┤
   │tool_exec│ → execute tool chain
   ├─────────┤
+  │web_srch │ → DuckDuckGo search (graph node)
+  ├─────────┤
+  │web_fetch│ → trafilatura page extraction
+  ├─────────┤
   │  chat   │ → generate final answer via LLM
+  ├─────────┤
+  │ compose │ → compose answer from tool/web results
   ├─────────┤
   │ output  │ → output guardrail + STM append
   └─────────┘
@@ -237,7 +243,8 @@ async def router_node(state: dict) -> dict:
         "Ты роутер AI-ассистента. Определи намерение пользователя.\n"
         "Верни JSON с полями: decision, steps, response_hint, confidence.\n"
         "decision: 'tool' — нужен инструмент, 'chat' — обычный разговор, "
-        "'memory' — операция с памятью, 'clarify' — нужно уточнение.\n"
+        "'memory' — операция с памятью, 'clarify' — нужно уточнение, "
+        "'web_search' — поиск информации в интернете.\n"
         "Доступные инструменты:\n"
         f"{skills_registry_service.planner_signatures()}\n"
         f"{dynamic_tools_block}"
@@ -263,7 +270,7 @@ async def router_node(state: dict) -> dict:
         "11) Для списка загруженных документов — doc_list.\n"
         "12) Для удаления одного документа — doc_delete с source_doc (имя файла).\n"
         "13) Для удаления всех документов — doc_delete_all.\n"
-        "14) Для поиска информации в интернете используй web_search с query. "
+        "14) Для поиска информации в интернете используй decision='web_search' с query в steps. "
         "Если пользователь просит 'найди в интернете', 'загугли', 'поищи в сети' — это web_search. "
         "Для регулярного получения данных из интернета — cron_add с action_type='chat' и task_text='найди в интернете ...'. "
         "15) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
@@ -430,7 +437,92 @@ async def chat_node(state: dict) -> dict:
         )
 
     _dev_log("chat_done", answer_length=len(answer))
-    return {"final_answer": answer, "next_step": "output"}
+    return {"final_answer": answer, "next_step": "output", "is_complete": True}
+
+
+# ======================================================================
+# Node: Web Search
+# ======================================================================
+
+
+async def web_search_node(state: dict) -> dict:
+    """Run a DuckDuckGo web search based on router-planned query."""
+    from app.services.web_search_service import web_search_service
+
+    router_output: RouterOutput | None = state.get("router_output")
+    # Extract query from router steps or fall back to user message
+    query = ""
+    if router_output and router_output.steps:
+        for step in router_output.steps:
+            args = step.arguments or {}
+            query = str(args.get("query") or "").strip()
+            if query:
+                break
+
+    if not query:
+        query = state.get("user_message", "")
+
+    _dev_log("web_search_start", query=query[:120])
+
+    result = await web_search_service.search(query, max_results=5)
+    results = result.get("results") or []
+    _dev_log("web_search_done", results_count=len(results))
+
+    return {
+        "web_search_results": results,
+        "next_step": "web_fetch",
+    }
+
+
+# ======================================================================
+# Node: Web Fetch (trafilatura content extraction)
+# ======================================================================
+
+_MAX_FETCH_PAGES = 3
+_FETCH_TIMEOUT = 8
+
+
+async def web_fetch_node(state: dict) -> dict:
+    """Fetch top URLs from web_search_results and extract clean text."""
+    import httpx
+    import trafilatura
+
+    results: list[dict] = state.get("web_search_results") or []
+    if not results:
+        _dev_log("web_fetch_skip", reason="no search results")
+        return {"web_fetch_content": "", "next_step": "compose"}
+
+    urls = [r["url"] for r in results[:_MAX_FETCH_PAGES] if r.get("url")]
+    _dev_log("web_fetch_start", urls=urls)
+
+    parts: list[str] = []
+    async with httpx.AsyncClient(
+        timeout=_FETCH_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SmartAiBot/1.0)"},
+    ) as client:
+        for url in urls:
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                text = await asyncio.to_thread(
+                    trafilatura.extract,
+                    resp.text,
+                    include_links=True,
+                    include_tables=True,
+                    output_format="txt",
+                )
+                if text and text.strip():
+                    # Keep snippet reasonable — up to ~3000 chars per page
+                    snippet = text[:3000]
+                    parts.append(f"### {url}\n{snippet}")
+            except Exception:
+                logger.debug("web_fetch failed for %s", url, exc_info=True)
+
+    combined = "\n\n".join(parts) if parts else ""
+    _dev_log("web_fetch_done", pages_ok=len(parts), total_len=len(combined))
+
+    return {"web_fetch_content": combined, "next_step": "compose"}
 
 
 # ======================================================================
@@ -439,7 +531,7 @@ async def chat_node(state: dict) -> dict:
 
 
 async def compose_node(state: dict) -> dict:
-    """Compose a final answer from tool execution results."""
+    """Compose a final answer from tool execution results or web search content."""
     from app.llm import llm_provider
 
     user_message = state["user_message"]
@@ -452,11 +544,73 @@ async def compose_node(state: dict) -> dict:
     tool_results: list[ToolResult] = state.get("tool_results", [])
     router_output: RouterOutput | None = state.get("router_output")
     response_hint = router_output.response_hint if router_output else ""
+    web_fetch_content: str = state.get("web_fetch_content") or ""
+    web_search_results: list[dict] = state.get("web_search_results") or []
+    iteration = (state.get("iteration") or 0) + 1
+
+    _completeness_suffix = (
+        "\n\nВАЖНО: в конце ответа добавь строку-маркер:\n"
+        "- Если данных достаточно для полного ответа: COMPLETENESS: COMPLETE\n"
+        "- Если данных не хватает и нужен дополнительный поиск: COMPLETENESS: INCOMPLETE\n"
+    )
+
+    # ---- Web search graph path (no tool_results, web content available) ----
+    if web_search_results and not tool_results:
+        if web_fetch_content:
+            web_prompt = (
+                "Ты получил результаты поиска в интернете и извлечённый текст страниц. "
+                "Проанализируй данные и сформируй ПОЛЕЗНЫЙ и ИНФОРМАТИВНЫЙ ответ. "
+                "Указывай источники (ссылки) для ключевых фактов. "
+                "Текст со страниц:\n" + web_fetch_content[:12000]
+                + _completeness_suffix
+            )
+        else:
+            snippets = "\n".join(
+                f"- {r.get('title','')}: {r.get('snippet','')}\n  {r.get('url','')}"
+                for r in web_search_results[:5]
+            )
+            web_prompt = (
+                "Ты получил результаты поиска в интернете, "
+                "но не удалось извлечь текст страниц. Используй сниппеты:\n"
+                + snippets + "\n"
+                "Сформируй максимально полный ответ по имеющимся данным. "
+                "Указывай источники."
+                + _completeness_suffix
+            )
+
+        enriched_system = _build_enriched_system_prompt(
+            system_prompt=f"{system_prompt}\n\n{web_prompt}",
+            stm=stm, ltm=ltm, rag=rag, summary=summary,
+        )
+        compose_messages: list[dict[str, str]] = [{"role": "system", "content": enriched_system}]
+        compose_messages.extend(history[-settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES:])
+        compose_messages.append({"role": "user", "content": user_message})
+
+        try:
+            answer = await llm_provider.chat(
+                messages=compose_messages,
+                temperature=settings.LITELLM_TEMPERATURE,
+            )
+            is_complete = _extract_completeness(answer)
+            answer = _strip_completeness_marker(answer)
+            answer = _sanitize_llm_answer(answer)
+        except Exception as exc:
+            logger.warning("Compose (web) LLM failed: %s", exc)
+            answer = "Не удалось сформировать ответ по результатам поиска."
+            is_complete = True
+
+        return {
+            "final_answer": answer,
+            "is_complete": is_complete,
+            "iteration": iteration,
+        }
+
+    # ---- Standard tool results path ----
 
     # Check for deterministic answers first
     deterministic = _format_deterministic_tool_answer(tool_results)
     if deterministic:
-        return {"final_answer": deterministic, "next_step": "output"}
+        return {"final_answer": deterministic, "is_complete": True, "iteration": iteration}
 
     # Detect integration_call in results for specialised LLM formatting
     has_integration = any(
@@ -464,21 +618,23 @@ async def compose_node(state: dict) -> dict:
         for t in tool_results
     )
 
-    # Detect web_search in results for specialised LLM formatting
-    has_web_search = any(
-        t.tool == "web_search" and t.success and t.result
+    # Detect artifact tools (pdf_create, excel_create) in results
+    has_artifact = any(
+        t.tool in ("pdf_create", "excel_create") and t.success and t.result
         for t in tool_results
     )
 
     # All failed → honest error
     all_failed = all(not t.success for t in tool_results) if tool_results else True
 
-    if has_web_search and not all_failed:
+    if has_integration and has_artifact and not all_failed:
+        # Mixed chain: data → artifact — summarize data AND mention the document
         summary_prompt = (
-            "Ты получил результаты поиска в интернете (DuckDuckGo). "
-            "Проанализируй найденные данные и сформируй ПОЛЕЗНЫЙ и ИНФОРМАТИВНЫЙ ответ. "
-            "Указывай источники (ссылки) для ключевых фактов. "
-            "Если данных мало или не по теме — честно скажи."
+            "Пользователь попросил получить данные и создать документ. "
+            "Ты получил данные от внешнего API или из интернета, и документ был создан. "
+            "Сформируй краткий ЧЕЛОВЕКОЧИТАЕМЫЙ отчёт по полученным данным. "
+            "Упомяни, что документ с отчётом также создан и прикреплён. "
+            "НЕ выводи сырой JSON/XML. Извлеки ключевые значения."
         )
     elif has_integration and not all_failed:
         summary_prompt = (
@@ -520,7 +676,7 @@ async def compose_node(state: dict) -> dict:
 
     # Build context-enriched system prompt so compose sees conversation history
     enriched_system = _build_enriched_system_prompt(
-        system_prompt=f"{system_prompt}\n\n{summary_prompt}",
+        system_prompt=f"{system_prompt}\n\n{summary_prompt}" + _completeness_suffix,
         stm=stm,
         ltm=ltm,
         rag=rag,
@@ -543,12 +699,15 @@ async def compose_node(state: dict) -> dict:
             messages=compose_messages,
             temperature=settings.LITELLM_TEMPERATURE,
         )
+        is_complete = _extract_completeness(answer)
+        answer = _strip_completeness_marker(answer)
         answer = _sanitize_llm_answer(answer)
     except Exception as exc:
         logger.warning("Compose LLM failed: %s", exc)
         answer = _build_raw_tool_summary(tool_results)
+        is_complete = True
 
-    return {"final_answer": answer, "next_step": "output"}
+    return {"final_answer": answer, "is_complete": is_complete, "iteration": iteration}
 
 
 # ======================================================================
@@ -733,6 +892,22 @@ def _sanitize_llm_answer(text: str) -> str:
     return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
 
 
+_COMPLETENESS_RE = re.compile(r"COMPLETENESS:\s*(COMPLETE|INCOMPLETE)", re.IGNORECASE)
+
+
+def _extract_completeness(text: str) -> bool:
+    """Extract the COMPLETENESS marker from LLM response. Defaults to True."""
+    m = _COMPLETENESS_RE.search(text or "")
+    if m:
+        return m.group(1).upper() == "COMPLETE"
+    return True
+
+
+def _strip_completeness_marker(text: str) -> str:
+    """Remove the COMPLETENESS: ... marker line from LLM output."""
+    return _COMPLETENESS_RE.sub("", text or "").strip()
+
+
 def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
     """Extract artifacts (PDF base64, etc.) from tool results."""
     artifacts = []
@@ -751,6 +926,13 @@ def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
 
 def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | None:
     """Format known tool results without LLM."""
+    # Mixed chains (data-fetching + artifact-creation) → always use LLM compose
+    _data_tools = {"integration_call", "dynamic_tool_call"}
+    _artifact_tools = {"pdf_create", "excel_create"}
+    tools_in_chain = {tr.tool for tr in tool_results if tr.success}
+    if tools_in_chain & _data_tools and tools_in_chain & _artifact_tools:
+        return None
+
     for tr in tool_results:
         if not tr.success or not tr.result:
             continue

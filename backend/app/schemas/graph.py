@@ -22,6 +22,7 @@ class RouterDecision(str, Enum):
     CHAT = "chat"
     MEMORY = "memory"
     CLARIFY = "clarify"
+    WEB_SEARCH = "web_search"
 
 
 class ToolStep(BaseModel):

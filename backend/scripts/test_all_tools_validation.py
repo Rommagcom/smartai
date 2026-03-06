@@ -139,7 +139,7 @@ def test_planner_signatures():
     for tool in ["pdf_create", "excel_create", "doc_list", "doc_delete", "doc_delete_all",
                  "cron_add", "cron_list", "cron_delete_all",
                  "memory_add", "memory_list", "memory_delete_all",
-                 "integration_call", "register_api_tool", "web_search"]:
+                 "integration_call", "register_api_tool"]:
         assert tool in sigs, f"Missing {tool} in planner_signatures"
         print(f"  OK: {tool} in signatures")
     print("PASS")
@@ -158,7 +158,7 @@ def test_handler_coverage():
         "integration_call", "integration_add", "integrations_list", "integrations_delete_all",
         "dynamic_tool_register", "dynamic_tool_call", "dynamic_tool_list",
         "dynamic_tool_delete", "dynamic_tool_delete_all",
-        "register_api_tool", "web_search",
+        "register_api_tool",
     ]
     for tool in expected:
         assert tool in handlers, f"Missing handler for {tool}"
