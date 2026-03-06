@@ -2557,6 +2557,11 @@ class ChatService:
         tool_calls_log = result.get("tool_calls_log") or []
         artifacts = result.get("artifacts") or []
 
+        # Safety net: re-extract artifacts from tool_calls_log if lost during
+        # LangGraph state propagation (e.g. reducer replaced list with []).
+        if not artifacts and tool_calls_log:
+            artifacts = self._extract_artifacts(tool_calls_log)
+
         # Memory IDs from LTM context (for tracking)
         used_memory_ids: list[str] = []
         rag_sources: list[str] = []
