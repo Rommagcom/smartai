@@ -299,6 +299,20 @@ class TelegramAdapter(MessengerAdapter):
                     session.id,
                     text,
                 )
+
+                # Fallback: if artifacts list is empty, re-extract from tool_calls
+                if not artifacts and tool_calls:
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict) or not tc.get("success"):
+                            continue
+                        result = tc.get("result")
+                        if isinstance(result, dict) and result.get("file_base64"):
+                            artifacts.append({
+                                "file_name": result.get("file_name", DEFAULT_ARTIFACT_FILENAME),
+                                "mime_type": result.get("mime_type", "application/octet-stream"),
+                                "file_base64": result["file_base64"],
+                            })
+
                 self._dev_log(
                     "direct_chat_result",
                     chat_id=chat_id,
@@ -415,6 +429,19 @@ class TelegramAdapter(MessengerAdapter):
             response_text = str(payload.get("response") or "").strip()
             tool_calls = payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else []
             artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+
+            # Fallback: if artifacts list is empty, re-extract from tool_calls
+            if not artifacts and tool_calls:
+                for tc in tool_calls:
+                    if not isinstance(tc, dict) or not tc.get("success"):
+                        continue
+                    result = tc.get("result")
+                    if isinstance(result, dict) and result.get("file_base64"):
+                        artifacts.append({
+                            "file_name": result.get("file_name", DEFAULT_ARTIFACT_FILENAME),
+                            "mime_type": result.get("mime_type", "application/octet-stream"),
+                            "file_base64": result["file_base64"],
+                        })
 
             self._dev_log(
                 "api_chat_result",

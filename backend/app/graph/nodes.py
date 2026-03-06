@@ -726,10 +726,9 @@ def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
         result = call.get("result") if isinstance(call.get("result"), dict) else {}
         if result.get("file_base64"):
             artifacts.append({
-                "type": "file",
-                "filename": result.get("filename", "document.pdf"),
-                "content_type": result.get("content_type", "application/pdf"),
-                "base64": result["file_base64"],
+                "file_name": result.get("file_name", "artifact.bin"),
+                "mime_type": result.get("mime_type", "application/octet-stream"),
+                "file_base64": result["file_base64"],
             })
     return artifacts
 
