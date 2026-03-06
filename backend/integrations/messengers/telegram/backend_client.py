@@ -140,9 +140,6 @@ class BackendApiClient:
     async def chat_self_improve(self, token: str) -> dict[str, Any]:
         return await self._request("POST", "/chat/self-improve", token=token)
 
-    async def execute_python(self, token: str, code: str) -> dict[str, Any]:
-        return await self._request("POST", "/chat/execute-python", token=token, json={"code": code})
-
     async def worker_results_poll(self, token: str, limit: int = 20) -> dict[str, Any]:
         return await self._request("GET", "/chat/worker-results/poll", token=token, params={"limit": limit})
 

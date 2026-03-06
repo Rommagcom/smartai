@@ -62,23 +62,6 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
-                    "name": "execute_python",
-                    "title": "Execute Python",
-                    "description": "Выполнение python-кода в sandbox",
-                    "version": "1.0.0",
-                },
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {"type": "string"},
-                    },
-                    "required": ["code"],
-                    "additionalProperties": False,
-                },
-                "permissions": ["sandbox.python.execute"],
-            },
-            {
-                "manifest": {
                     "name": "memory_add",
                     "title": "Memory Add",
                     "description": "Добавление факта в memory",

@@ -131,7 +131,6 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("chat", self.chat_command))
         application.add_handler(CommandHandler("history", self.history))
         application.add_handler(CommandHandler("self_improve", self.self_improve))
-        application.add_handler(CommandHandler("py", self.execute_python))
         application.add_handler(CommandHandler("make_pdf", self.make_pdf))
         application.add_handler(CommandHandler("memory_add", self.memory_add))
         application.add_handler(CommandHandler("memory_list", self.memory_list))
@@ -1027,18 +1026,6 @@ class TelegramAdapter(MessengerAdapter):
             return
         token, _ = auth
         res = await self.client.chat_self_improve(token)
-        await self._reply_api_result(update, res)
-
-    async def execute_python(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        code = " ".join(context.args).strip()
-        if not code:
-            await update.effective_message.reply_text("Использование: /py <python_code>")
-            return
-        auth = await self._auth_or_reject(update)
-        if not auth:
-            return
-        token, _ = auth
-        res = await self.client.execute_python(token, code)
         await self._reply_api_result(update, res)
 
     async def make_pdf(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

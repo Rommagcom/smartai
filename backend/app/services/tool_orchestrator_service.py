@@ -24,7 +24,6 @@ from app.services.integration_onboarding_service import integration_onboarding_s
 from app.services.ollama_client import ollama_client
 from app.services.pdf_service import pdf_service
 from app.services.rag_service import rag_service
-from app.services.sandbox_service import sandbox_service
 from app.services.schedule_parser_service import schedule_parser_service
 from app.services.scheduler_service import scheduler_service
 from app.services.skills_registry_service import skills_registry_service
@@ -555,7 +554,6 @@ class ToolOrchestratorService:
         return {
             "pdf_create": self._pdf_create,
             "excel_create": self._excel_create,
-            "execute_python": self._execute_python,
             "memory_add": self._memory_add,
             "memory_list": self._memory_list,
             "memory_search": self._memory_search,
@@ -840,13 +838,6 @@ class ToolOrchestratorService:
             columns if isinstance(columns, list) else None,
             rows if isinstance(rows, list) else None,
         )
-
-    async def _execute_python(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db
-        code = str(arguments.get("code") or "").strip()
-        if not code:
-            raise ValueError("execute_python requires code")
-        return await sandbox_service.execute_python_code(code=code, user_id=user.id)
 
     async def _memory_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         fact_type = str(arguments.get("fact_type") or "fact")

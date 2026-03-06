@@ -8,7 +8,6 @@ from sqlalchemy import select
 from app.api.types import CurrentUser, CurrentUserId, DBSession
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
 from app.models.user import User
 from app.models.worker_task import WorkerTask
@@ -28,7 +27,6 @@ from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
 from app.services.short_term_memory_service import short_term_memory_service
 from app.services.skills_registry_service import skills_registry_service
-from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
 from app.services.soul_service import soul_service
 from app.services.worker_result_service import worker_result_service
@@ -269,30 +267,6 @@ async def self_improve(
     current_user: CurrentUser,
 ) -> dict:
     return await self_improvement_service.adapt_preferences(db, current_user)
-
-
-@router.post("/execute-python", responses={400: {"description": "code is required"}})
-async def execute_python(
-    body: dict,
-    db: DBSession,
-    current_user: CurrentUser,
-) -> dict:
-    code = body.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="code is required")
-
-    result = await sandbox_service.execute_python_code(code, current_user.id)
-    snippet = CodeSnippet(
-        user_id=current_user.id,
-        code=code,
-        language="python",
-        execution_result=result,
-        is_successful=result.get("success", False),
-        created_by="assistant",
-    )
-    db.add(snippet)
-    await db.commit()
-    return result
 
 
 @router.post("/tools/pdf-create")
