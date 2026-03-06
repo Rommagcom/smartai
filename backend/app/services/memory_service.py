@@ -128,6 +128,22 @@ class MemoryService:
             if existing:
                 return existing
 
+        # No session_id provided (or not found) — try to reuse the user's
+        # most recent active session so conversation history is preserved
+        # across reconnects / timeout losses.
+        try:
+            recent_result = await db.execute(
+                select(Session)
+                .where(Session.user_id == user_id, Session.active.is_(True))
+                .order_by(Session.last_activity.desc())
+                .limit(1)
+            )
+            recent = recent_result.scalar_one_or_none()
+            if recent:
+                return recent
+        except Exception:
+            logger.debug("Failed to look up recent session for user %s", user_id, exc_info=True)
+
         new_session = Session(user_id=user_id, context_window=[], active=True, last_activity=datetime.now(timezone.utc))
         db.add(new_session)
         await db.flush()
