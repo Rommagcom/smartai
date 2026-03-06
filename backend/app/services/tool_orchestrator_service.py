@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime
 import json
+from typing import Any
 from uuid import UUID
 
 from anyio import to_thread
@@ -44,6 +45,70 @@ def _dev_verbose_log(event: str, **context: object) -> None:
         f"tool orchestrator dev trace: {event}",
         extra={"context": {"component": "tool_orchestrator", "event": event, **context}},
     )
+
+
+# ---- $prev / $step[N] placeholder resolution ----
+
+_PREV_RE = re.compile(r"^\$prev(?:\.(\w+))?$")
+_STEP_RE = re.compile(r"^\$step\[(\d+)\](?:\.(\w+))?$")
+_INLINE_PREV_RE = re.compile(r"\$prev(?:\.(\w+))?")
+_INLINE_STEP_RE = re.compile(r"\$step\[(\d+)\](?:\.(\w+))?")
+
+
+def _deep_get(data: dict | None, key: str | None) -> object:
+    """Get a top-level key from a dict, or the whole dict if key is None."""
+    if data is None:
+        return ""
+    if key is None:
+        return data
+    val = data.get(key)
+    if val is None:
+        return ""
+    return val
+
+
+def _resolve_value(value: object, *, prev: dict | None, steps: list[dict]) -> object:
+    """Resolve a single argument value; recurse into dicts and lists."""
+    if isinstance(value, str):
+        # Exact match: entire value is a placeholder
+        m = _PREV_RE.match(value)
+        if m:
+            return _deep_get(prev, m.group(1))
+        m = _STEP_RE.match(value)
+        if m:
+            idx = int(m.group(1))
+            if 0 <= idx < len(steps):
+                return _deep_get(steps[idx].get("result"), m.group(2))
+            return ""
+
+        # Inline replacement: placeholder embedded in a larger string
+        def _sub_prev(m: re.Match) -> str:
+            v = _deep_get(prev, m.group(1))
+            return str(v) if not isinstance(v, str) else v
+
+        def _sub_step(m: re.Match) -> str:
+            idx = int(m.group(1))
+            if 0 <= idx < len(steps):
+                v = _deep_get(steps[idx].get("result"), m.group(2))
+                return str(v) if not isinstance(v, str) else v
+            return ""
+
+        if "$prev" in value:
+            value = _INLINE_PREV_RE.sub(_sub_prev, value)
+        if "$step[" in value:
+            value = _INLINE_STEP_RE.sub(_sub_step, value)
+        return value
+
+    if isinstance(value, dict):
+        return {k: _resolve_value(v, prev=prev, steps=steps) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_value(item, prev=prev, steps=steps) for item in value]
+    return value
+
+
+def _resolve_placeholders(arguments: dict, *, prev: dict | None, steps: list[dict]) -> dict:
+    """Resolve $prev.* and $step[N].* placeholders in tool arguments."""
+    return {k: _resolve_value(v, prev=prev, steps=steps) for k, v in arguments.items()}
 
 
 class ToolOrchestratorService:
@@ -129,7 +194,14 @@ class ToolOrchestratorService:
             "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
             "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id. "
             "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
-            "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call."
+            "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call. "
+            "16) Для списка загруженных документов — doc_list. "
+            "17) Для удаления одного документа — doc_delete с source_doc (имя файла). "
+            "18) Для удаления всех документов — doc_delete_all. "
+            "19) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+            "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
+            "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
+            "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
         )
 
         try:
@@ -187,6 +259,8 @@ class ToolOrchestratorService:
 
             # Dynamic tool dispatch: dyn:tool_name or dyn_tool_name
             if self.is_dynamic_tool(tool):
+                # Resolve $prev/$step[N] placeholders for dynamic tools too
+                arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
                 try:
                     result = await asyncio.wait_for(
                         dynamic_tool_service.call_dynamic_tool(
@@ -197,6 +271,7 @@ class ToolOrchestratorService:
                         ),
                         timeout=TOOL_STEP_TIMEOUT_SECONDS,
                     )
+                    self._update_chain_context(tool=tool, result=result, context=context)
                     _dev_verbose_log("step_success_dynamic", tool=tool, result=result)
                     results.append({
                         "tool": tool,
@@ -283,17 +358,23 @@ class ToolOrchestratorService:
         return results
 
     @staticmethod
-    def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
+    def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, Any]) -> dict:
         merged = dict(arguments)
 
-        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
-            return merged
+        # --- Onboarding draft propagation (legacy) ---
+        if tool in {"integration_onboarding_test", "integration_onboarding_save"}:
+            onboarding = context.get("integration_onboarding") or {}
+            if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
+                merged["draft"] = onboarding["draft"]
+            if not merged.get("draft_id") and onboarding.get("draft_id"):
+                merged["draft_id"] = onboarding["draft_id"]
 
-        onboarding = context.get("integration_onboarding") or {}
-        if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
-            merged["draft"] = onboarding["draft"]
-        if not merged.get("draft_id") and onboarding.get("draft_id"):
-            merged["draft_id"] = onboarding["draft_id"]
+        # --- Generic $prev / $step[N] resolution ---
+        prev = context.get("_prev")
+        steps_results: list = context.get("_steps") or []
+        if prev is not None or steps_results:
+            merged = _resolve_placeholders(merged, prev=prev, steps=steps_results)
+
         return merged
 
     @staticmethod
@@ -350,25 +431,29 @@ class ToolOrchestratorService:
         return coerced
 
     @staticmethod
-    def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
-        if tool not in {
+    def _update_chain_context(tool: str, result: dict, context: dict[str, Any]) -> None:
+        if not isinstance(result, dict):
+            return
+
+        # --- Generic: always store for $prev / $step[N] ---
+        context["_prev"] = result
+        steps_list: list = context.setdefault("_steps", [])
+        steps_list.append({"tool": tool, "result": result})
+
+        # --- Onboarding draft propagation (legacy) ---
+        if tool in {
             "integration_onboarding_connect",
             "integration_onboarding_test",
             "integration_onboarding_save",
         }:
-            return
-
-        if not isinstance(result, dict):
-            return
-
-        onboarding = dict(context.get("integration_onboarding") or {})
-        draft = result.get("draft") if isinstance(result.get("draft"), dict) else None
-        draft_id = str(result.get("draft_id") or "").strip()
-        if draft is not None:
-            onboarding["draft"] = draft
-        if draft_id:
-            onboarding["draft_id"] = draft_id
-        context["integration_onboarding"] = onboarding
+            onboarding = dict(context.get("integration_onboarding") or {})
+            draft = result.get("draft") if isinstance(result.get("draft"), dict) else None
+            draft_id = str(result.get("draft_id") or "").strip()
+            if draft is not None:
+                onboarding["draft"] = draft
+            if draft_id:
+                onboarding["draft_id"] = draft_id
+            context["integration_onboarding"] = onboarding
 
     async def compose_final_answer(
         self,
@@ -429,6 +514,9 @@ class ToolOrchestratorService:
             "memory_delete": self._memory_delete,
             "memory_delete_all": self._memory_delete_all,
             "doc_search": self._doc_search,
+            "doc_list": self._doc_list,
+            "doc_delete": self._doc_delete,
+            "doc_delete_all": self._doc_delete_all,
             "cron_add": self._cron_add,
             "cron_list": self._cron_list,
             "cron_delete": self._cron_delete,
@@ -762,6 +850,31 @@ class ToolOrchestratorService:
         top_k = int(arguments.get("top_k", 5))
         chunks = await rag_service.retrieve_context(str(user.id), query, top_k=max(1, min(top_k, 10)))
         return {"items": chunks}
+
+    async def _doc_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, arguments
+        docs = await rag_service.list_documents(str(user.id))
+        return {"items": docs}
+
+    async def _doc_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db
+        source_doc = str(arguments.get("source_doc") or "").strip()
+        if not source_doc:
+            raise ValueError("doc_delete requires source_doc (filename)")
+        deleted_count = await rag_service.delete_document(str(user.id), source_doc)
+        return {
+            "deleted": deleted_count > 0,
+            "source_doc": source_doc,
+            "deleted_chunks": deleted_count,
+        }
+
+    async def _doc_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, arguments
+        deleted_count = await rag_service.delete_all_documents(str(user.id))
+        return {
+            "deleted": True,
+            "deleted_count": deleted_count,
+        }
 
     async def _cron_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         _dev_verbose_log(
