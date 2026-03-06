@@ -478,13 +478,14 @@ async def compose_node(state: dict) -> dict:
             "Если были ошибки, честно сообщи и предложи следующий шаг."
         )
 
-    # Strip HTTP headers from tool results to maximise body/content budget for LLM
+    # Strip bulky fields (HTTP headers, file base64) from tool results before LLM
     sanitised_results = []
+    _strip_keys = {"headers", "file_base64", "base64"}
     for t in tool_results:
         d = t.model_dump()
         res = d.get("result")
-        if isinstance(res, dict) and "body" in res and "headers" in res:
-            d["result"] = {k: v for k, v in res.items() if k != "headers"}
+        if isinstance(res, dict):
+            d["result"] = {k: v for k, v in res.items() if k not in _strip_keys}
         sanitised_results.append(d)
 
     tool_calls_json = json.dumps(
@@ -730,6 +731,11 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
     for tr in tool_results:
         if not tr.success or not tr.result:
             continue
+        if tr.tool == "pdf_create":
+            fname = tr.result.get("file_name") or "document.pdf"
+            size = tr.result.get("size_bytes") or 0
+            size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+            return f"Документ {fname} создан{size_kb}."
         if tr.tool == "cron_add":
             payload = tr.result.get("payload", {})
             if isinstance(payload, dict):
