@@ -16,7 +16,7 @@ apscheduler==3.11.0
 pgvector==0.4.1
 pymilvus==2.6.0
 pypdf==6.0.0
-fpdf2==2.8.3
+pdfkit==1.0.0
 beautifulsoup4==4.13.3
 playwright==1.51.0
 cryptography==46.0.1

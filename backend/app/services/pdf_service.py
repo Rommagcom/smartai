@@ -3,59 +3,81 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 from io import BytesIO
-from pathlib import Path
 
-from fpdf.fpdf import FPDF
+import pdfkit
 
 logger = logging.getLogger(__name__)
 
-_DEJAVU_FONT_PATH = os.environ.get(
-    "PDF_FONT_PATH",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-)
+_WKHTMLTOPDF_PATH = os.environ.get("WKHTMLTOPDF_PATH", "")
+
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{ font-family: 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif; font-size: 12px; margin: 30px; color: #222; }}
+  h1 {{ font-size: 20px; margin-bottom: 12px; }}
+  pre {{ white-space: pre-wrap; word-wrap: break-word; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+{body}
+</body>
+</html>
+"""
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters."""
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    text = text.replace('"', "&quot;")
+    return text
+
+
+def _content_to_html(content: str) -> str:
+    """Convert plain text content to simple HTML paragraphs."""
+    escaped = _escape_html(content)
+    paragraphs = []
+    for block in re.split(r"\n{2,}", escaped):
+        lines = block.strip()
+        if lines:
+            paragraphs.append(f"<p>{lines.replace(chr(10), '<br>')}</p>")
+    return "\n".join(paragraphs) if paragraphs else f"<p>{escaped}</p>"
 
 
 class PdfService:
+    def __init__(self) -> None:
+        if _WKHTMLTOPDF_PATH:
+            self._config = pdfkit.configuration(wkhtmltopdf=_WKHTMLTOPDF_PATH)
+        else:
+            self._config = None
+        self._options = {
+            "encoding": "UTF-8",
+            "page-size": "A4",
+            "margin-top": "15mm",
+            "margin-right": "15mm",
+            "margin-bottom": "15mm",
+            "margin-left": "15mm",
+            "quiet": "",
+        }
+
     def create_pdf_base64(self, title: str, content: str, filename: str = "document.pdf") -> dict:
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_page()
-        pdf.set_title(title)
+        html = _HTML_TEMPLATE.format(
+            title=_escape_html(title),
+            body=_content_to_html(content),
+        )
 
-        font_loaded = False
-        if Path(_DEJAVU_FONT_PATH).is_file():
-            try:
-                pdf.add_font("DejaVu", "", _DEJAVU_FONT_PATH, uni=True)
-                pdf.add_font("DejaVu", "B", _DEJAVU_FONT_PATH.replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"), uni=True)
-                font_loaded = True
-            except Exception:
-                logger.warning("Failed to load DejaVu font, falling back to Helvetica", exc_info=True)
+        kwargs: dict = {"options": self._options}
+        if self._config:
+            kwargs["configuration"] = self._config
 
-        if font_loaded:
-            pdf.set_font("DejaVu", "B", 16)
-        else:
-            pdf.set_font("Helvetica", "B", 16)
-        pdf.multi_cell(0, 10, title)
-        pdf.ln(2)
-
-        if font_loaded:
-            pdf.set_font("DejaVu", size=11)
-        else:
-            pdf.set_font("Helvetica", size=11)
-        safe_text = content.replace("\t", "    ")
-        for line in safe_text.splitlines() or [safe_text]:
-            pdf.multi_cell(0, 7, line)
-
-        output = pdf.output(dest="S")
-        if isinstance(output, bytearray):
-            pdf_bytes = bytes(output)
-        elif isinstance(output, str):
-            pdf_bytes = output.encode("latin-1", errors="ignore")
-        else:
-            buffer = BytesIO()
-            pdf.output(buffer)
-            pdf_bytes = buffer.getvalue()
+        pdf_bytes: bytes = pdfkit.from_string(html, False, **kwargs)
 
         return {
             "file_name": filename,

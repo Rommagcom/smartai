@@ -889,11 +889,24 @@ class ChatService:
     @staticmethod
     def _sanitize_llm_answer(text: str) -> str:
         cleaned = str(text or "")
+        if not cleaned.strip():
+            return (
+                "Не удалось сформировать итоговый текст ответа. "
+                "Попробуйте уточнить запрос."
+            )
+
+        original = cleaned
         cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
         if cleaned:
             return cleaned
+
+        # Aggressive strip removed all content — fallback: strip only the tags
+        logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
+        fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
+        if fallback:
+            return fallback
         return (
             "Не удалось сформировать итоговый текст ответа. "
             "Попробуйте уточнить запрос."
