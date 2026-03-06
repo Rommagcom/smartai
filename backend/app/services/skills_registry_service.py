@@ -183,6 +183,51 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "doc_list",
+                    "title": "Document List",
+                    "description": "Список загруженных документов пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.read"],
+            },
+            {
+                "manifest": {
+                    "name": "doc_delete",
+                    "title": "Document Delete",
+                    "description": "Удалить один загруженный документ по имени файла",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "source_doc": {"type": "string", "description": "Имя файла документа для удаления"},
+                    },
+                    "required": ["source_doc"],
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.write"],
+            },
+            {
+                "manifest": {
+                    "name": "doc_delete_all",
+                    "title": "Document Delete All",
+                    "description": "Удалить все загруженные документы пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.write"],
+            },
+            {
+                "manifest": {
                     "name": "cron_add",
                     "title": "Cron Add",
                     "description": "Создание cron/reminder задачи. Для задач с вызовом API/интеграции используй action_type='chat'",

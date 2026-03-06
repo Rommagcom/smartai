@@ -260,6 +260,13 @@ async def router_node(state: dict) -> dict:
         "это integration_call с service_name=X.\n"
         "9) Для пользовательских динамических API используй dyn:<имя> с нужными аргументами.\n"
         "10) Если в 'семантически найденных инструментах' есть подходящий — предпочитай его.\n"
+        "11) Для списка загруженных документов — doc_list.\n"
+        "12) Для удаления одного документа — doc_delete с source_doc (имя файла).\n"
+        "13) Для удаления всех документов — doc_delete_all.\n"
+        "14) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+        "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
+        "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
+        "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
     )
 
     # Build messages with recent history for context continuity
@@ -769,6 +776,30 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             return "Все напоминания удалены."
         if tr.tool == "memory_delete_all":
             return "Память очищена."
+        if tr.tool == "doc_list":
+            items = tr.result.get("items", [])
+            if isinstance(items, list):
+                if not items:
+                    return "У вас нет загруженных документов."
+                lines = ["Ваши документы:"]
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        name = item.get("source_doc") or item.get("name") or "?"
+                        chunks = item.get("chunk_count", "")
+                        suffix = f" ({chunks} частей)" if chunks else ""
+                        lines.append(f"- {name}{suffix}")
+                return "\n".join(lines)
+        if tr.tool == "doc_delete":
+            source = tr.result.get("source_doc", "")
+            deleted_chunks = tr.result.get("deleted_chunks", 0)
+            if not tr.result.get("deleted"):
+                return f"Документ {source} не найден." if source else "Документ не найден."
+            return f"Документ {source} удалён ({deleted_chunks} частей)."
+        if tr.tool == "doc_delete_all":
+            deleted = tr.result.get("deleted_count", 0)
+            if deleted <= 0:
+                return "У вас не было загруженных документов."
+            return f"Все документы удалены ({deleted} частей)."
         # Dynamic Tool Injection responses
         if tr.tool == "dynamic_tool_register":
             msg = tr.result.get("message", "")

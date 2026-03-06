@@ -492,6 +492,33 @@ class ChatService:
         if re.search(r"\b(что\s+ты\s+помниш|что\s+ты\s+знаеш|покажи\s+памят|список\s+памят|моя\s+памят)\b", lowered):
             return [{"tool": "memory_list", "arguments": {}}]
 
+        # Document management: list, delete one, delete all
+        if re.search(
+            r"\b(?:удали|удалить|очисти|очистить|сотри|стереть)\b.*\bвс[\u0435\u0451]\b.*\b(?:документ|файл)"
+            r"|delete\s+all\s+(?:my\s+)?(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_delete_all", "arguments": {}}]
+
+        _doc_del_m = re.search(
+            r"\b(?:удали|удалить|убери|убрать|сотри|стереть)\b.*\b(?:документ|файл)\w*\s+([\w._-]+\.[\w]+)"
+            r"|delete\s+(?:document|file)\s+([\w._-]+\.[\w]+)",
+            lowered,
+        )
+        if _doc_del_m:
+            source_doc = (_doc_del_m.group(1) or _doc_del_m.group(2) or "").strip()
+            if source_doc:
+                return [{"tool": "doc_delete", "arguments": {"source_doc": source_doc}}]
+
+        if re.search(
+            r"\b(покажи|список|какие|мои|выведи)\b.*\b(?:документ|файл)"
+            r"|list\s+(?:my\s+)?(?:documents?|files?)"
+            r"|show\s+(?:my\s+)?(?:documents?|files?)"
+            r"|my\s+(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_list", "arguments": {}}]
+
         return None
 
     @staticmethod
@@ -1747,6 +1774,34 @@ class ChatService:
                 if len(items) > 8:
                     lines.append(f"- …и ещё {len(items) - 8}")
                 return "\n".join(lines)
+
+            if tool == "doc_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "У вас нет загруженных документов."
+                lines = ["Ваши документы:"]
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        name = str(item.get("source_doc") or item.get("name") or "?").strip()
+                        chunks = item.get("chunk_count", "")
+                        suffix = f" ({chunks} частей)" if chunks else ""
+                        lines.append(f"- {name}{suffix}")
+                if len(items) > 20:
+                    lines.append(f"- …и ещё {len(items) - 20}")
+                return "\n".join(lines)
+
+            if tool == "doc_delete":
+                source = str(result.get("source_doc") or "").strip()
+                deleted_chunks = int(result.get("deleted_chunks") or 0)
+                if not result.get("deleted"):
+                    return f"Документ {source} не найден." if source else "Документ не найден."
+                return f"Документ {source} удалён ({deleted_chunks} частей)."
+
+            if tool == "doc_delete_all":
+                deleted = int(result.get("deleted_count") or 0)
+                if deleted <= 0:
+                    return "У вас не было загруженных документов."
+                return f"Все документы удалены ({deleted} частей)."
         return None
 
     async def _maybe_fast_tool_answer(
