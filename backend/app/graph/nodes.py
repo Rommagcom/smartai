@@ -248,6 +248,7 @@ async def router_node(state: dict) -> dict:
         "Если задача требует вызова API/интеграции (курс валют, погода и т.д.) — добавь action_type='chat'. "
         "Если обычное текстовое напоминание — action_type не нужен.\n"
         "2) Для PDF — pdf_create.\n"
+        "2a) Для Excel/таблицы — excel_create.\n"
         "3) Если просит подключить API — register_api_tool с user_message (полным сообщением пользователя).\n"
         "4) Для удаления всех напоминаний — cron_delete_all.\n"
         "5) Не выдумывай аргументы.\n"
@@ -733,6 +734,11 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             continue
         if tr.tool == "pdf_create":
             fname = tr.result.get("file_name") or "document.pdf"
+            size = tr.result.get("size_bytes") or 0
+            size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+            return f"Документ {fname} создан{size_kb}."
+        if tr.tool == "excel_create":
+            fname = tr.result.get("file_name") or "document.xlsx"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
             return f"Документ {fname} создан{size_kb}."
