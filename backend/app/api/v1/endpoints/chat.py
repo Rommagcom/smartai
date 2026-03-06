@@ -135,7 +135,7 @@ async def chat(
     await memory_service.append_message(db, current_user.id, session.id, "user", payload.message)
     await db.commit()
 
-    response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond(
+    response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond_via_graph(
         db,
         current_user,
         session.id,

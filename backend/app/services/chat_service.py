@@ -32,7 +32,7 @@ class _CronAddToolArguments(BaseModel):
     schedule_text: str = Field(description="Текст расписания, например: 'каждый день в 9:00', 'через 30 минут', 'сегодня в 21:00'")
     task_text: str = Field(description="Текст задачи или напоминания")
     name: str = Field(default="chat-reminder", description="Имя задачи")
-    action_type: str = Field(default="send_message", description="Тип действия")
+    action_type: str = Field(default="send_message", description="Тип действия: 'send_message' для текстового напоминания, 'chat' для выполнения инструмента (integration_call, API)")
 
 
 class _CronAddToolDecision(BaseModel):
@@ -592,11 +592,19 @@ class ChatService:
         if not schedule_text or not task_text:
             return None
 
+        action_type = "send_message"
+        if re.search(
+            r"\b(?:интеграц|integration|api|курс\s+валют|погод|weather|вызов|данные\s+из|fetch|запрос)\b",
+            task_text,
+            flags=re.IGNORECASE,
+        ):
+            action_type = "chat"
+
         return {
             "name": "chat-reminder",
             "schedule_text": schedule_text,
             "task_text": task_text,
-            "action_type": "send_message",
+            "action_type": action_type,
         }
 
     @staticmethod
@@ -881,11 +889,24 @@ class ChatService:
     @staticmethod
     def _sanitize_llm_answer(text: str) -> str:
         cleaned = str(text or "")
+        if not cleaned.strip():
+            return (
+                "Не удалось сформировать итоговый текст ответа. "
+                "Попробуйте уточнить запрос."
+            )
+
+        original = cleaned
         cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
         if cleaned:
             return cleaned
+
+        # Aggressive strip removed all content — fallback: strip only the tags
+        logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
+        fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
+        if fallback:
+            return fallback
         return (
             "Не удалось сформировать итоговый текст ответа. "
             "Попробуйте уточнить запрос."
@@ -1267,6 +1288,8 @@ class ChatService:
                 planner = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
@@ -1274,6 +1297,8 @@ class ChatService:
                 planner_retry = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
                 retry_use_tools = bool(planner_retry.get("use_tools"))
                 retry_steps = planner_retry.get("steps") if isinstance(planner_retry.get("steps"), list) else []
@@ -1627,11 +1652,23 @@ class ChatService:
                     return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
                 if not body:
                     return f"Ответ интеграции (HTTP {status_code}): пустое тело."
-                max_len = 3000
+                max_len = 12000
                 preview = body[:max_len]
                 if len(body) > max_len:
                     preview += f"\n…(обрезано, всего {len(body)} символов)"
                 return f"Ответ интеграции (HTTP {status_code}):\n```\n{preview}\n```"
+
+            if tool == "pdf_create":
+                fname = str(result.get("file_name") or "document.pdf")
+                size = int(result.get("size_bytes") or 0)
+                size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+                return f"Документ {fname} создан{size_kb}."
+
+            if tool == "excel_create":
+                fname = str(result.get("file_name") or "document.xlsx")
+                size = int(result.get("size_bytes") or 0)
+                size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+                return f"Документ {fname} создан{size_kb}."
 
             if tool == "integrations_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)
@@ -1928,6 +1965,8 @@ class ChatService:
                 tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             )
 
@@ -2203,6 +2242,8 @@ class ChatService:
                     "верни use_tool=true и заполни arguments с schedule_text и task_text. "
                     "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
                     "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+                    "Если задача требует ВЫЗОВА API или интеграции (курс валют, погода и т.д.) — "
+                    "используй action_type='chat'. Если обычное текстовое напоминание — action_type='send_message'. "
                     "Если данных недостаточно, верни use_tool=false."
                 ),
             )
@@ -2233,7 +2274,10 @@ class ChatService:
             '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
             "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments. "
             "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
-            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'."
+            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+            "Если задача требует ВЫЗОВА API, интеграции или получения данных (курс валют, погода, и т.д.) — "
+            "используй action_type='chat' и в task_text опиши что нужно сделать (например 'вызови интеграцию nationalbank и покажи курсы валют'). "
+            "Если задача — просто текстовое напоминание (встреча, позвонить, купить), оставь action_type='send_message'."
         )
 
         for _ in range(2):
@@ -2394,6 +2438,83 @@ class ChatService:
             service_name=parsed["service_name"],
         )
         return clean_answer, tool_calls, artifacts
+
+    # ==================================================================
+    # Graph-based respond — new LangGraph architecture
+    # ==================================================================
+
+    async def respond_via_graph(
+        self,
+        db: AsyncSession,
+        user: User,
+        session_id: UUID,
+        user_message: str,
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+        """Process a chat request through the LangGraph agent pipeline.
+
+        This is the new architecture entry point that replaces the monolithic
+        respond() method with a graph-based flow:
+          guardrail → memory → router → (tool_exec|chat) → compose → output
+
+        Returns the same tuple as respond() for backward compatibility.
+        """
+        from app.graph import agent_graph
+
+        initial_state = {
+            "user_id": user.id,
+            "session_id": session_id,
+            "user_message": user_message,
+            "system_prompt": user.system_prompt_template,
+            "permissions": [],
+            "history_messages": [],
+            "stm_context": [],
+            "ltm_context": [],
+            "rag_context": [],
+            "history_summary": None,
+            "extracted_entities": [],
+            "router_output": None,
+            "tool_results": [],
+            "artifacts": [],
+            "input_guardrail": None,
+            "output_guardrail": None,
+            "final_answer": "",
+            "tool_calls_log": [],
+            "next_step": "",
+            "iteration": 0,
+            "max_iterations": settings.LANGGRAPH_MAX_ITERATIONS,
+            "error": None,
+        }
+
+        self._dev_verbose_log(
+            "graph_respond_start",
+            user_id=str(user.id),
+            session_id=str(session_id),
+        )
+
+        try:
+            result = await agent_graph.ainvoke(initial_state)
+        except Exception:
+            logger.exception("LangGraph agent failed, falling back to legacy respond")
+            return await self.respond(db, user, session_id, user_message)
+
+        # Extract results in the legacy format
+        final_answer = str(result.get("final_answer") or "")
+        tool_calls_log = result.get("tool_calls_log") or []
+        artifacts = result.get("artifacts") or []
+
+        # Memory IDs from LTM context (for tracking)
+        used_memory_ids: list[str] = []
+        rag_sources: list[str] = []
+
+        self._dev_verbose_log(
+            "graph_respond_done",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            tool_calls_count=len(tool_calls_log),
+            answer_length=len(final_answer),
+        )
+
+        return final_answer, used_memory_ids, rag_sources, tool_calls_log, artifacts
 
 
 chat_service = ChatService()

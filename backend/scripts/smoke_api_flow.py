@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.db.session import get_db
 from app.main import app
+from app.models.dynamic_tool import DynamicTool
 from app.models.message import Message
 from app.models.session import Session
 from app.models.user import User
@@ -31,6 +32,7 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", future=True)
     async with engine.begin() as conn:
         await conn.run_sync(User.__table__.create)
+        await conn.run_sync(DynamicTool.__table__.create)
         await conn.run_sync(Session.__table__.create)
         await conn.run_sync(Message.__table__.create)
 
@@ -52,6 +54,7 @@ async def fake_extract_and_store_facts(db, user_id, user_text, assistant_text):
 async def run() -> None:
     session_factory, engine = await init_db()
     original_chat_respond = chat_service.respond
+    original_chat_respond_via_graph = chat_service.respond_via_graph
     original_extract_and_store_facts = memory_service.extract_and_store_facts
 
     async def override_get_db():
@@ -60,6 +63,7 @@ async def run() -> None:
 
     app.dependency_overrides[get_db] = override_get_db
     chat_service.respond = fake_respond
+    chat_service.respond_via_graph = fake_respond
     memory_service.extract_and_store_facts = fake_extract_and_store_facts
 
     try:
@@ -109,6 +113,7 @@ async def run() -> None:
             ensure(bool(validation_error), "expected validation error for extra argument")
     finally:
         chat_service.respond = original_chat_respond
+        chat_service.respond_via_graph = original_chat_respond_via_graph
         memory_service.extract_and_store_facts = original_extract_and_store_facts
 
         try:

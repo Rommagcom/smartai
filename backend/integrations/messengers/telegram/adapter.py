@@ -630,8 +630,8 @@ class TelegramAdapter(MessengerAdapter):
         # Use human-readable message when present (cron_reminder, etc.).
         human_message = str(item.get("message") or "").strip()
 
-        # For cron_reminder: display the human message directly.
-        if job_type == "cron_reminder" and human_message:
+        # For cron_reminder / cron_chat: display the human message directly.
+        if job_type in {"cron_reminder", "cron_chat"} and human_message:
             return human_message
 
         preview = item.get("result_preview")
