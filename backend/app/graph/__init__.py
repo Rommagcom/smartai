@@ -14,6 +14,10 @@ Graph topology (cyclic refinement):
                           │   memory     │
                           └──────┬───────┘
                                  │
+                           ┌────────▼────────┐
+                           │intent_classifier│
+                           └────────┬────────┘
+                                 │
                           ┌──────▼───────┐
                           │  retriever   │  ← Milvus semantic tool search
                           └──────┬───────┘
@@ -22,38 +26,42 @@ Graph topology (cyclic refinement):
               ┌─────│        router          │──────┬──────────┐
               │     └────────────┬────────────┘      │          │
               │                  │                   │          │
-        ┌─────▼──┐        ┌─────▼──┐         ┌──────▼───┐ ┌────▼─────┐
-        │tool_exec│        │  chat  │         │  output  │ │web_search│
-        └────┬────┘        └────┬───┘         └──────────┘ └────┬─────┘
-             │                  │                               │
-             │                  │                         ┌─────▼─────┐
-             │                  │                         │ web_fetch │
-             │                  │                         └─────┬─────┘
-             │                  │                               │
-             └──────────────────┴───────────────────────────────┘
-                                │
-                         ┌──────▼───────┐
-                         │   compose    │  ← LLM completeness check
-                         └──────┬───────┘
-                                │
-                     ┌──────────▼──────────┐
-                     │  _should_we_finish  │
-                     └───┬────────────┬────┘
-                         │            │
-                (finish) │            │ (continue, max 3)
-                         │            │
-                  ┌──────▼───────┐    │
-                  │   output     │    └──→ router (loop back)
-                  └──────┬───────┘
-                         │
-                  ┌──────▼───────┐
-                  │     END      │
-                  └──────────────┘
+          ┌─────▼──┐        ┌─────▼──┐
+          │tool_exec│        │  chat  │
+          └────┬────┘        └────┬───┘
+            │                  │
+            │                  └─────────────────────────→ output ──→ END
+            │
+          ┌────▼─────┐
+          │web_search│
+          └────┬─────┘
+            │
+          ┌────▼─────┐
+          │ web_fetch│
+          └────┬─────┘
+            │
+         ┌─────▼──────┐
+         │  compose   │  ← LLM completeness check (tools/web path)
+         └─────┬──────┘
+            │
+          ┌───────▼────────┐
+          │_should_we_finish│
+          └───┬──────────┬──┘
+           │          │
+       (finish)│          │(continue)
+           │          └────────────→ router (loop back)
+           │
+          ┌───▼────┐
+          │ output │
+          └───┬────┘
+           │
+         ┌─▼─┐
+         │END│
+         └───┘
 """
 from __future__ import annotations
 
 import logging
-import operator
 from typing import Annotated, Any, TypedDict
 from uuid import UUID
 
@@ -62,6 +70,7 @@ from langgraph.graph import END, StateGraph
 from app.graph.nodes import (
     chat_node,
     compose_node,
+    intent_classifier_node,
     input_guardrail_node,
     memory_node,
     output_node,
@@ -71,6 +80,7 @@ from app.graph.nodes import (
     web_fetch_node,
     web_search_node,
 )
+from app.core.config import settings
 from app.schemas.graph import (
     ExtractedEntity,
     GuardrailResult,
@@ -89,6 +99,11 @@ def _replace_value(a: Any, b: Any) -> Any:
 
 # LangGraph requires a TypedDict with reducers for concurrent updates
 class GraphState(TypedDict, total=False):
+    # Reflexion compatibility fields
+    messages: Annotated[list[str], _replace_value]
+    context: Annotated[list[str], _replace_value]
+    client_id: str
+
     user_id: UUID
     session_id: UUID
     user_message: str
@@ -96,7 +111,9 @@ class GraphState(TypedDict, total=False):
     permissions: list[str]
 
     # Router
+    intent: Annotated[str, _replace_value]
     router_output: Annotated[RouterOutput | None, _replace_value]
+    feedback_plan: Annotated[str, _replace_value]
 
     # Memory
     history_messages: Annotated[list[dict], _replace_value]
@@ -128,6 +145,7 @@ class GraphState(TypedDict, total=False):
     # Control
     next_step: Annotated[str, _replace_value]
     iteration: Annotated[int, _replace_value]
+    iterations: Annotated[int, _replace_value]
     max_iterations: Annotated[int, _replace_value]
     is_complete: Annotated[bool, _replace_value]
     error: Annotated[str | None, _replace_value]
@@ -162,22 +180,35 @@ def _route_after_router(state: dict) -> str:
     return "chat"
 
 
+def _route_after_intent_classifier(state: dict) -> str:
+    """Route lightweight intents directly to chat, others to retriever."""
+    next_step = str(state.get("next_step") or "").strip().lower()
+    if next_step == "chat":
+        return "chat"
+    if next_step == "retriever":
+        return "retriever"
+
+    intent = str(state.get("intent") or "").strip().lower()
+    if intent == "small_talk":
+        return "chat"
+    return "retriever"
+
+
 def _route_after_tool_exec(state: dict) -> str:
     """After tool execution, always compose the final answer."""
     return "compose"
-
-
-_MAX_REFINEMENT_ITERATIONS = 3
 
 
 def _should_we_finish(state: dict) -> str:
     """Decide whether the compose result is complete or needs another loop.
 
     Returns 'finish' → output, 'continue' → router for more data.
-    Hard cap at _MAX_REFINEMENT_ITERATIONS to prevent infinite loops.
+    Hard cap at max_iterations/state setting to prevent infinite loops.
     """
     iteration = state.get("iteration", 1)
-    if iteration >= _MAX_REFINEMENT_ITERATIONS:
+    iteration = state.get("iterations", iteration)
+    max_iterations = int(state.get("max_iterations") or settings.LANGGRAPH_MAX_ITERATIONS)
+    if iteration >= max_iterations:
         logger.info("Refinement cap reached (iteration=%d), finishing", iteration)
         return "finish"
 
@@ -194,6 +225,7 @@ def build_agent_graph() -> StateGraph:
     # 1. Добавление узлов
     workflow.add_node("guardrail", input_guardrail_node)
     workflow.add_node("memory", memory_node)
+    workflow.add_node("intent_classifier", intent_classifier_node)
     workflow.add_node("retriever", tool_retriever_node)
     workflow.add_node("router", router_node)
     workflow.add_node("tool_exec", tool_execution_node)
@@ -212,7 +244,11 @@ def build_agent_graph() -> StateGraph:
         "output": "output",
     })
 
-    workflow.add_edge("memory", "retriever")
+    workflow.add_edge("memory", "intent_classifier")
+    workflow.add_conditional_edges("intent_classifier", _route_after_intent_classifier, {
+        "chat": "chat",
+        "retriever": "retriever",
+    })
     workflow.add_edge("retriever", "router")
 
     # Роутер теперь направляет в действия
@@ -223,11 +259,11 @@ def build_agent_graph() -> StateGraph:
         "output": "output",
     })
 
-    # Путь инструментов и веб-поиска теперь ВСЕГДА ведет в compose
+    # Путь инструментов и веб-поиска ведет в compose
     workflow.add_edge("tool_exec", "compose")
     workflow.add_edge("web_search", "web_fetch")
     workflow.add_edge("web_fetch", "compose")
-    workflow.add_edge("chat", "compose") # Чат тоже синтезируется для единообразия
+    workflow.add_edge("chat", "output")
 
     # 4. Циклическая проверка: возвращаемся в роутер или идем в output?
     # Вам нужно реализовать функцию _should_we_finish(state)

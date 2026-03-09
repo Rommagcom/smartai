@@ -228,20 +228,25 @@ class TelegramAdapter(MessengerAdapter):
         visible = clean[:first_limit]
         tail = clean[first_limit:]
 
-        msg = await bot.send_message(chat_id=chat_id, text="⏳")
-        chunk_size = 220
-        for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
-            part = visible[:idx]
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
-            await asyncio.sleep(0.08)
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text="⏳")
+            chunk_size = 220
+            for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
+                part = visible[:idx]
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
+                await asyncio.sleep(0.08)
 
-        if not visible:
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
+            if not visible:
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
 
-        while tail:
-            part = tail[:3500]
-            tail = tail[3500:]
-            await bot.send_message(chat_id=chat_id, text=part)
+            while tail:
+                part = tail[:3500]
+                tail = tail[3500:]
+                await bot.send_message(chat_id=chat_id, text=part)
+        except Exception:
+            logger.warning("telegram stream reply failed, sending plain text", exc_info=True)
+            # Fallback to a single plain message so user still gets an answer.
+            await bot.send_message(chat_id=chat_id, text=clean[:4096])
 
     async def _chat_background_task_direct(
         self,
@@ -343,19 +348,25 @@ class TelegramAdapter(MessengerAdapter):
                     summary = f"Пользователь: {user_short}"
                     if assistant_short:
                         summary += f" → Ассистент: {assistant_short}"
-                    await short_term_memory_service.append(str(user.id), summary)
+                    try:
+                        await short_term_memory_service.append(str(user.id), summary)
+                    except Exception:
+                        logger.warning("telegram STM append failed", exc_info=True)
 
             await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
 
             for artifact in artifacts:
-                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                try:
+                    file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                    if not file_base64:
+                        continue
+                    file_bytes = base64.b64decode(file_base64)
+                    file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                    bio = BytesIO(file_bytes)
+                    bio.name = file_name
+                    await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                except Exception:
+                    logger.warning("telegram artifact send failed (direct)", exc_info=True)
             self._dev_log(
                 "direct_chat_done",
                 chat_id=chat_id,
@@ -456,14 +467,17 @@ class TelegramAdapter(MessengerAdapter):
             await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
 
             for artifact in artifacts:
-                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                try:
+                    file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                    if not file_base64:
+                        continue
+                    file_bytes = base64.b64decode(file_base64)
+                    file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                    bio = BytesIO(file_bytes)
+                    bio.name = file_name
+                    await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                except Exception:
+                    logger.warning("telegram artifact send failed (api)", exc_info=True)
         except httpx.TimeoutException:
             await bot.send_message(
                 chat_id=chat_id,

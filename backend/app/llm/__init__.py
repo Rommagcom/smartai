@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, AsyncGenerator, Type, TypeVar
 
+import httpx
 import litellm
 from pydantic import BaseModel, ValidationError
 
@@ -51,9 +53,19 @@ class LLMProvider:
         (openai/, anthropic/, ollama/, etc.) use as-is.
         Otherwise, assume Ollama via the configured base URL.
         """
-        name = (model or settings.LITELLM_MODEL).strip()
+        # Priority: explicit arg > LITELLM_MODEL > legacy env LLM_MODEL > OLLAMA_MODEL_NAME
+        # This keeps backward compatibility with existing .env files where only
+        # LLM_MODEL/OLLAMA_MODEL_NAME are defined.
+        name = (model or settings.LITELLM_MODEL or "").strip()
         if not name:
-            name = settings.LITELLM_MODEL
+            name = os.getenv("LLM_MODEL", "").strip()
+        if not name:
+            name = (settings.OLLAMA_MODEL_NAME or "").strip()
+
+        # Common Ollama tags look like "model:tag" (e.g. qwen2.5:7b).
+        # Treat such bare names as local Ollama models by default.
+        if name and "/" not in name and ":" in name:
+            return f"ollama_chat/{name}"
 
         # If it already has a provider prefix, return as-is
         known_prefixes = (
@@ -66,6 +78,26 @@ class LLMProvider:
 
         # Default: wrap as ollama model
         return f"ollama_chat/{name}"
+
+    @staticmethod
+    async def _fallback_ollama_model(api_base: str) -> str | None:
+        """Return first installed Ollama model name, if any."""
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                resp = await client.get(f"{api_base.rstrip('/')}/api/tags")
+                resp.raise_for_status()
+            payload = resp.json()
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(models, list):
+                return None
+            for item in models:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    if name:
+                        return f"ollama_chat/{name}"
+        except Exception:
+            logger.debug("Failed to query Ollama tags for fallback model", exc_info=True)
+        return None
 
     def _base_params(self, model: str | None = None) -> dict[str, Any]:
         """Build common parameters for litellm calls."""
@@ -120,6 +152,27 @@ class LLMProvider:
                     "LLM chat attempt %d/%d failed: %s",
                     attempt, retries, exc,
                 )
+
+                # If configured Ollama model is missing, try first available local model.
+                err_text = str(exc).lower()
+                current_model = str(params.get("model") or "")
+                if (
+                    "not found" in err_text
+                    and "model" in err_text
+                    and current_model.startswith("ollama_chat/")
+                    and attempt < retries
+                ):
+                    fallback_model = await self._fallback_ollama_model(settings.OLLAMA_BASE_URL)
+                    if fallback_model and fallback_model != current_model:
+                        logger.warning(
+                            "Switching to fallback Ollama model: %s -> %s",
+                            current_model,
+                            fallback_model,
+                        )
+                        params["model"] = fallback_model
+                        params["api_base"] = settings.OLLAMA_BASE_URL
+                        continue
+
                 if attempt < retries:
                     await asyncio.sleep(1.0 * attempt)
 

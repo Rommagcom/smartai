@@ -42,8 +42,18 @@ async def lifespan(app: FastAPI):
 
     # Warm-up LiteLLM provider
     try:
-        from app.llm import llm_provider  # noqa: F401
-        logger.info("LiteLLM provider ready", extra={"context": {"component": "litellm", "event": "ready", "model": settings.LITELLM_MODEL}})
+        from app.llm import llm_provider
+        resolved_model = llm_provider._resolve_model(None)
+        logger.info(
+            "LiteLLM provider ready",
+            extra={
+                "context": {
+                    "component": "litellm",
+                    "event": "ready",
+                    "model": resolved_model,
+                }
+            },
+        )
     except Exception as exc:
         logger.warning("LiteLLM init skipped: %s", exc)
 

@@ -6,6 +6,8 @@ Node architecture:
   ├─────────┤
   │ memory  │ → gather all memory layers
   ├─────────┤
+    │ intent  │ → micro-router: small_talk | needs_tools
+    ├─────────┤
   │retriever│ → Milvus semantic tool search
   ├─────────┤
   │ router  │ → decide: tool | chat | memory | clarify | web_search
@@ -30,7 +32,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+import xml.etree.ElementTree as ET
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.schemas.graph import (
@@ -46,6 +51,18 @@ from app.schemas.graph import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class IntentClassifierOutput(BaseModel):
+    intent: Literal["small_talk", "needs_tools"] = Field(
+        description="Lightweight intent class: small_talk or needs_tools"
+    )
+
+
+class ReflexionComposeOutput(BaseModel):
+    is_complete: bool
+    answer: str = ""
+    feedback_plan: str = ""
 
 
 def _dev_log(event: str, **ctx: Any) -> None:
@@ -145,6 +162,56 @@ async def memory_node(state: dict) -> dict:
 
 
 # ======================================================================
+# Node: Intent Classifier (micro-router)
+# ======================================================================
+
+
+async def intent_classifier_node(state: dict) -> dict:
+    """Classify if request can skip heavy retrieval/tool routing."""
+    from app.llm import llm_provider
+
+    messages: list[str] = state.get("messages") or []
+    query = (messages[-1] if messages else state.get("user_message", "")).strip()
+    if not query:
+        return {"intent": "small_talk", "next_step": "chat"}
+
+    # Deterministic guard for ultra-cheap path.
+    if _looks_like_small_talk(query):
+        return {"intent": "small_talk", "next_step": "chat"}
+
+    prompt = (
+        "Твоя задача — классифицировать намерение пользователя.\n\n"
+        f"Входящее сообщение: \"{query}\"\n\n"
+        "ПРАВИЛА КЛАССИФИКАЦИИ:\n"
+        "1. \"small_talk\": простое приветствие, прощание, благодарность, "
+        "короткая светская беседа или запрос, который НЕ требует поиска свежих фактов, "
+        "баз данных или вычислений.\n"
+        "2. \"needs_tools\": запрос, требующий поиска информации (интернет), "
+        "корпоративных данных, использования API, аналитики или точных фактов.\n\n"
+        "Ответь СТРОГО валидным JSON формата:\n"
+        '{"intent": "small_talk" | "needs_tools"}'
+    )
+
+    try:
+        out = await llm_provider.chat_structured(
+            messages=[{"role": "system", "content": prompt}],
+            response_model=IntentClassifierOutput,
+            model=settings.LITELLM_PLANNER_MODEL or None,
+            temperature=0.0,
+            max_tokens=120,
+        )
+        intent = out.intent
+    except Exception as exc:
+        logger.warning("Intent classifier failed: %s", exc)
+        intent = "small_talk" if _looks_like_small_talk(query) else "needs_tools"
+
+    return {
+        "intent": intent,
+        "next_step": "chat" if intent == "small_talk" else "retriever",
+    }
+
+
+# ======================================================================
 # Node: Tool Retriever (Milvus semantic search)
 # ======================================================================
 
@@ -201,9 +268,24 @@ async def router_node(state: dict) -> dict:
 
     user_message = state["user_message"]
     user_id = state.get("user_id")
+    feedback_plan = str(state.get("feedback_plan") or "").strip()
     retrieved_tools: list[dict] = state.get("retrieved_tools") or []
     history: list[dict] = state.get("history_messages") or []
     _dev_log("router_start", message_preview=user_message[:120])
+
+    # Reflexion fast-path: follow explicit previous-cycle instruction.
+    if feedback_plan and _feedback_requires_web_search(feedback_plan):
+        query = _feedback_to_search_query(feedback_plan, user_message)
+        reflexion_route = RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint="Следующий цикл: web_search по плану доработки",
+            confidence=0.95,
+        )
+        return {
+            "router_output": reflexion_route,
+            "next_step": "web_search",
+        }
 
     # 1. Try deterministic shortcuts first (fast path, no LLM call)
     deterministic = _deterministic_route(user_message)
@@ -240,16 +322,26 @@ async def router_node(state: dict) -> dict:
     # 4. LLM-based routing via structured output
     planner_model = settings.LITELLM_PLANNER_MODEL or None
     planner_prompt = (
-        "Ты роутер AI-ассистента. Определи намерение пользователя.\n"
-        "Верни JSON с полями: decision, steps, response_hint, confidence.\n"
-        "decision: 'tool' — нужен инструмент, 'chat' — обычный разговор, "
-        "'memory' — операция с памятью, 'clarify' — нужно уточнение, "
-        "'web_search' — поиск информации в интернете.\n"
+        "Ты — маршрутизатор задач AI-агента.\n"
+        "Твоя цель — выбрать правильный инструмент для выполнения запроса.\n\n"
+        f"Вопрос пользователя: \"{user_message}\"\n\n"
         "Доступные инструменты:\n"
         f"{skills_registry_service.planner_signatures()}\n"
         f"{dynamic_tools_block}"
         f"{integrations_block}"
         f"{retrieved_block}"
+        "(Также всегда доступен инструмент 'web_search' для поиска в интернете)\n\n"
+        "ОБРАТИ ВНИМАНИЕ НА ЗАМЕЧАНИЯ ПРЕДЫДУЩЕГО ШАГА:\n"
+        f"{feedback_plan if feedback_plan else 'Это первый проход, замечаний нет.'}\n\n"
+        "ИНСТРУКЦИЯ:\n"
+        "Если в замечаниях сказано искать в интернете — выбирай decision='web_search' "
+        "и формируй оптимальный query в steps.\n"
+        "Если нужно дернуть внутреннее API/инструменты — выбирай decision='tool'.\n"
+        "Если нужен обычный ответ без инструментов — decision='chat'.\n\n"
+        "Верни JSON с полями: decision, steps, response_hint, confidence.\n"
+        "decision: 'tool' — нужен инструмент, 'chat' — обычный разговор, "
+        "'memory' — операция с памятью, 'clarify' — нужно уточнение, "
+        "'web_search' — поиск информации в интернете.\n"
         "Правила:\n"
         "1) Для напоминаний используй cron_add с schedule_text и task_text. "
         "Если задача требует вызова API/интеграции (курс валют, погода и т.д.) — добавь action_type='chat'. "
@@ -352,28 +444,43 @@ async def tool_execution_node(state: dict) -> dict:
         steps=[s.tool for s in router_output.steps],
     )
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            return {
-                "tool_results": [],
-                "error": "User not found",
-                "next_step": "chat",
-            }
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+            if not user:
+                return {
+                    "tool_results": [],
+                    "error": "User not found",
+                    "next_step": "chat",
+                }
 
-        steps_dicts = [
-            {"tool": step.tool, "arguments": step.arguments}
-            for step in router_output.steps
-        ]
+            steps_dicts = [
+                {"tool": step.tool, "arguments": step.arguments}
+                for step in router_output.steps
+            ]
 
-        raw_results = await tool_orchestrator_service.execute_tool_chain(
-            db=db,
-            user=user,
-            steps=steps_dicts,
-            max_steps=settings.LANGGRAPH_MAX_ITERATIONS,
-        )
-        await db.commit()
+            raw_results = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=steps_dicts,
+                max_steps=settings.LANGGRAPH_MAX_ITERATIONS,
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning("tool_execution_node failed: %s", exc)
+        return {
+            "tool_results": [
+                ToolResult(
+                    tool="system_error",
+                    arguments={},
+                    success=False,
+                    error="Tool execution unavailable",
+                )
+            ],
+            "error": str(exc),
+            "next_step": "compose",
+        }
 
     tool_results = [
         ToolResult(
@@ -494,6 +601,7 @@ async def web_search_node(state: dict) -> dict:
 
 _MAX_FETCH_PAGES = 3
 _FETCH_TIMEOUT = 8
+_FETCH_CONCURRENCY = 3
 
 
 async def web_fetch_node(state: dict) -> dict:
@@ -509,13 +617,10 @@ async def web_fetch_node(state: dict) -> dict:
     urls = [r["url"] for r in results[:_MAX_FETCH_PAGES] if r.get("url")]
     _dev_log("web_fetch_start", urls=urls)
 
-    parts: list[str] = []
-    async with httpx.AsyncClient(
-        timeout=_FETCH_TIMEOUT,
-        follow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; SmartAiBot/1.0)"},
-    ) as client:
-        for url in urls:
+    semaphore = asyncio.Semaphore(_FETCH_CONCURRENCY)
+
+    async def _fetch_one(url: str, client: httpx.AsyncClient) -> str | None:
+        async with semaphore:
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -529,9 +634,22 @@ async def web_fetch_node(state: dict) -> dict:
                 if text and text.strip():
                     # Keep snippet reasonable — up to ~3000 chars per page
                     snippet = text[:3000]
-                    parts.append(f"### {url}\n{snippet}")
+                    return f"### {url}\n{snippet}"
             except Exception:
                 logger.debug("web_fetch failed for %s", url, exc_info=True)
+        return None
+
+    async with httpx.AsyncClient(
+        timeout=_FETCH_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SmartAiBot/1.0)"},
+    ) as client:
+        fetched_parts = await asyncio.gather(
+            *[_fetch_one(url, client) for url in urls],
+            return_exceptions=False,
+        )
+
+    parts = [part for part in fetched_parts if part]
 
     combined = "\n\n".join(parts) if parts else ""
     _dev_log("web_fetch_done", pages_ok=len(parts), total_len=len(combined))
@@ -545,183 +663,131 @@ async def web_fetch_node(state: dict) -> dict:
 
 
 async def compose_node(state: dict) -> dict:
-    """Compose a final answer from tool execution results or web search content."""
+    """Reflexion synth node: either finalize answer or return explicit feedback plan."""
     from app.llm import llm_provider
 
-    user_message = state["user_message"]
-    system_prompt = state.get("system_prompt", "")
+    messages_state: list[str] = state.get("messages") or []
+    user_message = (messages_state[-1] if messages_state else state.get("user_message", "")).strip()
     history: list[dict] = state.get("history_messages") or []
-    stm: list[str] = state.get("stm_context") or []
-    ltm: list[str] = state.get("ltm_context") or []
-    rag: list[str] = state.get("rag_context") or []
-    summary: str | None = state.get("history_summary")
     tool_results: list[ToolResult] = state.get("tool_results", [])
-    router_output: RouterOutput | None = state.get("router_output")
-    response_hint = router_output.response_hint if router_output else ""
     web_fetch_content: str = state.get("web_fetch_content") or ""
     web_search_results: list[dict] = state.get("web_search_results") or []
-    iteration = (state.get("iteration") or 0) + 1
+    existing_answer = str(state.get("final_answer") or "").strip()
+    iterations = int((state.get("iterations") or state.get("iteration") or 0) + 1)
+    max_iterations = int(state.get("max_iterations") or settings.LANGGRAPH_MAX_ITERATIONS)
 
-    _completeness_suffix = (
-        "\n\nВАЖНО: в конце ответа добавь строку-маркер:\n"
-        "- Если данных достаточно для полного ответа: COMPLETENESS: COMPLETE\n"
-        "- Если данных не хватает и нужен дополнительный поиск: COMPLETENESS: INCOMPLETE\n"
-    )
-
-    # ---- Web search graph path (no tool_results, web content available) ----
-    if web_search_results and not tool_results:
-        if web_fetch_content:
-            web_prompt = (
-                "Ты получил результаты поиска в интернете и извлечённый текст страниц. "
-                "Проанализируй данные и сформируй ПОЛЕЗНЫЙ и ИНФОРМАТИВНЫЙ ответ. "
-                "Указывай источники (ссылки) для ключевых фактов. "
-                "Текст со страниц:\n" + web_fetch_content[:12000]
-                + _completeness_suffix
-            )
-        else:
-            snippets = "\n".join(
-                f"- {r.get('title','')}: {r.get('snippet','')}\n  {r.get('url','')}"
-                for r in web_search_results[:5]
-            )
-            web_prompt = (
-                "Ты получил результаты поиска в интернете, "
-                "но не удалось извлечь текст страниц. Используй сниппеты:\n"
-                + snippets + "\n"
-                "Сформируй максимально полный ответ по имеющимся данным. "
-                "Указывай источники."
-                + _completeness_suffix
-            )
-
-        enriched_system = _build_enriched_system_prompt(
-            system_prompt=f"{system_prompt}\n\n{web_prompt}",
-            stm=stm, ltm=ltm, rag=rag, summary=summary,
-        )
-        compose_messages: list[dict[str, str]] = [{"role": "system", "content": enriched_system}]
-        compose_messages.extend(history[-settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES:])
-        compose_messages.append({"role": "user", "content": user_message})
-
-        try:
-            answer = await llm_provider.chat(
-                messages=compose_messages,
-                temperature=settings.LITELLM_TEMPERATURE,
-            )
-            is_complete = _extract_completeness(answer)
-            answer = _strip_completeness_marker(answer)
-            answer = _sanitize_llm_answer(answer)
-        except Exception as exc:
-            logger.warning("Compose (web) LLM failed: %s", exc)
-            answer = "Не удалось сформировать ответ по результатам поиска."
-            is_complete = True
-
+    # If chat already produced a direct answer and there is no additional context,
+    # do not force a reflexion pass.
+    if existing_answer and not tool_results and not web_search_results and not web_fetch_content:
         return {
-            "final_answer": answer,
-            "is_complete": is_complete,
-            "iteration": iteration,
+            "final_answer": existing_answer,
+            "is_complete": True,
+            "feedback_plan": "",
+            "iterations": iterations,
+            "iteration": iterations,
         }
 
-    # ---- Standard tool results path ----
-
-    # Check for deterministic answers first
     deterministic = _format_deterministic_tool_answer(tool_results)
     if deterministic:
-        return {"final_answer": deterministic, "is_complete": True, "iteration": iteration}
+        return {
+            "final_answer": deterministic,
+            "is_complete": True,
+            "feedback_plan": "",
+            "iterations": iterations,
+            "iteration": iterations,
+        }
 
-    # Detect integration_call in results for specialised LLM formatting
-    has_integration = any(
-        t.tool == "integration_call" and t.success and t.result
-        for t in tool_results
+    context_chunks: list[str] = list(state.get("context") or [])
+
+    if web_fetch_content:
+        context_chunks.append(web_fetch_content[:12000])
+    elif web_search_results:
+        snippets = "\n".join(
+            f"- {r.get('title','')}: {r.get('snippet','')} ({r.get('url','')})"
+            for r in web_search_results[:5]
+        )
+        if snippets:
+            context_chunks.append(f"Сниппеты web_search:\n{snippets}")
+
+    if tool_results:
+        sanitised_results = []
+        _strip_keys = {"headers", "file_base64", "base64"}
+        for t in tool_results:
+            d = t.model_dump()
+            res = d.get("result")
+            if isinstance(res, dict):
+                d["result"] = {k: v for k, v in res.items() if k not in _strip_keys}
+            sanitised_results.append(d)
+        context_chunks.append(
+            "Результаты инструментов:\n" + json.dumps(sanitised_results, ensure_ascii=False, default=str)[:16000]
+        )
+
+    context_text = "\n\n".join([c for c in context_chunks if str(c).strip()])
+    prompt = (
+        "Ты — финальный проверяющий AI-агента. Твоя задача — проанализировать "
+        "вопрос пользователя и собранные данные.\n\n"
+        f"Вопрос пользователя: \"{user_message}\"\n"
+        f"Собранные данные:\n{context_text if context_text else '(данные отсутствуют)'}\n\n"
+        f"Текущая итерация поиска: {iterations} из {max_iterations}.\n\n"
+        "ИНСТРУКЦИЯ:\n"
+        "1. Оцени, достаточно ли собранных данных для точного, полного и правдивого ответа.\n"
+        "2. Если данных ДОСТАТОЧНО (или итерация достигла лимита):\n"
+        "   - Сформируй итоговый ответ.\n"
+        "   - Установи is_complete: true.\n"
+        "   - feedback_plan оставь пустым.\n"
+        "3. Если данных НЕДОСТАТОЧНО:\n"
+        "   - Не пиши финальный ответ пользователю.\n"
+        "   - Напиши четкую инструкцию (feedback_plan), что нужно найти на следующем шаге.\n"
+        "   - Установи is_complete: false.\n\n"
+        "Ответь СТРОГО валидным JSON:\n"
+        '{"is_complete": true | false, "answer": "...", "feedback_plan": "..."}'
     )
 
-    # Detect artifact tools (pdf_create, excel_create) in results
-    has_artifact = any(
-        t.tool in ("pdf_create", "excel_create") and t.success and t.result
-        for t in tool_results
-    )
-
-    # All failed → honest error
-    all_failed = all(not t.success for t in tool_results) if tool_results else True
-
-    if has_integration and has_artifact and not all_failed:
-        # Mixed chain: data → artifact — summarize data AND mention the document
-        summary_prompt = (
-            "Пользователь попросил получить данные и создать документ. "
-            "Ты получил данные от внешнего API или из интернета, и документ был создан. "
-            "Сформируй краткий ЧЕЛОВЕКОЧИТАЕМЫЙ отчёт по полученным данным. "
-            "Упомяни, что документ с отчётом также создан и прикреплён. "
-            "НЕ выводи сырой JSON/XML. Извлеки ключевые значения."
-        )
-    elif has_integration and not all_failed:
-        summary_prompt = (
-            "Ты получил ответ от внешнего API (интеграции). "
-            "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
-            "Если данные в XML/JSON — извлеки ключевые значения и представь "
-            "в удобном виде (таблица, список, текст). "
-            "НЕ выводи сырой XML/JSON. НЕ обрезай данные — покажи ВСЕ основные записи. "
-            "Если пользователь просил конкретные данные — выдели их."
-        )
-    elif all_failed:
-        summary_prompt = (
-            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "ВСЕ инструменты завершились с ошибкой. "
-            "Объясни пользователю, что произошло, и предложи конкретный следующий шаг. "
-            "НЕ притворяйся, что данные доступны и не придумывай результаты. Будь честным и конкретным."
-        )
-    else:
-        summary_prompt = (
-            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "Если были ошибки, честно сообщи и предложи следующий шаг."
-        )
-
-    # Strip bulky fields (HTTP headers, file base64) from tool results before LLM
-    sanitised_results = []
-    _strip_keys = {"headers", "file_base64", "base64"}
-    for t in tool_results:
-        d = t.model_dump()
-        res = d.get("result")
-        if isinstance(res, dict):
-            d["result"] = {k: v for k, v in res.items() if k not in _strip_keys}
-        sanitised_results.append(d)
-
-    tool_calls_json = json.dumps(
-        sanitised_results,
-        ensure_ascii=False,
-        default=str,
-    )[:16000]
-
-    # Build context-enriched system prompt so compose sees conversation history
-    enriched_system = _build_enriched_system_prompt(
-        system_prompt=f"{system_prompt}\n\n{summary_prompt}" + _completeness_suffix,
-        stm=stm,
-        ltm=ltm,
-        rag=rag,
-        summary=summary,
-    )
-
-    compose_messages: list[dict[str, str]] = [{"role": "system", "content": enriched_system}]
+    compose_messages: list[dict[str, str]] = [{"role": "system", "content": prompt}]
     compose_messages.extend(history[-settings.CONTEXT_ALWAYS_KEEP_LAST_MESSAGES:])
-    compose_messages.append({
-        "role": "user",
-        "content": (
-            f"User message: {user_message}\n"
-            f"Response hint: {response_hint}\n"
-            f"Tool calls JSON: {tool_calls_json}"
-        ),
-    })
+    compose_messages.append({"role": "user", "content": user_message})
 
     try:
-        answer = await llm_provider.chat(
+        out = await llm_provider.chat_structured(
             messages=compose_messages,
-            temperature=settings.LITELLM_TEMPERATURE,
+            response_model=ReflexionComposeOutput,
+            model=settings.LITELLM_PLANNER_MODEL or None,
+            temperature=0.0,
+            max_tokens=settings.OLLAMA_NUM_PREDICT_PLANNER,
         )
-        is_complete = _extract_completeness(answer)
-        answer = _strip_completeness_marker(answer)
-        answer = _sanitize_llm_answer(answer)
     except Exception as exc:
-        logger.warning("Compose LLM failed: %s", exc)
-        answer = _build_raw_tool_summary(tool_results)
-        is_complete = True
+        logger.warning("Compose reflexion failed: %s", exc)
+        fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
+        return {
+            "final_answer": fallback_answer,
+            "is_complete": True,
+            "feedback_plan": "",
+            "iterations": iterations,
+            "iteration": iterations,
+        }
 
-    return {"final_answer": answer, "is_complete": is_complete, "iteration": iteration}
+    is_complete = bool(out.is_complete) or iterations >= max_iterations
+    if is_complete:
+        answer = _sanitize_llm_answer(out.answer or existing_answer or _build_raw_tool_summary(tool_results))
+        return {
+            "final_answer": answer,
+            "is_complete": True,
+            "feedback_plan": "",
+            "iterations": iterations,
+            "iteration": iterations,
+        }
+
+    feedback_plan = str(out.feedback_plan or "").strip()
+    if not feedback_plan:
+        feedback_plan = "Нужен дополнительный поиск данных: уточнить недостающие факты и источники."
+
+    return {
+        "final_answer": "",
+        "is_complete": False,
+        "feedback_plan": feedback_plan,
+        "iterations": iterations,
+        "iteration": iterations,
+    }
 
 
 # ======================================================================
@@ -871,6 +937,54 @@ _WEB_SEARCH_RE = re.compile(
 def _is_web_search_intent(user_message: str) -> bool:
     """Check if user message clearly asks for a web search."""
     return bool(_WEB_SEARCH_RE.search(user_message or ""))
+
+
+_SMALL_TALK_RE = re.compile(
+    r"^(?:"
+    r"hi|hello|hey|thanks|thank you|bye"
+    r"|привет|здравствуй|здравствуйте|спасибо|пока|добрый\s+(?:день|вечер|утро)"
+    r")(?:[!,.\s].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_small_talk(text: str) -> bool:
+    """Cheap heuristic for greeting/closing gratitude-style messages."""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    if len(stripped) <= 24 and _SMALL_TALK_RE.match(stripped):
+        return True
+    # Short courtesy phrases should skip heavy retrieval.
+    return stripped.lower() in {
+        "ok", "okay", "понял", "ясно", "принято", "супер", "отлично", "благодарю"
+    }
+
+
+def _feedback_requires_web_search(feedback_plan: str) -> bool:
+    text = str(feedback_plan or "").lower()
+    markers = (
+        "web_search",
+        "интернет",
+        "в сети",
+        "в интернете",
+        "найти",
+        "поиск",
+        "google",
+        "гугл",
+        "загугл",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _feedback_to_search_query(feedback_plan: str, fallback_query: str) -> str:
+    plan = str(feedback_plan or "").strip()
+    if not plan:
+        return str(fallback_query or "").strip()
+
+    # If planner gave explicit instruction sentence, use it directly as search query.
+    normalized = re.sub(r"^[\-\d\)\.\s]+", "", plan)
+    return normalized[:500] if normalized else str(fallback_query or "").strip()
 
 
 def _deterministic_route(user_message: str) -> RouterOutput | None:
@@ -1097,8 +1211,7 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
                 return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
             if not body:
                 return f"Ответ интеграции (HTTP {status_code}): пустое тело."
-            # Let compose_node format with LLM for rich responses
-            pass
+            return _format_integration_body(body=body, status_code=status_code)
         if tr.tool == "memory_list":
             items = tr.result.get("items", [])
             if isinstance(items, list):
@@ -1119,6 +1232,14 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
     for tr in tool_results:
         if not tr.success or not tr.result:
             continue
+
+        if tr.tool == "integration_call":
+            status_code = int(tr.result.get("status_code") or 0)
+            body = str(tr.result.get("body") or "").strip()
+            if body:
+                parts.append(_format_integration_body(body=body, status_code=status_code))
+                continue
+
         msg = tr.result.get("message", "")
         if msg:
             parts.append(str(msg)[:8000])
@@ -1132,3 +1253,84 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
     if not parts:
         return "Не удалось получить данные. Повторите запрос позже."
     return "Результат:\n\n" + "\n\n".join(parts)
+
+
+def _format_integration_body(body: str, status_code: int) -> str:
+    """Convert integration body into readable text without exposing raw payload by default."""
+    text = (body or "").strip()
+    if not text:
+        return f"Ответ интеграции (HTTP {status_code}): пустое тело."
+
+    # JSON response
+    try:
+        obj = json.loads(text)
+        summary = _summarize_json_payload(obj)
+        if summary:
+            return f"Ответ интеграции (HTTP {status_code}):\n{summary}"
+    except Exception:
+        pass
+
+    # XML response
+    if text.startswith("<"):
+        try:
+            root = ET.fromstring(text)
+            summary = _summarize_xml_payload(root)
+            if summary:
+                return f"Ответ интеграции (HTTP {status_code}):\n{summary}"
+        except Exception:
+            pass
+
+    # Plain text fallback
+    return f"Ответ интеграции (HTTP {status_code}):\n{text[:2000]}"
+
+
+def _summarize_json_payload(obj: Any) -> str:
+    if isinstance(obj, dict):
+        lines: list[str] = []
+        for k, v in list(obj.items())[:20]:
+            if isinstance(v, (dict, list)):
+                lines.append(f"- {k}: {_json_shape(v)}")
+            else:
+                lines.append(f"- {k}: {str(v)[:300]}")
+        return "\n".join(lines)
+
+    if isinstance(obj, list):
+        if not obj:
+            return "Пустой список."
+        head = obj[:5]
+        lines = [f"Список элементов: {len(obj)}"]
+        for idx, item in enumerate(head, start=1):
+            if isinstance(item, dict):
+                preview = ", ".join(f"{k}={str(v)[:80]}" for k, v in list(item.items())[:6])
+                lines.append(f"- #{idx}: {preview}")
+            else:
+                lines.append(f"- #{idx}: {str(item)[:300]}")
+        return "\n".join(lines)
+
+    return str(obj)[:1200]
+
+
+def _json_shape(value: Any) -> str:
+    if isinstance(value, dict):
+        return f"object ({len(value)} keys)"
+    if isinstance(value, list):
+        return f"array ({len(value)} items)"
+    return type(value).__name__
+
+
+def _summarize_xml_payload(root: ET.Element) -> str:
+    # Flatten first few leaf fields from XML
+    lines: list[str] = []
+    for elem in root.iter():
+        if len(lines) >= 20:
+            break
+        text = (elem.text or "").strip()
+        if not text:
+            continue
+        if len(elem) > 0:
+            continue
+        tag = elem.tag.split("}")[-1]
+        lines.append(f"- {tag}: {text[:300]}")
+    if lines:
+        return "\n".join(lines)
+    return ET.tostring(root, encoding="unicode")[:1200]

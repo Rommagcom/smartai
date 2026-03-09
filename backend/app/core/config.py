@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     OLLAMA_NUM_PREDICT: int = 2048
     OLLAMA_NUM_PREDICT_PLANNER: int = 512
     OLLAMA_KEEP_ALIVE: str = "10m"
+    OLLAMA_MODEL_FALLBACK_ENABLED: bool = False
     CONTEXT_MAX_PROMPT_TOKENS: int = 16000
     CONTEXT_ALWAYS_KEEP_LAST_MESSAGES: int = 8
     CONTEXT_SUMMARY_MAX_ITEMS: int = 8
@@ -86,6 +87,7 @@ class Settings(BaseSettings):
 
     OBS_LOG_JSON: bool = True
     OBS_LOG_LEVEL: str = "INFO"
+    OBS_THIRD_PARTY_LOG_LEVEL: str = "WARNING"
     DEV_VERBOSE_LOGGING: bool = False
     OBS_ALERT_BUFFER_SIZE: int = 200
 
@@ -109,7 +111,7 @@ class Settings(BaseSettings):
     STM_REDIS_KEY_PREFIX: str = "assistant:stm"
 
     # --- LiteLLM unified LLM gateway ---
-    LITELLM_MODEL: str = "ollama_chat/gpt-oss:120b-cloud"
+    LITELLM_MODEL: str = ""            # empty = resolve from LLM_MODEL or OLLAMA_MODEL_NAME
     LITELLM_PLANNER_MODEL: str = ""       # empty = same as LITELLM_MODEL
     LITELLM_EMBEDDING_MODEL: str = ""     # empty = Ollama nomic-embed-text fallback
     LITELLM_TIMEOUT_SECONDS: int = 120
