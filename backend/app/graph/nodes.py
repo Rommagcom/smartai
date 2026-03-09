@@ -1199,8 +1199,9 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             count = tr.result.get("deleted_count", 0)
             return f"Все пользовательские API-инструменты удалены ({count})."
         if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
-            # Let compose_node handle rich formatting via LLM
-            pass
+            formatted = _format_dynamic_tool_result(tr)
+            if formatted:
+                return formatted
         if tr.tool == "integration_call":
             status_code = int(tr.result.get("status_code") or 0)
             body = str(tr.result.get("body") or "").strip()
@@ -1238,6 +1239,12 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
             body = str(tr.result.get("body") or "").strip()
             if body:
                 parts.append(_format_integration_body(body=body, status_code=status_code))
+                continue
+
+        if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
+            formatted = _format_dynamic_tool_result(tr)
+            if formatted:
+                parts.append(formatted)
                 continue
 
         msg = tr.result.get("message", "")
@@ -1282,6 +1289,39 @@ def _format_integration_body(body: str, status_code: int) -> str:
 
     # Plain text fallback
     return f"Ответ интеграции (HTTP {status_code}):\n{text[:2000]}"
+
+
+def _format_dynamic_tool_result(tr: ToolResult) -> str | None:
+    """Human-friendly summary for dynamic tool payloads without LLM compose."""
+    result = tr.result or {}
+    if not isinstance(result, dict):
+        text = str(result).strip()
+        return text[:2000] if text else None
+
+    status_code = int(result.get("status_code") or result.get("status") or 0)
+    body = str(result.get("body") or result.get("content") or "").strip()
+
+    # Many dynamic tools return HTTP-like shape {status_code, body, headers}
+    if body:
+        label = f"Ответ {tr.tool}"
+        if status_code > 0:
+            label += f" (HTTP {status_code})"
+
+        if status_code >= 400:
+            return f"{label}:\n{body[:2000]}"
+
+        # Reuse integration parser for XML/JSON body rendering
+        return _format_integration_body(body=body, status_code=max(status_code, 200)).replace("Ответ интеграции", label)
+
+    msg = str(result.get("message") or "").strip()
+    if msg:
+        return msg[:2000]
+
+    # Generic dict fallback (trimmed) if there is no dedicated field.
+    trimmed = {k: v for k, v in result.items() if k not in {"headers", "file_base64", "base64"}}
+    if not trimmed:
+        return None
+    return f"Ответ {tr.tool}:\n" + json.dumps(trimmed, ensure_ascii=False, default=str)[:2000]
 
 
 def _summarize_json_payload(obj: Any) -> str:
