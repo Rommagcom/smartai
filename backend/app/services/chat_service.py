@@ -2529,11 +2529,15 @@ class ChatService:
         from app.graph import agent_graph
 
         initial_state = {
+            "messages": [user_message],
+            "context": [],
+            "client_id": str(user.id),
             "user_id": user.id,
             "session_id": session_id,
             "user_message": user_message,
             "system_prompt": user.system_prompt_template,
             "permissions": [],
+            "intent": "",
             "history_messages": [],
             "stm_context": [],
             "ltm_context": [],
@@ -2541,6 +2545,7 @@ class ChatService:
             "history_summary": None,
             "extracted_entities": [],
             "router_output": None,
+            "feedback_plan": "",
             "tool_results": [],
             "artifacts": [],
             "input_guardrail": None,
@@ -2549,6 +2554,7 @@ class ChatService:
             "tool_calls_log": [],
             "next_step": "",
             "iteration": 0,
+            "iterations": 0,
             "max_iterations": settings.LANGGRAPH_MAX_ITERATIONS,
             "error": None,
         }

@@ -295,8 +295,27 @@ class WorkerService:
         if not ready_ids:
             return
 
+        valid_task_ids: list[str] = []
+        invalid_task_ids: list[str] = []
+        uuids: list[UUID] = []
+        for task_id in ready_ids:
+            raw_id = str(task_id)
+            try:
+                uuids.append(UUID(raw_id))
+                valid_task_ids.append(raw_id)
+            except ValueError:
+                invalid_task_ids.append(raw_id)
+
+        if invalid_task_ids:
+            pipe = redis.pipeline()
+            for invalid_id in invalid_task_ids:
+                pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, invalid_id)
+            await pipe.execute()
+
+        if not uuids:
+            return
+
         async with AsyncSessionLocal() as db:
-            uuids = [UUID(task_id) for task_id in ready_ids]
             result = await db.execute(select(WorkerTask).where(WorkerTask.id.in_(uuids)))
             rows = result.scalars().all()
             for row in rows:
@@ -309,9 +328,10 @@ class WorkerService:
             str(row.id): self._normalize_priority((row.payload or {}).get("__priority"))
             for row in rows
         }
-        for task_id in ready_ids:
+        for task_id in valid_task_ids:
             pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, task_id)
-            pipe.lpush(self._queue_key_for_priority(priority_by_task_id.get(task_id)), task_id)
+            if task_id in priority_by_task_id:
+                pipe.lpush(self._queue_key_for_priority(priority_by_task_id.get(task_id)), task_id)
         await pipe.execute()
 
     async def _recover_processing_queue(self) -> None:
