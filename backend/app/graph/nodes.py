@@ -32,7 +32,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import xml.etree.ElementTree as ET
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -675,6 +674,8 @@ async def compose_node(state: dict) -> dict:
     existing_answer = str(state.get("final_answer") or "").strip()
     iterations = int((state.get("iterations") or state.get("iteration") or 0) + 1)
     max_iterations = int(state.get("max_iterations") or settings.LANGGRAPH_MAX_ITERATIONS)
+    all_failed = all(not tr.success for tr in tool_results) if tool_results else True
+    has_integration = any(str(tr.tool or "") == "integration_call" for tr in tool_results)
 
     # If chat already produced a direct answer and there is no additional context,
     # do not force a reflexion pass.
@@ -703,7 +704,7 @@ async def compose_node(state: dict) -> dict:
         context_chunks.append(web_fetch_content[:12000])
     elif web_search_results:
         snippets = "\n".join(
-            f"- {r.get('title','')}: {r.get('snippet','')} ({r.get('url','')})"
+            f"- {_web_result_field(r, 'title')}: {_web_result_field(r, 'snippet')} ({_web_result_field(r, 'url')})"
             for r in web_search_results[:5]
         )
         if snippets:
@@ -723,6 +724,18 @@ async def compose_node(state: dict) -> dict:
         )
 
     context_text = "\n\n".join([c for c in context_chunks if str(c).strip()])
+    integration_summary_prompt = ""
+    if has_integration and not all_failed:
+        integration_summary_prompt = (
+            "\n\nДОПОЛНИТЕЛЬНО ДЛЯ ОТВЕТОВ ИНТЕГРАЦИЙ:\n"
+            "Ты получил ответ от внешнего API (интеграции). "
+            "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
+            "Если данные в XML/JSON - извлеки ключевые значения и представь "
+            "в удобном виде (таблица, список, текст). "
+            "НЕ выводи сырой XML/JSON. НЕ обрезай данные - покажи ВСЕ основные записи. "
+            "Если пользователь просил конкретные данные - выдели их."
+        )
+
     prompt = (
         "Ты — финальный проверяющий AI-агента. Твоя задача — проанализировать "
         "вопрос пользователя и собранные данные.\n\n"
@@ -739,6 +752,7 @@ async def compose_node(state: dict) -> dict:
         "   - Не пиши финальный ответ пользователю.\n"
         "   - Напиши четкую инструкцию (feedback_plan), что нужно найти на следующем шаге.\n"
         "   - Установи is_complete: false.\n\n"
+        f"{integration_summary_prompt}\n\n"
         "Ответь СТРОГО валидным JSON:\n"
         '{"is_complete": true | false, "answer": "...", "feedback_plan": "..."}'
     )
@@ -757,7 +771,50 @@ async def compose_node(state: dict) -> dict:
         )
     except Exception as exc:
         logger.warning("Compose reflexion failed: %s", exc)
-        fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
+        # 1) If web context exists, run non-structured synthesis first.
+        # Structured parse errors often contain a truncated preview (~200 chars).
+        if web_fetch_content or web_search_results:
+            web_context = web_fetch_content.strip()
+            if not web_context and web_search_results:
+                web_context = "\n".join(
+                    f"- {_web_result_field(r, 'title')}: {_web_result_field(r, 'snippet')} ({_web_result_field(r, 'url')})"
+                    for r in web_search_results[:8]
+                )
+            try:
+                fallback_answer = await llm_provider.chat(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Сформируй короткий и точный ответ пользователю только по данным ниже. "
+                                "Если данных недостаточно, честно скажи, чего не хватает."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Вопрос: {user_message}\n\n"
+                                f"Данные:\n{web_context[:12000]}"
+                            ),
+                        },
+                    ],
+                    temperature=0.0,
+                    max_tokens=settings.OLLAMA_NUM_PREDICT,
+                )
+                fallback_answer = _sanitize_llm_answer(fallback_answer)
+            except Exception:
+                fallback_answer = existing_answer or _build_raw_web_summary(
+                    web_fetch_content=web_fetch_content,
+                    web_search_results=web_search_results,
+                    tool_results=tool_results,
+                )
+        # 2) Recover plain answer embedded in structured-parse error text.
+        else:
+            recovered = _extract_non_json_answer_from_exception(exc)
+            if recovered:
+                fallback_answer = _sanitize_llm_answer(recovered)
+            else:
+                fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
         return {
             "final_answer": fallback_answer,
             "is_complete": True,
@@ -1077,6 +1134,44 @@ def _strip_completeness_marker(text: str) -> str:
     return _COMPLETENESS_RE.sub("", text or "").strip()
 
 
+def _extract_non_json_answer_from_exception(exc: Exception) -> str:
+    """Extract raw assistant text from structured parse exceptions when possible."""
+    text = str(exc or "")
+    marker = "No valid JSON found in LLM response:"
+    idx = text.find(marker)
+    if idx == -1:
+        return ""
+    candidate = text[idx + len(marker):].strip()
+    return candidate[:4000]
+
+
+def _build_raw_web_summary(web_fetch_content: str, web_search_results: list[dict], tool_results: list[ToolResult]) -> str:
+    """Fallback answer when compose JSON mode fails but web/search context exists."""
+    if web_fetch_content and web_fetch_content.strip():
+        return _sanitize_llm_answer(web_fetch_content.strip()[:2500])
+    if web_search_results:
+        lines = ["Найдено в интернете:"]
+        for r in web_search_results[:5]:
+            title = _web_result_field(r, "title") or "Без названия"
+            snippet = _web_result_field(r, "snippet")
+            url = _web_result_field(r, "url")
+            lines.append(f"- {title}: {snippet} ({url})")
+        return "\n".join(lines)
+    return _build_raw_tool_summary(tool_results)
+
+
+def _web_result_field(item: Any, key: str) -> str:
+    """Safe field extraction from web result entries (dict/object/string)."""
+    if isinstance(item, dict):
+        return str(item.get(key) or "").strip()
+    value = getattr(item, key, "")
+    if value:
+        return str(value).strip()
+    if key == "title" and item is not None:
+        return str(item).strip()
+    return ""
+
+
 def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
     """Extract artifacts (PDF base64, etc.) from tool results."""
     artifacts = []
@@ -1095,11 +1190,10 @@ def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
 
 def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | None:
     """Format known tool results without LLM."""
-    # Mixed chains (data-fetching + artifact-creation) → always use LLM compose
+    # Data-fetching tools should go through compose so LLM can summarize payloads.
     _data_tools = {"integration_call", "dynamic_tool_call"}
-    _artifact_tools = {"pdf_create", "excel_create"}
     tools_in_chain = {tr.tool for tr in tool_results if tr.success}
-    if tools_in_chain & _data_tools and tools_in_chain & _artifact_tools:
+    if tools_in_chain & _data_tools:
         return None
 
     for tr in tool_results:
@@ -1199,20 +1293,8 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             count = tr.result.get("deleted_count", 0)
             return f"Все пользовательские API-инструменты удалены ({count})."
         if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
-            formatted = _format_dynamic_tool_result(tr)
-            if formatted:
-                return formatted
-        if tr.tool == "integration_call":
-            status_code = int(tr.result.get("status_code") or 0)
-            body = str(tr.result.get("body") or "").strip()
-            if status_code == 0 and not body:
-                return "Запрос к интеграции не вернул данных."
-            if status_code >= 400:
-                preview = body[:2000] if body else ""
-                return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
-            if not body:
-                return f"Ответ интеграции (HTTP {status_code}): пустое тело."
-            return _format_integration_body(body=body, status_code=status_code)
+            # Let compose_node handle rich formatting via LLM
+            pass
         if tr.tool == "memory_list":
             items = tr.result.get("items", [])
             if isinstance(items, list):
@@ -1238,13 +1320,11 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
             status_code = int(tr.result.get("status_code") or 0)
             body = str(tr.result.get("body") or "").strip()
             if body:
-                parts.append(_format_integration_body(body=body, status_code=status_code))
-                continue
-
-        if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
-            formatted = _format_dynamic_tool_result(tr)
-            if formatted:
-                parts.append(formatted)
+                parts.append(
+                    f"Интеграция вернула данные (HTTP {status_code}), "
+                    "но авто-форматирование ответа не удалось. "
+                    "Попробуйте уточнить запрос (например: 'покажи только USD')."
+                )
                 continue
 
         msg = tr.result.get("message", "")
@@ -1262,115 +1342,4 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
     return "Результат:\n\n" + "\n\n".join(parts)
 
 
-def _format_integration_body(body: str, status_code: int) -> str:
-    """Convert integration body into readable text without exposing raw payload by default."""
-    text = (body or "").strip()
-    if not text:
-        return f"Ответ интеграции (HTTP {status_code}): пустое тело."
 
-    # JSON response
-    try:
-        obj = json.loads(text)
-        summary = _summarize_json_payload(obj)
-        if summary:
-            return f"Ответ интеграции (HTTP {status_code}):\n{summary}"
-    except Exception:
-        pass
-
-    # XML response
-    if text.startswith("<"):
-        try:
-            root = ET.fromstring(text)
-            summary = _summarize_xml_payload(root)
-            if summary:
-                return f"Ответ интеграции (HTTP {status_code}):\n{summary}"
-        except Exception:
-            pass
-
-    # Plain text fallback
-    return f"Ответ интеграции (HTTP {status_code}):\n{text[:2000]}"
-
-
-def _format_dynamic_tool_result(tr: ToolResult) -> str | None:
-    """Human-friendly summary for dynamic tool payloads without LLM compose."""
-    result = tr.result or {}
-    if not isinstance(result, dict):
-        text = str(result).strip()
-        return text[:2000] if text else None
-
-    status_code = int(result.get("status_code") or result.get("status") or 0)
-    body = str(result.get("body") or result.get("content") or "").strip()
-
-    # Many dynamic tools return HTTP-like shape {status_code, body, headers}
-    if body:
-        label = f"Ответ {tr.tool}"
-        if status_code > 0:
-            label += f" (HTTP {status_code})"
-
-        if status_code >= 400:
-            return f"{label}:\n{body[:2000]}"
-
-        # Reuse integration parser for XML/JSON body rendering
-        return _format_integration_body(body=body, status_code=max(status_code, 200)).replace("Ответ интеграции", label)
-
-    msg = str(result.get("message") or "").strip()
-    if msg:
-        return msg[:2000]
-
-    # Generic dict fallback (trimmed) if there is no dedicated field.
-    trimmed = {k: v for k, v in result.items() if k not in {"headers", "file_base64", "base64"}}
-    if not trimmed:
-        return None
-    return f"Ответ {tr.tool}:\n" + json.dumps(trimmed, ensure_ascii=False, default=str)[:2000]
-
-
-def _summarize_json_payload(obj: Any) -> str:
-    if isinstance(obj, dict):
-        lines: list[str] = []
-        for k, v in list(obj.items())[:20]:
-            if isinstance(v, (dict, list)):
-                lines.append(f"- {k}: {_json_shape(v)}")
-            else:
-                lines.append(f"- {k}: {str(v)[:300]}")
-        return "\n".join(lines)
-
-    if isinstance(obj, list):
-        if not obj:
-            return "Пустой список."
-        head = obj[:5]
-        lines = [f"Список элементов: {len(obj)}"]
-        for idx, item in enumerate(head, start=1):
-            if isinstance(item, dict):
-                preview = ", ".join(f"{k}={str(v)[:80]}" for k, v in list(item.items())[:6])
-                lines.append(f"- #{idx}: {preview}")
-            else:
-                lines.append(f"- #{idx}: {str(item)[:300]}")
-        return "\n".join(lines)
-
-    return str(obj)[:1200]
-
-
-def _json_shape(value: Any) -> str:
-    if isinstance(value, dict):
-        return f"object ({len(value)} keys)"
-    if isinstance(value, list):
-        return f"array ({len(value)} items)"
-    return type(value).__name__
-
-
-def _summarize_xml_payload(root: ET.Element) -> str:
-    # Flatten first few leaf fields from XML
-    lines: list[str] = []
-    for elem in root.iter():
-        if len(lines) >= 20:
-            break
-        text = (elem.text or "").strip()
-        if not text:
-            continue
-        if len(elem) > 0:
-            continue
-        tag = elem.tag.split("}")[-1]
-        lines.append(f"- {tag}: {text[:300]}")
-    if lines:
-        return "\n".join(lines)
-    return ET.tostring(root, encoding="unicode")[:1200]
