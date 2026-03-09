@@ -825,7 +825,15 @@ async def compose_node(state: dict) -> dict:
 
     is_complete = bool(out.is_complete) or iterations >= max_iterations
     if is_complete:
-        answer = _sanitize_llm_answer(out.answer or existing_answer or _build_raw_tool_summary(tool_results))
+        answer = _sanitize_llm_answer(
+            out.answer
+            or existing_answer
+            or _build_raw_web_summary(
+                web_fetch_content=web_fetch_content,
+                web_search_results=web_search_results,
+                tool_results=tool_results,
+            )
+        )
         return {
             "final_answer": answer,
             "is_complete": True,
