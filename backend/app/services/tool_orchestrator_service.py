@@ -419,8 +419,7 @@ class ToolOrchestratorService:
         # --- Generic $prev / $step[N] resolution ---
         prev = context.get("_prev")
         steps_results: list = context.get("_steps") or []
-        if prev is not None or steps_results:
-            merged = _resolve_placeholders(merged, prev=prev, steps=steps_results)
+        merged = _resolve_placeholders(merged, prev=prev, steps=steps_results)
 
         return merged
 
@@ -764,6 +763,11 @@ class ToolOrchestratorService:
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
         else:
             content_str = str(raw_content or "")
+        if not content_str.strip():
+            raise ValueError(
+                "pdf_create requires non-empty content. "
+                "Предыдущий шаг не вернул данных для формирования документа."
+            )
 
         payload = {
             "title": title,
@@ -853,6 +857,7 @@ class ToolOrchestratorService:
 
         title = str(arguments.get("title") or "Generated document").strip()
         raw_content = arguments.get("content")
+        rows = arguments.get("rows")
         filename = str(arguments.get("filename") or "document.xlsx").strip()
         if not filename.lower().endswith(".xlsx"):
             filename = f"{filename}.xlsx"
@@ -861,6 +866,11 @@ class ToolOrchestratorService:
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
         else:
             content_str = str(raw_content or "")
+        if not content_str.strip() and not (isinstance(rows, list) and rows):
+            raise ValueError(
+                "excel_create requires non-empty content or rows. "
+                "Предыдущий шаг не вернул данных для формирования таблицы."
+            )
 
         payload = {
             "title": title,
@@ -870,7 +880,6 @@ class ToolOrchestratorService:
             "__priority": "high",
         }
         columns = arguments.get("columns")
-        rows = arguments.get("rows")
         if isinstance(columns, list):
             payload["columns"] = columns
         if isinstance(rows, list):
