@@ -510,6 +510,7 @@ class ToolOrchestratorService:
         response_hint: str,
     ) -> str:
         all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else True
+        has_integration = any(str(c.get("tool") or "") == "integration_call" for c in tool_calls)
         _dev_verbose_log(
             "compose_final_answer_start",
             tool_calls_count=len(tool_calls),
@@ -517,10 +518,21 @@ class ToolOrchestratorService:
             tools=[str(call.get("tool") or "") for call in tool_calls],
         )
         
-        summary_prompt = (
-            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "Если есть числовые значения, дай их кратко и явно. "
-        )
+        if has_integration and not all_failed:
+            summary_prompt = (
+                "Ты получил ответ от внешнего API (интеграции). "
+                "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
+                "Если данные в XML/JSON - извлеки ключевые значения и представь "
+                "в удобном виде (таблица, список, текст). "
+                "НЕ выводи сырой XML/JSON. НЕ обрезай данные - покажи ВСЕ основные записи. "
+                "Если пользователь просил конкретные данные - выдели их."
+            )
+        else:
+            summary_prompt = (
+                "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
+                "Если есть числовые значения, дай их кратко и явно. "
+            )
+
         if all_failed:
             summary_prompt += (
                 "ВСЕ инструменты завершились с ошибкой. "
