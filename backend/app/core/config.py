@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     WORKER_ENABLED: bool = True
     SCHEDULER_ENABLED: bool = True
 
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
+    RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE: int = 10
+
     WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
     WS_FANOUT_REDIS_ENABLED: bool = True
     WS_FANOUT_CHANNEL_PREFIX: str = "assistant:ws:fanout"
