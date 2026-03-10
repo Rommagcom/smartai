@@ -1262,7 +1262,7 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return
         token, _ = auth
-        res = await self.client.documents_ask(token, question, top_k=10)
+        res = await self.client.documents_ask(token, question, top_k=5)
         if res.get("status") != 200:
             await self._reply_api_result(update, res)
             return

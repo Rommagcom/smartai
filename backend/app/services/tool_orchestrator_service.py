@@ -1014,7 +1014,7 @@ class ToolOrchestratorService:
         if not query:
             raise ValueError("doc_search requires query")
         top_k = int(arguments.get("top_k", 5))
-        chunks = await rag_service.retrieve_context(str(user.id), query, top_k=max(1, min(top_k, 10)))
+        chunks = await rag_service.retrieve_context(str(user.id), query, top_k=max(1, min(top_k, 5)))
         return {"items": chunks}
 
     async def _doc_ask(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1022,8 +1022,8 @@ class ToolOrchestratorService:
         query = str(arguments.get("query") or "").strip()
         if not query:
             raise ValueError("doc_ask requires query")
-        top_k = int(arguments.get("top_k", 8))
-        return await rag_service.answer_question(str(user.id), query, top_k=max(1, min(top_k, 10)))
+        top_k = int(arguments.get("top_k", 5))
+        return await rag_service.answer_question(str(user.id), query, top_k=max(1, min(top_k, 5)))
 
     async def _doc_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db, arguments
