@@ -495,6 +495,15 @@ class ChatService:
         if re.search(r"\b(что\s+ты\s+помниш|что\s+ты\s+знаеш|покажи\s+памят|список\s+памят|моя\s+памят)\b", lowered):
             return [{"tool": "memory_list", "arguments": {}}]
 
+        # Document QA intent in regular chat: prefer detailed doc_ask answer.
+        _doc_entity = r"(?:документ|документы|документа|файл|файлы|материал|материалы|pdf|docs?|files?)"
+        _doc_qa_intent = (
+            r"(?:проанализ|анализ|разбер|объясн|расскаж|суммир|резюм|вывод|итог|что\s+говорит|что\s+сказано"
+            r"|analy[sz]e|explain|summari[sz]e|what\s+does|key\s+points?)"
+        )
+        if re.search(_doc_entity, lowered) and re.search(_doc_qa_intent, lowered):
+            return [{"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 10}}]
+
         # Document management: list, delete one, delete all
         if re.search(
             r"\b(?:удали|удалить|очисти|очистить|сотри|стереть)\b.*\bвс[\u0435\u0451]\b.*\b(?:документ|файл)"
@@ -1786,6 +1795,21 @@ class ChatService:
                         lines.append(f"- [{fact_type}] {content}")
                 if len(items) > 8:
                     lines.append(f"- …и ещё {len(items) - 8}")
+                return "\n".join(lines)
+
+            if tool == "doc_ask":
+                answer = cls._truncate_text(str(result.get("answer") or "I don't know"), 3600)
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                lines = [f"Ответ по документам: {answer}"]
+                if items:
+                    lines.append("Источники:")
+                    for item in items[:3]:
+                        if not isinstance(item, dict):
+                            continue
+                        source_doc = str(item.get("source_doc") or "document").strip() or "document"
+                        chunk = cls._truncate_text(str(item.get("chunk_text") or "").strip(), 420)
+                        if chunk:
+                            lines.append(f"- [{source_doc}] {chunk}")
                 return "\n".join(lines)
 
             if tool == "doc_list":

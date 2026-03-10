@@ -24,6 +24,7 @@ class TelegramBridgeSettings(BaseSettings):
     TELEGRAM_KNOWN_USER_TTL_SECONDS: int = 2592000  # 30 days
     TELEGRAM_CHAT_TIMEOUT_SECONDS: int = 300  # timeout for /chat API calls (LLM + tools)
     TELEGRAM_DEFAULT_TIMEOUT_SECONDS: int = 60  # default timeout for other API calls
+    TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS: int = 1200  # timeout for /documents/upload processing
     OBS_LOG_LEVEL: str = "INFO"
     DEV_VERBOSE_LOGGING: bool = False
 
