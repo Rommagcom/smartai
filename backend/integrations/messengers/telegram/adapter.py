@@ -182,24 +182,25 @@ class TelegramAdapter(MessengerAdapter):
             await application.shutdown()
 
     async def _auth(self, update: Update) -> tuple[str, str]:
-        telegram_user_id = update.effective_user.id if update.effective_user else 0
-        if telegram_user_id <= 0:
-            raise PermissionError("Не удалось определить Telegram ID пользователя.")
+        subject_id, is_group_subject = self._auth_subject(update)
+        if subject_id <= 0:
+            raise PermissionError("Не удалось определить Telegram ID для авторизации.")
 
         async with AsyncSessionLocal() as db:
-            allowed_result = await db.execute(
-                select(TelegramAllowedUser).where(
-                    TelegramAllowedUser.telegram_user_id == telegram_user_id,
-                    TelegramAllowedUser.is_active.is_(True),
+            if not is_group_subject:
+                allowed_result = await db.execute(
+                    select(TelegramAllowedUser).where(
+                        TelegramAllowedUser.telegram_user_id == subject_id,
+                        TelegramAllowedUser.is_active.is_(True),
+                    )
                 )
-            )
-            if allowed_result.scalar_one_or_none() is None:
-                raise PermissionError(
-                    "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
-                )
+                if allowed_result.scalar_one_or_none() is None:
+                    raise PermissionError(
+                        "Ваш Telegram ID не в списке доступа. Обратитесь к администратору, чтобы он добавил ваш ID в админ-панели."
+                    )
 
             username, password = build_backend_credentials(
-                telegram_user_id,
+                subject_id,
                 self.settings.TELEGRAM_BACKEND_BRIDGE_SECRET,
             )
             user_result = await db.execute(select(User).where(User.username == username))
@@ -225,6 +226,16 @@ class TelegramAdapter(MessengerAdapter):
 
         token = create_token(str(user.id), settings.ACCESS_TOKEN_EXPIRE_MINUTES, "access")
         return token, username
+
+    def _auth_subject(self, update: Update) -> tuple[int, bool]:
+        chat = update.effective_chat
+        user = update.effective_user
+        chat_type = str(getattr(chat, "type", "") or "").lower()
+        if chat_type in {"group", "supergroup"}:
+            chat_id = int(getattr(chat, "id", 0) or 0)
+            return abs(chat_id), True
+        user_id = int(getattr(user, "id", 0) or 0)
+        return user_id, False
 
     @staticmethod
     async def _stream_text_reply(bot: Bot, chat_id: int, text: str) -> None:
@@ -505,8 +516,9 @@ class TelegramAdapter(MessengerAdapter):
         try:
             auth = await self._auth(update)
             token, username = auth
-            if update.effective_user and update.effective_chat:
-                self._known_users[update.effective_user.id] = {
+            subject_id, _ = self._auth_subject(update)
+            if subject_id > 0 and update.effective_chat:
+                self._known_users[subject_id] = {
                     "token": token,
                     "chat_id": update.effective_chat.id,
                     "username": username,
@@ -1155,7 +1167,7 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return
         token, _backend_username = auth
-        telegram_user_id = update.effective_user.id if update.effective_user else 0
+        telegram_user_id, _ = self._auth_subject(update)
         self._dev_log(
             "chat_message_received",
             telegram_user_id=telegram_user_id,
