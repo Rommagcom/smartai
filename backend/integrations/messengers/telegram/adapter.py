@@ -131,7 +131,6 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("chat", self.chat_command))
         application.add_handler(CommandHandler("history", self.history))
         application.add_handler(CommandHandler("self_improve", self.self_improve))
-        application.add_handler(CommandHandler("py", self.execute_python))
         application.add_handler(CommandHandler("make_pdf", self.make_pdf))
         application.add_handler(CommandHandler("memory_add", self.memory_add))
         application.add_handler(CommandHandler("memory_list", self.memory_list))
@@ -229,20 +228,25 @@ class TelegramAdapter(MessengerAdapter):
         visible = clean[:first_limit]
         tail = clean[first_limit:]
 
-        msg = await bot.send_message(chat_id=chat_id, text="⏳")
-        chunk_size = 220
-        for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
-            part = visible[:idx]
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
-            await asyncio.sleep(0.08)
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text="⏳")
+            chunk_size = 220
+            for idx in range(chunk_size, len(visible) + chunk_size, chunk_size):
+                part = visible[:idx]
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=part)
+                await asyncio.sleep(0.08)
 
-        if not visible:
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
+            if not visible:
+                await bot.edit_message_text(chat_id=chat_id, message_id=msg.message_id, text=clean[:1])
 
-        while tail:
-            part = tail[:3500]
-            tail = tail[3500:]
-            await bot.send_message(chat_id=chat_id, text=part)
+            while tail:
+                part = tail[:3500]
+                tail = tail[3500:]
+                await bot.send_message(chat_id=chat_id, text=part)
+        except Exception:
+            logger.warning("telegram stream reply failed, sending plain text", exc_info=True)
+            # Fallback to a single plain message so user still gets an answer.
+            await bot.send_message(chat_id=chat_id, text=clean[:4096])
 
     async def _chat_background_task_direct(
         self,
@@ -299,6 +303,20 @@ class TelegramAdapter(MessengerAdapter):
                     session.id,
                     text,
                 )
+
+                # Fallback: if artifacts list is empty, re-extract from tool_calls
+                if not artifacts and tool_calls:
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict) or not tc.get("success"):
+                            continue
+                        result = tc.get("result")
+                        if isinstance(result, dict) and result.get("file_base64"):
+                            artifacts.append({
+                                "file_name": result.get("file_name", DEFAULT_ARTIFACT_FILENAME),
+                                "mime_type": result.get("mime_type", "application/octet-stream"),
+                                "file_base64": result["file_base64"],
+                            })
+
                 self._dev_log(
                     "direct_chat_result",
                     chat_id=chat_id,
@@ -330,19 +348,25 @@ class TelegramAdapter(MessengerAdapter):
                     summary = f"Пользователь: {user_short}"
                     if assistant_short:
                         summary += f" → Ассистент: {assistant_short}"
-                    await short_term_memory_service.append(str(user.id), summary)
+                    try:
+                        await short_term_memory_service.append(str(user.id), summary)
+                    except Exception:
+                        logger.warning("telegram STM append failed", exc_info=True)
 
             await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
 
             for artifact in artifacts:
-                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                try:
+                    file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                    if not file_base64:
+                        continue
+                    file_bytes = base64.b64decode(file_base64)
+                    file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                    bio = BytesIO(file_bytes)
+                    bio.name = file_name
+                    await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                except Exception:
+                    logger.warning("telegram artifact send failed (direct)", exc_info=True)
             self._dev_log(
                 "direct_chat_done",
                 chat_id=chat_id,
@@ -416,6 +440,19 @@ class TelegramAdapter(MessengerAdapter):
             tool_calls = payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else []
             artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
 
+            # Fallback: if artifacts list is empty, re-extract from tool_calls
+            if not artifacts and tool_calls:
+                for tc in tool_calls:
+                    if not isinstance(tc, dict) or not tc.get("success"):
+                        continue
+                    result = tc.get("result")
+                    if isinstance(result, dict) and result.get("file_base64"):
+                        artifacts.append({
+                            "file_name": result.get("file_name", DEFAULT_ARTIFACT_FILENAME),
+                            "mime_type": result.get("mime_type", "application/octet-stream"),
+                            "file_base64": result["file_base64"],
+                        })
+
             self._dev_log(
                 "api_chat_result",
                 chat_id=chat_id,
@@ -430,14 +467,17 @@ class TelegramAdapter(MessengerAdapter):
             await self._stream_text_reply(bot=bot, chat_id=chat_id, text=response_text)
 
             for artifact in artifacts:
-                file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
-                if not file_base64:
-                    continue
-                file_bytes = base64.b64decode(file_base64)
-                file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
-                bio = BytesIO(file_bytes)
-                bio.name = file_name
-                await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                try:
+                    file_base64 = artifact.get("file_base64") if isinstance(artifact, dict) else None
+                    if not file_base64:
+                        continue
+                    file_bytes = base64.b64decode(file_base64)
+                    file_name = str(artifact.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+                    bio = BytesIO(file_bytes)
+                    bio.name = file_name
+                    await bot.send_document(chat_id=chat_id, document=InputFile(bio, filename=file_name))
+                except Exception:
+                    logger.warning("telegram artifact send failed (api)", exc_info=True)
         except httpx.TimeoutException:
             await bot.send_message(
                 chat_id=chat_id,
@@ -601,7 +641,21 @@ class TelegramAdapter(MessengerAdapter):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            await application.bot.send_message(chat_id=chat_id, text=self._format_worker_item(item))
+
+            # Deliver actual file document if file_base64 is present in the result
+            file_sent = await self._try_send_worker_artifact(
+                bot=application.bot,
+                chat_id=chat_id,
+                item=item,
+            )
+
+            # Always send the text notification (unless the file was sent and
+            # the text would just be a generic "task done" message).
+            if not file_sent:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=self._format_worker_item(item),
+                )
         success = True
         observability_metrics_service.record(
             component="telegram_bridge",
@@ -610,6 +664,42 @@ class TelegramAdapter(MessengerAdapter):
             latency_ms=(perf_counter() - started_at) * 1000,
         )
         return True
+
+    @staticmethod
+    async def _try_send_worker_artifact(
+        bot: Bot,
+        chat_id: int,
+        item: dict[str, Any],
+    ) -> bool:
+        """Extract file_base64 from a worker result item and send it as a Telegram document.
+
+        Returns True if a file was successfully sent.
+        """
+        result = item.get("result") or item.get("result_preview") or {}
+        if not isinstance(result, dict):
+            return False
+
+        file_b64 = result.get("file_base64")
+        if not file_b64:
+            return False
+
+        try:
+            file_bytes = base64.b64decode(file_b64)
+            file_name = str(result.get("file_name") or DEFAULT_ARTIFACT_FILENAME)
+            bio = BytesIO(file_bytes)
+            bio.name = file_name
+
+            job_type = str(item.get("job_type") or "document")
+            caption = f"\u2705 \u0413\u043e\u0442\u043e\u0432\u043e ({job_type}): {file_name}"
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(bio, filename=file_name),
+                caption=caption[:200],
+            )
+            return True
+        except Exception:
+            logger.warning("Failed to send worker artifact as Telegram document", exc_info=True)
+            return False
 
     @staticmethod
     def _format_worker_item(item: dict[str, Any]) -> str:
@@ -630,13 +720,17 @@ class TelegramAdapter(MessengerAdapter):
         # Use human-readable message when present (cron_reminder, etc.).
         human_message = str(item.get("message") or "").strip()
 
-        # For cron_reminder: display the human message directly.
-        if job_type == "cron_reminder" and human_message:
+        # For cron_reminder / cron_chat: display the human message directly.
+        if job_type in {"cron_reminder", "cron_chat"} and human_message:
             return human_message
 
         preview = item.get("result_preview")
         if preview is None:
             preview = item.get("result", {})
+
+        # Strip file_base64 from text display (it's delivered as a document)
+        if isinstance(preview, dict) and "file_base64" in preview:
+            preview = {k: v for k, v in preview.items() if k != "file_base64"}
 
         # Try to extract a readable message from preview dict.
         if isinstance(preview, dict):
@@ -667,16 +761,8 @@ class TelegramAdapter(MessengerAdapter):
         if not preview.get("artifact_ready"):
             return ""
 
-        if str(job_type) == "pdf_create":
-            return (
-                "Файл готов. Чтобы получить сам PDF в Telegram, запусти задачу напрямую без фоновой очереди, "
-                "например командой /make_pdf <title>|<content>."
-            )
-
-        return (
-            "Файл готов. Чтобы получить файл в Telegram, повтори задачу через /chat без фразы про фон/очередь "
-            "(выполнение пойдёт сразу и вернёт артефакт)."
-        )
+        # Files are now delivered automatically as Telegram documents.
+        return ""
 
     @staticmethod
     def _sanitize_reply_payload(payload: Any) -> Any:
@@ -1002,18 +1088,6 @@ class TelegramAdapter(MessengerAdapter):
             return
         token, _ = auth
         res = await self.client.chat_self_improve(token)
-        await self._reply_api_result(update, res)
-
-    async def execute_python(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        code = " ".join(context.args).strip()
-        if not code:
-            await update.effective_message.reply_text("Использование: /py <python_code>")
-            return
-        auth = await self._auth_or_reject(update)
-        if not auth:
-            return
-        token, _ = auth
-        res = await self.client.execute_python(token, code)
         await self._reply_api_result(update, res)
 
     async def make_pdf(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

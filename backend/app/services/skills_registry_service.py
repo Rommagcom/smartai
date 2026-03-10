@@ -6,6 +6,9 @@ from typing import Any
 PERMISSION_NETWORK_HTTP_READ = "network.http.read"
 PERMISSION_INTEGRATIONS_WRITE = "integrations.write"
 PERMISSION_INTEGRATIONS_READ = "integrations.read"
+PERMISSION_DYNAMIC_TOOLS_WRITE = "dynamic_tools.write"
+PERMISSION_DYNAMIC_TOOLS_READ = "dynamic_tools.read"
+PERMISSION_DYNAMIC_TOOLS_CALL = "dynamic_tools.call"
 
 
 class SkillsRegistryService:
@@ -38,20 +41,24 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
-                    "name": "execute_python",
-                    "title": "Execute Python",
-                    "description": "Выполнение python-кода в sandbox",
+                    "name": "excel_create",
+                    "title": "Excel Create",
+                    "description": "Генерация Excel (.xlsx) файла из текста или структурированных данных",
                     "version": "1.0.0",
                 },
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "code": {"type": "string"},
+                        "title": {"type": "string"},
+                        "content": {"type": "string", "description": "Текстовые данные (TSV/CSV/точка-с-запятой)"},
+                        "filename": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Заголовки столбцов"},
+                        "rows": {"type": "array", "items": {"type": "array"}, "description": "Строки данных (массив массивов)"},
                     },
-                    "required": ["code"],
+                    "required": ["content"],
                     "additionalProperties": False,
                 },
-                "permissions": ["sandbox.python.execute"],
+                "permissions": ["files.generate"],
             },
             {
                 "manifest": {
@@ -159,9 +166,54 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "doc_list",
+                    "title": "Document List",
+                    "description": "Список загруженных документов пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.read"],
+            },
+            {
+                "manifest": {
+                    "name": "doc_delete",
+                    "title": "Document Delete",
+                    "description": "Удалить один загруженный документ по имени файла",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "source_doc": {"type": "string", "description": "Имя файла документа для удаления"},
+                    },
+                    "required": ["source_doc"],
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.write"],
+            },
+            {
+                "manifest": {
+                    "name": "doc_delete_all",
+                    "title": "Document Delete All",
+                    "description": "Удалить все загруженные документы пользователя",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.write"],
+            },
+            {
+                "manifest": {
                     "name": "cron_add",
                     "title": "Cron Add",
-                    "description": "Создание cron/reminder задачи",
+                    "description": "Создание cron/reminder задачи. Для задач с вызовом API/интеграции используй action_type='chat'",
                     "version": "1.0.0",
                 },
                 "input_schema": {
@@ -172,7 +224,7 @@ class SkillsRegistryService:
                         "schedule_text": {"type": "string"},
                         "schedule": {"type": "string", "_planner_hidden": True},
                         "natural_text": {"type": "string", "_planner_hidden": True},
-                        "action_type": {"type": "string"},
+                        "action_type": {"type": "string", "description": "send_message для текстового напоминания, chat для выполнения инструмента/API/интеграции"},
                         "payload": {"type": "object"},
                         "task_text": {"type": "string"},
                         "message": {"type": "string", "_planner_hidden": True},
@@ -238,7 +290,7 @@ class SkillsRegistryService:
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "job_type": {"type": "string", "enum": ["pdf_create"]},
+                        "job_type": {"type": "string", "enum": ["pdf_create", "excel_create"]},
                         "payload": {"type": "object"},
                         "priority": {"type": "string", "enum": ["normal", "high"]},
                     },
@@ -398,6 +450,105 @@ class SkillsRegistryService:
                 },
                 "permissions": ["integrations.call", PERMISSION_NETWORK_HTTP_READ, "network.http.write"],
             },
+            # ---- Dynamic Tool Injection ----
+            {
+                "manifest": {
+                    "name": "dynamic_tool_register",
+                    "title": "Dynamic Tool Register",
+                    "description": "Зарегистрировать пользовательский API как инструмент (Dynamic Tool Injection)",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "user_message": {"type": "string", "description": "Описание API от пользователя (URL, параметры, название)"},
+                    },
+                    "required": ["user_message"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_call",
+                    "title": "Dynamic Tool Call",
+                    "description": "Вызвать зарегистрированный пользовательский API-инструмент",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "Имя динамического инструмента"},
+                        "arguments": {"type": "object", "description": "Аргументы для вызова API"},
+                    },
+                    "required": ["tool_name"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_CALL, PERMISSION_NETWORK_HTTP_READ],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_list",
+                    "title": "Dynamic Tool List",
+                    "description": "Список зарегистрированных пользовательских API-инструментов",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_READ],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_delete",
+                    "title": "Dynamic Tool Delete",
+                    "description": "Удалить зарегистрированный пользовательский API-инструмент",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_id": {"type": "string", "description": "UUID инструмента для удаления"},
+                    },
+                    "required": ["tool_id"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
+            {
+                "manifest": {
+                    "name": "dynamic_tool_delete_all",
+                    "title": "Dynamic Tool Delete All",
+                    "description": "Удалить все пользовательские API-инструменты",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
+            # ---- Register API Tool (with Milvus vector storage) ----
+            {
+                "manifest": {
+                    "name": "register_api_tool",
+                    "title": "Register API Tool",
+                    "description": "Зарегистрировать API-инструмент с семантическим поиском (Milvus vector storage)",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "user_message": {"type": "string", "description": "Полное сообщение пользователя с описанием API (URL, параметры, название)"},
+                    },
+                    "required": ["user_message"],
+                    "additionalProperties": False,
+                },
+                "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
+            },
         ]
 
     def list_contracts(self) -> list[dict]:
@@ -491,6 +642,10 @@ class SkillsRegistryService:
     @staticmethod
     def _validate_type(key: str, value: Any, expected_type: str) -> str | None:
         if not expected_type:
+            return None
+        # Allow None for optional fields — the caller (validate_input)
+        # already checks required fields separately.
+        if value is None:
             return None
 
         validators = {

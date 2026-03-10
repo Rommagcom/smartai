@@ -32,7 +32,7 @@ class _CronAddToolArguments(BaseModel):
     schedule_text: str = Field(description="Текст расписания, например: 'каждый день в 9:00', 'через 30 минут', 'сегодня в 21:00'")
     task_text: str = Field(description="Текст задачи или напоминания")
     name: str = Field(default="chat-reminder", description="Имя задачи")
-    action_type: str = Field(default="send_message", description="Тип действия")
+    action_type: str = Field(default="send_message", description="Тип действия: 'send_message' для текстового напоминания, 'chat' для выполнения инструмента (integration_call, API)")
 
 
 class _CronAddToolDecision(BaseModel):
@@ -303,6 +303,9 @@ class ChatService:
             r"\bdelete\b|\bremove\b|\blist\b|\bshow\b",
             r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
             r"\bмои\s+(?:задач|напоминан|cron)|список\s+(?:задач|напоминан)",
+            r"\b(?:найди|поищи|загугли|погугли|ищи|нагугли)\b.*\b(?:интернет|сети|гугл|google|инет)",
+            r"\bweb\s+search|search\s+(?:the\s+)?(?:web|internet|online)\b",
+            r"\bзагугли|погугли\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 
@@ -492,6 +495,33 @@ class ChatService:
         if re.search(r"\b(что\s+ты\s+помниш|что\s+ты\s+знаеш|покажи\s+памят|список\s+памят|моя\s+памят)\b", lowered):
             return [{"tool": "memory_list", "arguments": {}}]
 
+        # Document management: list, delete one, delete all
+        if re.search(
+            r"\b(?:удали|удалить|очисти|очистить|сотри|стереть)\b.*\bвс[\u0435\u0451]\b.*\b(?:документ|файл)"
+            r"|delete\s+all\s+(?:my\s+)?(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_delete_all", "arguments": {}}]
+
+        _doc_del_m = re.search(
+            r"\b(?:удали|удалить|убери|убрать|сотри|стереть)\b.*\b(?:документ|файл)\w*\s+([\w._-]+\.[\w]+)"
+            r"|delete\s+(?:document|file)\s+([\w._-]+\.[\w]+)",
+            lowered,
+        )
+        if _doc_del_m:
+            source_doc = (_doc_del_m.group(1) or _doc_del_m.group(2) or "").strip()
+            if source_doc:
+                return [{"tool": "doc_delete", "arguments": {"source_doc": source_doc}}]
+
+        if re.search(
+            r"\b(покажи|список|какие|мои|выведи)\b.*\b(?:документ|файл)"
+            r"|list\s+(?:my\s+)?(?:documents?|files?)"
+            r"|show\s+(?:my\s+)?(?:documents?|files?)"
+            r"|my\s+(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_list", "arguments": {}}]
+
         return None
 
     @staticmethod
@@ -592,11 +622,19 @@ class ChatService:
         if not schedule_text or not task_text:
             return None
 
+        action_type = "send_message"
+        if re.search(
+            r"\b(?:интеграц|integration|api|курс\s+валют|погод|weather|вызов|данные\s+из|fetch|запрос)\b",
+            task_text,
+            flags=re.IGNORECASE,
+        ):
+            action_type = "chat"
+
         return {
             "name": "chat-reminder",
             "schedule_text": schedule_text,
             "task_text": task_text,
-            "action_type": "send_message",
+            "action_type": action_type,
         }
 
     @staticmethod
@@ -881,11 +919,24 @@ class ChatService:
     @staticmethod
     def _sanitize_llm_answer(text: str) -> str:
         cleaned = str(text or "")
+        if not cleaned.strip():
+            return (
+                "Не удалось сформировать итоговый текст ответа. "
+                "Попробуйте уточнить запрос."
+            )
+
+        original = cleaned
         cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
         cleaned = cleaned.strip()
         if cleaned:
             return cleaned
+
+        # Aggressive strip removed all content — fallback: strip only the tags
+        logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
+        fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
+        if fallback:
+            return fallback
         return (
             "Не удалось сформировать итоговый текст ответа. "
             "Попробуйте уточнить запрос."
@@ -1267,6 +1318,8 @@ class ChatService:
                 planner = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             use_tools = bool(planner.get("use_tools"))
             planned_steps = planner.get("steps") if isinstance(planner.get("steps"), list) else []
@@ -1274,6 +1327,8 @@ class ChatService:
                 planner_retry = await tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
                 retry_use_tools = bool(planner_retry.get("use_tools"))
                 retry_steps = planner_retry.get("steps") if isinstance(planner_retry.get("steps"), list) else []
@@ -1589,6 +1644,16 @@ class ChatService:
 
     @classmethod
     def _format_deterministic_tool_answer(cls, tool_calls: list[dict]) -> str | None:
+        # Mixed chains (data-fetching + artifact-creation) → skip, let LLM compose
+        _data_tools = {"integration_call", "dynamic_tool_call"}
+        _artifact_tools = {"pdf_create", "excel_create"}
+        tools_in_chain = {
+            str(c.get("tool") or "").strip().lower()
+            for c in tool_calls if c.get("success")
+        }
+        if tools_in_chain & _data_tools and tools_in_chain & _artifact_tools:
+            return None
+
         for call in tool_calls:
             if not call.get("success"):
                 continue
@@ -1627,11 +1692,23 @@ class ChatService:
                     return f"Запрос к интеграции вернул ошибку (HTTP {status_code}).\n{preview}".strip()
                 if not body:
                     return f"Ответ интеграции (HTTP {status_code}): пустое тело."
-                max_len = 3000
+                max_len = 12000
                 preview = body[:max_len]
                 if len(body) > max_len:
                     preview += f"\n…(обрезано, всего {len(body)} символов)"
                 return f"Ответ интеграции (HTTP {status_code}):\n```\n{preview}\n```"
+
+            if tool == "pdf_create":
+                fname = str(result.get("file_name") or "document.pdf")
+                size = int(result.get("size_bytes") or 0)
+                size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+                return f"Документ {fname} создан{size_kb}."
+
+            if tool == "excel_create":
+                fname = str(result.get("file_name") or "document.xlsx")
+                size = int(result.get("size_bytes") or 0)
+                size_kb = f" ({size / 1024:.1f} KB)" if size else ""
+                return f"Документ {fname} создан{size_kb}."
 
             if tool == "integrations_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)
@@ -1710,6 +1787,34 @@ class ChatService:
                 if len(items) > 8:
                     lines.append(f"- …и ещё {len(items) - 8}")
                 return "\n".join(lines)
+
+            if tool == "doc_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "У вас нет загруженных документов."
+                lines = ["Ваши документы:"]
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        name = str(item.get("source_doc") or item.get("name") or "?").strip()
+                        chunks = item.get("chunk_count", "")
+                        suffix = f" ({chunks} частей)" if chunks else ""
+                        lines.append(f"- {name}{suffix}")
+                if len(items) > 20:
+                    lines.append(f"- …и ещё {len(items) - 20}")
+                return "\n".join(lines)
+
+            if tool == "doc_delete":
+                source = str(result.get("source_doc") or "").strip()
+                deleted_chunks = int(result.get("deleted_chunks") or 0)
+                if not result.get("deleted"):
+                    return f"Документ {source} не найден." if source else "Документ не найден."
+                return f"Документ {source} удалён ({deleted_chunks} частей)."
+
+            if tool == "doc_delete_all":
+                deleted = int(result.get("deleted_count") or 0)
+                if deleted <= 0:
+                    return "У вас не было загруженных документов."
+                return f"Все документы удалены ({deleted} частей)."
         return None
 
     async def _maybe_fast_tool_answer(
@@ -1928,6 +2033,8 @@ class ChatService:
                 tool_orchestrator_service.plan_tool_calls(
                     user_message=user_message,
                     system_prompt=user.system_prompt_template,
+                    db=db,
+                    user_id=user.id,
                 )
             )
 
@@ -2203,6 +2310,8 @@ class ChatService:
                     "верни use_tool=true и заполни arguments с schedule_text и task_text. "
                     "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
                     "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+                    "Если задача требует ВЫЗОВА API или интеграции (курс валют, погода и т.д.) — "
+                    "используй action_type='chat'. Если обычное текстовое напоминание — action_type='send_message'. "
                     "Если данных недостаточно, верни use_tool=false."
                 ),
             )
@@ -2233,7 +2342,10 @@ class ChatService:
             '{"use_tool": bool, "arguments": {"schedule_text": "...", "task_text": "...", "name": "chat-reminder", "action_type": "send_message"}}. '
             "Если данных для cron_add недостаточно, верни use_tool=false и пустые arguments. "
             "Если пользователь пишет task-first (например: 'Запланируй встречу на сегодня на 21:00'), "
-            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'."
+            "извлеки task_text='встречу', schedule_text='сегодня на 21:00'. "
+            "Если задача требует ВЫЗОВА API, интеграции или получения данных (курс валют, погода, и т.д.) — "
+            "используй action_type='chat' и в task_text опиши что нужно сделать (например 'вызови интеграцию nationalbank и покажи курсы валют'). "
+            "Если задача — просто текстовое напоминание (встреча, позвонить, купить), оставь action_type='send_message'."
         )
 
         for _ in range(2):
@@ -2394,6 +2506,94 @@ class ChatService:
             service_name=parsed["service_name"],
         )
         return clean_answer, tool_calls, artifacts
+
+    # ==================================================================
+    # Graph-based respond — new LangGraph architecture
+    # ==================================================================
+
+    async def respond_via_graph(
+        self,
+        db: AsyncSession,
+        user: User,
+        session_id: UUID,
+        user_message: str,
+    ) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+        """Process a chat request through the LangGraph agent pipeline.
+
+        This is the new architecture entry point that replaces the monolithic
+        respond() method with a graph-based flow:
+          guardrail → memory → router → (tool_exec|chat) → compose → output
+
+        Returns the same tuple as respond() for backward compatibility.
+        """
+        from app.graph import agent_graph
+
+        initial_state = {
+            "messages": [user_message],
+            "context": [],
+            "client_id": str(user.id),
+            "user_id": user.id,
+            "session_id": session_id,
+            "user_message": user_message,
+            "system_prompt": user.system_prompt_template,
+            "permissions": [],
+            "intent": "",
+            "history_messages": [],
+            "stm_context": [],
+            "ltm_context": [],
+            "rag_context": [],
+            "history_summary": None,
+            "extracted_entities": [],
+            "router_output": None,
+            "feedback_plan": "",
+            "tool_results": [],
+            "artifacts": [],
+            "input_guardrail": None,
+            "output_guardrail": None,
+            "final_answer": "",
+            "tool_calls_log": [],
+            "next_step": "",
+            "iteration": 0,
+            "iterations": 0,
+            "max_iterations": settings.LANGGRAPH_MAX_ITERATIONS,
+            "error": None,
+        }
+
+        self._dev_verbose_log(
+            "graph_respond_start",
+            user_id=str(user.id),
+            session_id=str(session_id),
+        )
+
+        try:
+            result = await agent_graph.ainvoke(initial_state)
+        except Exception:
+            logger.exception("LangGraph agent failed, falling back to legacy respond")
+            return await self.respond(db, user, session_id, user_message)
+
+        # Extract results in the legacy format
+        final_answer = str(result.get("final_answer") or "")
+        tool_calls_log = result.get("tool_calls_log") or []
+        artifacts = result.get("artifacts") or []
+
+        # Safety net: re-extract artifacts from tool_calls_log if lost during
+        # LangGraph state propagation (e.g. reducer replaced list with []).
+        if not artifacts and tool_calls_log:
+            artifacts = self._extract_artifacts(tool_calls_log)
+
+        # Memory IDs from LTM context (for tracking)
+        used_memory_ids: list[str] = []
+        rag_sources: list[str] = []
+
+        self._dev_verbose_log(
+            "graph_respond_done",
+            user_id=str(user.id),
+            session_id=str(session_id),
+            tool_calls_count=len(tool_calls_log),
+            answer_length=len(final_answer),
+        )
+
+        return final_answer, used_memory_ids, rag_sources, tool_calls_log, artifacts
 
 
 chat_service = ChatService()
