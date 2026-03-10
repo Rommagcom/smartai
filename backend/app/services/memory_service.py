@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
@@ -10,7 +9,6 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.session import AsyncSessionLocal
 from app.models.long_term_memory import LongTermMemory
 from app.models.message import Message
 from app.models.session import Session
@@ -279,15 +277,6 @@ class MemoryService:
             .limit(max(1, min(limit, 500)))
         )
         return result.scalars().all()
-
-    async def _safe_decay(self, user_id: UUID) -> None:
-        """Run importance decay in an independent DB session. Fire-and-forget safe."""
-        try:
-            async with AsyncSessionLocal() as bg_db:
-                await self.apply_importance_decay(bg_db, user_id)
-                await bg_db.commit()
-        except Exception as exc:
-            logger.debug("background decay skipped for user %s: %s", user_id, exc)
 
     async def apply_importance_decay(self, db: AsyncSession, user_id: UUID) -> None:
         now = datetime.now(timezone.utc)

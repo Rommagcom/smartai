@@ -97,7 +97,7 @@ class IntegrationOnboardingStatusResponse(BaseModel):
     draft: IntegrationOnboardingDraft
     last_test: IntegrationOnboardingTestResult | None = None
     saved_integration_id: UUID | None = None
-    updated_at: datetime
+    updated_at: str
 
 
 class IntegrationHealthResponse(BaseModel):

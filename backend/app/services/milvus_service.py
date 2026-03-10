@@ -6,7 +6,6 @@ from app.core.config import settings
 class MilvusService:
     def __init__(self) -> None:
         self.collection_name = settings.MILVUS_COLLECTION
-        self._collection: Collection | None = None
 
     def connect(self) -> None:
         connections.connect(alias="default", host=settings.MILVUS_HOST, port=str(settings.MILVUS_PORT))
@@ -16,13 +15,9 @@ class MilvusService:
         return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
 
     def ensure_collection(self) -> Collection:
-        if self._collection is not None:
-            return self._collection
-
         self.connect()
         if utility.has_collection(self.collection_name):
-            self._collection = Collection(self.collection_name)
-            return self._collection
+            return Collection(self.collection_name)
 
         fields = [
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
@@ -36,7 +31,6 @@ class MilvusService:
         collection = Collection(self.collection_name, schema=schema)
         collection.create_index(field_name="embedding", index_params={"index_type": "HNSW", "metric_type": "COSINE", "params": {"M": 16, "efConstruction": 200}})
         collection.load()
-        self._collection = collection
         return collection
 
     def insert_chunks(self, user_id: str, chunks: list[str], vectors: list[list[float]], source_doc: str) -> None:
