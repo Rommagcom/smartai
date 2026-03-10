@@ -282,10 +282,6 @@ class ToolOrchestratorService:
             )
             return {"use_tools": False, "steps": [], "response_hint": ""}
 
-    # Per-step timeout (seconds).  Prevents a single slow tool (e.g. browser)
-    # from blocking the whole chain indefinitely.
-    TOOL_STEP_TIMEOUT_SECONDS: int = 90
-
     async def execute_tool_chain(
         self,
         db: AsyncSession,

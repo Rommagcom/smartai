@@ -1,22 +1,13 @@
-from uuid import UUID
-
 from fastapi import APIRouter, Depends, HTTPException, status
-from jose import JWTError
 from sqlalchemy import func, select
 
 from app.api.types import DBSession
 from app.core.config import settings
 from app.core.security import create_token, get_password_hash, verify_password
 from app.models.user import User
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
 
 router = APIRouter()
-
-
-def _issue_tokens(user_id: str) -> TokenResponse:
-    access = create_token(user_id, settings.ACCESS_TOKEN_EXPIRE_MINUTES, "access")
-    refresh = create_token(user_id, settings.REFRESH_TOKEN_EXPIRE_MINUTES, "refresh")
-    return TokenResponse(access_token=access, refresh_token=refresh)
 
 
 @router.post("/register")
