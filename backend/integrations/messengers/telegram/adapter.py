@@ -136,6 +136,7 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("memory_list", self.memory_list))
         application.add_handler(CommandHandler("doc_list", self.doc_list))
         application.add_handler(CommandHandler("doc_search", self.doc_search))
+        application.add_handler(CommandHandler("doc_ask", self.doc_ask))
         application.add_handler(CommandHandler("doc_delete", self.doc_delete))
         application.add_handler(CommandHandler("doc_delete_all", self.doc_delete_all))
         application.add_handler(CommandHandler("cron_add", self.cron_add))
@@ -161,6 +162,7 @@ class TelegramAdapter(MessengerAdapter):
 
         application.add_handler(MessageHandler(filters.Document.ALL, self.document_upload))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.chat_message))
+        application.add_error_handler(self._on_error)
 
         await application.initialize()
         await application.start()
@@ -979,6 +981,7 @@ class TelegramAdapter(MessengerAdapter):
             "/memory_list\n"
             "/doc_list\n"
             "[Загрузка документа файлом в чат] + /doc_search <query>\n"
+            "/doc_ask <question>\n"
             "/doc_delete <filename>\n"
             "/doc_delete_all\n"
             "/cron_add <name>|<cron>|<action_type>|<payload_json>\n"
@@ -1139,6 +1142,16 @@ class TelegramAdapter(MessengerAdapter):
         res = await self.client.memory_list(token)
         await self._reply_api_result(update, res)
 
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.exception("telegram update handler failed", exc_info=context.error)
+        try:
+            if isinstance(update, Update) and update.effective_message:
+                await update.effective_message.reply_text(
+                    "Произошла временная ошибка при обработке запроса. Попробуйте ещё раз."
+                )
+        except Exception:
+            logger.warning("telegram error handler reply failed", exc_info=True)
+
     async def document_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message or not update.effective_message.document:
             return
@@ -1149,7 +1162,19 @@ class TelegramAdapter(MessengerAdapter):
         doc = update.effective_message.document
         tg_file = await context.bot.get_file(doc.file_id)
         content = await tg_file.download_as_bytearray()
-        res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
+        try:
+            res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
+        except httpx.TimeoutException:
+            await update.effective_message.reply_text(
+                "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+            )
+            return
+        except Exception:
+            logger.exception("telegram document upload failed")
+            await update.effective_message.reply_text(
+                "Внутренняя ошибка при загрузке документа. Попробуйте позже."
+            )
+            return
         if res.get("status") != 200:
             await self._reply_api_result(update, res)
             return
@@ -1175,6 +1200,31 @@ class TelegramAdapter(MessengerAdapter):
             if snippet:
                 lines.append(f"{index}) [{source}] {snippet}")
         return lines
+
+    @staticmethod
+    def _format_doc_ask_long_sources(items: list[Any]) -> list[str]:
+        lines: list[str] = []
+        for index, item in enumerate(items[:10], start=1):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source_doc") or "document")
+            chunk = str(item.get("chunk_text") or "").strip()
+            snippet = (chunk[:900] + "…") if len(chunk) > 900 else chunk
+            if snippet:
+                lines.append(f"{index}) [{source}] {snippet}")
+        return lines
+
+    async def _reply_long_message(self, update: Update, text: str, part_size: int = 3500) -> None:
+        if not update.effective_message:
+            return
+        payload = str(text or "").strip()
+        if not payload:
+            return
+        if len(payload) <= part_size:
+            await update.effective_message.reply_text(payload)
+            return
+        for start in range(0, len(payload), part_size):
+            await update.effective_message.reply_text(payload[start:start + part_size])
 
     async def doc_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = " ".join(context.args).strip()
@@ -1202,6 +1252,30 @@ class TelegramAdapter(MessengerAdapter):
             return
 
         await update.effective_message.reply_text("Результаты поиска по документам:\n" + "\n\n".join(lines))
+
+    async def doc_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        question = " ".join(context.args).strip()
+        if not question:
+            await update.effective_message.reply_text("Использование: /doc_ask <question>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.documents_ask(token, question, top_k=10)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        answer = str(payload.get("answer") or "").strip() or "I don't know"
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        source_lines = self._format_doc_ask_long_sources(items)
+
+        message = f"Ответ по документам (развернутый режим):\n{answer}"
+        if source_lines:
+            message += "\n\nПодробные фрагменты источников:\n" + "\n\n".join(source_lines)
+        await self._reply_long_message(update, message)
 
     async def doc_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context

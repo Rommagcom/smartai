@@ -74,6 +74,8 @@ def test_existing_answers():
 def test_doc_routes():
     print("=== Doc tool routes ===")
     tests = [
+        ("проанализируй из загруженных документов как стать маркетинг менеджером", "doc_ask"),
+        ("summarize key points from my documents", "doc_ask"),
         ("покажи мои документы", "doc_list"),
         ("удали документ report.pdf", "doc_delete"),
         ("удали все документы", "doc_delete_all"),
@@ -137,6 +139,7 @@ def test_planner_signatures():
 
     sigs = skills_registry_service.planner_signatures()
     for tool in ["pdf_create", "excel_create", "doc_list", "doc_delete", "doc_delete_all",
+                     "doc_ask",
                  "cron_add", "cron_list", "cron_delete_all",
                  "memory_add", "memory_list", "memory_delete_all",
                  "integration_call", "register_api_tool"]:
@@ -154,6 +157,7 @@ def test_handler_coverage():
         "pdf_create", "excel_create",
         "memory_add", "memory_list", "memory_search", "memory_delete", "memory_delete_all",
         "doc_search", "doc_list", "doc_delete", "doc_delete_all",
+            "doc_ask",
         "cron_add", "cron_list", "cron_delete", "cron_delete_all",
         "integration_call", "integration_add", "integrations_list", "integrations_delete_all",
         "dynamic_tool_register", "dynamic_tool_call", "dynamic_tool_list",
