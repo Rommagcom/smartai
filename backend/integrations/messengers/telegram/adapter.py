@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import re
 from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
@@ -80,6 +81,8 @@ class TelegramAdapter(MessengerAdapter):
         self._known_users: dict[int, dict[str, Any]] = self._load_known_users()
         self._background_tasks: set[asyncio.Task] = set()
         self._direct_session_ids: dict[int, str] = {}
+        self._bot_id: int | None = None
+        self._group_trigger_names: set[str] | None = None
 
     def _dev_log(self, event: str, **context: Any) -> None:
         if not self._verbose_logging:
@@ -1041,9 +1044,111 @@ class TelegramAdapter(MessengerAdapter):
     async def chat_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_message or not update.effective_message.text:
             return
+        text = update.effective_message.text
+        if self._is_group_chat(update):
+            text = await self._extract_group_message_for_bot(update, context)
+            if text is None:
+                return
         if await self._handle_auto_soul_setup(update, context):
             return
-        await self._chat(update, update.effective_message.text, context)
+        await self._chat(update, text, context)
+
+    @staticmethod
+    def _is_group_chat(update: Update) -> bool:
+        chat = update.effective_chat
+        chat_type = str(getattr(chat, "type", "") or "").lower()
+        return chat_type in {"group", "supergroup"}
+
+    async def _extract_group_message_for_bot(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> str | None:
+        message = update.effective_message
+        if not message or not message.text:
+            return None
+        text = str(message.text)
+        text_stripped = text.strip()
+        if not text_stripped:
+            return None
+
+        if not bool(self.settings.TELEGRAM_GROUP_REQUIRE_NAME):
+            return text_stripped
+
+        trigger_names = await self._get_group_trigger_names(context)
+        addressed = self._contains_bot_mention(message, trigger_names)
+        cleaned = self._strip_trigger_prefix(text_stripped, trigger_names)
+        if cleaned != text_stripped:
+            addressed = True
+
+        if not addressed:
+            return None
+        return cleaned or None
+
+    async def _get_group_trigger_names(self, context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+        if self._group_trigger_names is not None:
+            return self._group_trigger_names
+
+        names: set[str] = set()
+        aliases = str(self.settings.TELEGRAM_GROUP_NAME_ALIASES or "").split(",")
+        for alias in aliases:
+            normalized = alias.strip().lower().lstrip("@")
+            if normalized:
+                names.add(normalized)
+
+        bot = context.bot
+        username = str(getattr(bot, "username", "") or "").strip().lower().lstrip("@")
+        if username:
+            names.add(username)
+
+        try:
+            me = await bot.get_me()
+            self._bot_id = int(getattr(me, "id", 0) or 0) or self._bot_id
+            me_username = str(getattr(me, "username", "") or "").strip().lower().lstrip("@")
+            first_name = str(getattr(me, "first_name", "") or "").strip().lower()
+            if me_username:
+                names.add(me_username)
+            if first_name:
+                names.add(first_name)
+        except Exception:
+            logger.warning("Failed to resolve Telegram bot identity", exc_info=True)
+
+        self._group_trigger_names = names
+        return self._group_trigger_names
+
+    def _contains_bot_mention(self, message: Any, trigger_names: set[str]) -> bool:
+        entities = list(getattr(message, "entities", []) or [])
+        text = str(getattr(message, "text", "") or "")
+        if not entities or not text:
+            return False
+
+        for entity in entities:
+            entity_type = str(getattr(entity, "type", "") or "")
+            if entity_type == "mention":
+                offset = int(getattr(entity, "offset", 0) or 0)
+                length = int(getattr(entity, "length", 0) or 0)
+                mention = text[offset: offset + length].strip().lower().lstrip("@")
+                if mention and mention in trigger_names:
+                    return True
+            elif entity_type == "text_mention":
+                entity_user = getattr(entity, "user", None)
+                entity_user_id = int(getattr(entity_user, "id", 0) or 0)
+                if self._bot_id and entity_user_id == self._bot_id:
+                    return True
+        return False
+
+    @staticmethod
+    def _strip_trigger_prefix(text: str, trigger_names: set[str]) -> str:
+        cleaned = text
+        sorted_names = sorted(trigger_names, key=len, reverse=True)
+        for name in sorted_names:
+            escaped = re.escape(name)
+            pattern = rf"^\s*@?{escaped}(?:\s+|\s*[:,.!?-]\s*)"
+            next_cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE)
+            if next_cleaned != cleaned:
+                cleaned = next_cleaned.strip()
+                break
+        return cleaned.strip()
 
     async def _chat(self, update: Update, text: str, context: ContextTypes.DEFAULT_TYPE | None = None) -> None:
         auth = await self._auth_or_reject(update)
