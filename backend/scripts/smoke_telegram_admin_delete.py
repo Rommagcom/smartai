@@ -14,6 +14,7 @@ from app.models.long_term_memory import LongTermMemory
 from app.models.message import Message
 from app.models.session import Session
 from app.models.telegram_allowed_user import TelegramAllowedUser
+from app.models.dynamic_tool import DynamicTool
 from app.models.user import User
 from app.models.worker_task import WorkerTask
 from app.services.milvus_service import milvus_service
@@ -44,6 +45,7 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
         await conn.run_sync(CronJob.__table__.create)
         await conn.run_sync(CodeSnippet.__table__.create)
         await conn.run_sync(ApiIntegration.__table__.create)
+        await conn.run_sync(DynamicTool.__table__.create)
         await conn.run_sync(WorkerTask.__table__.create)
 
     return async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False), engine

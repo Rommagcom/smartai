@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.session import get_db
 from app.main import app
 from app.models.cron_job import CronJob
+from app.models.dynamic_tool import DynamicTool
 from app.models.message import Message
 from app.models.session import Session
 from app.models.user import User
@@ -28,6 +29,7 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", future=True)
     async with engine.begin() as conn:
         await conn.run_sync(User.__table__.create)
+        await conn.run_sync(DynamicTool.__table__.create)
         await conn.run_sync(Session.__table__.create)
         await conn.run_sync(Message.__table__.create)
         await conn.run_sync(CronJob.__table__.create)

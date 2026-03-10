@@ -1,19 +1,12 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	chromium \
+	wkhtmltopdf \
+	fonts-dejavu-core \
 	fonts-liberation \
-	libnss3 \
-	libatk-bridge2.0-0 \
-	libxkbcommon0 \
-	libxcomposite1 \
-	libxdamage1 \
-	libxrandr2 \
-	libgbm1 \
-	libasound2 \
-	libatspi2.0-0 \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

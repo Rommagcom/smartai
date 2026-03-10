@@ -7,6 +7,7 @@ from app.services.egress_policy_service import egress_policy_service
 from app.services.http_client_service import http_client_service
 
 _TEMPLATE_RE = re.compile(r"\{\{(\w+)\}\}")
+_SINGLE_BRACE_RE = re.compile(r"\{(today|today_iso|now)\}")
 
 
 def _builtin_values() -> dict[str, str]:
@@ -22,20 +23,23 @@ def resolve_url_template(url: str, params: dict | None = None) -> str:
     """Resolve ``{key}`` placeholders in *url* from *params*.
 
     Param values may contain built-in templates:
-    - ``{{today}}``     → DD.MM.YYYY
-    - ``{{today_iso}}`` → YYYY-MM-DD
-    - ``{{now}}``       → ISO-8601 UTC datetime
+    - ``{{today}}`` / ``{today}``         → DD.MM.YYYY
+    - ``{{today_iso}}`` / ``{today_iso}`` → YYYY-MM-DD
+    - ``{{now}}`` / ``{now}``             → ISO-8601 UTC datetime
+
+    Both single-brace and double-brace syntax are supported.
 
     Params that do not match any URL placeholder are appended
     as query-string parameters.
     """
     builtins = _builtin_values()
 
-    # ---- resolve {{template}} inside param values ----
+    # ---- resolve {{template}} and {builtin} inside param values ----
     resolved: dict[str, str] = {}
     for k, v in (params or {}).items():
         val = str(v)
         val = _TEMPLATE_RE.sub(lambda m: builtins.get(m.group(1), m.group(0)), val)
+        val = _SINGLE_BRACE_RE.sub(lambda m: builtins.get(m.group(1), m.group(0)), val)
         resolved[k] = val
 
     # ---- substitute {key} placeholders in URL ----

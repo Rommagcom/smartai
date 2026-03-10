@@ -3,14 +3,17 @@ import asyncio
 import logging
 
 from fastapi import FastAPI
+from starlette.responses import PlainTextResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.core.rate_limit import RateLimitMiddleware
 from app.db.session import close_engine
 from app.services.alerting_service import alerting_service
 from app.services.http_client_service import http_client_service
 from app.services.milvus_service import milvus_service
+from app.services.observability_metrics_service import observability_metrics_service
 from app.services.scheduler_service import scheduler_service
 from app.services.websocket_manager import connection_manager
 from app.workers.worker_service import worker_service
@@ -24,10 +27,38 @@ async def lifespan(app: FastAPI):
     worker_task: asyncio.Task | None = None
     try:
         connection_manager.start()
-        milvus_service.ensure_collection()
+        await asyncio.wait_for(
+            asyncio.to_thread(milvus_service.ensure_collection),
+            timeout=15.0,
+        )
     except Exception as exc:
         logger.warning("Milvus init skipped", extra={"context": {"error": str(exc)}})
         alerting_service.emit(component="startup", severity="warning", message="Milvus init skipped", details={"error": str(exc)})
+
+    # Warm-up LangGraph agent compilation
+    try:
+        from app.graph import agent_graph  # noqa: F401
+        logger.info("LangGraph agent compiled", extra={"context": {"component": "langgraph", "event": "ready"}})
+    except Exception as exc:
+        logger.warning("LangGraph init skipped: %s", exc)
+        alerting_service.emit(component="startup", severity="warning", message="LangGraph init skipped", details={"error": str(exc)})
+
+    # Warm-up LiteLLM provider
+    try:
+        from app.llm import llm_provider
+        resolved_model = llm_provider._resolve_model(None)
+        logger.info(
+            "LiteLLM provider ready",
+            extra={
+                "context": {
+                    "component": "litellm",
+                    "event": "ready",
+                    "model": resolved_model,
+                }
+            },
+        )
+    except Exception as exc:
+        logger.warning("LiteLLM init skipped: %s", exc)
 
     if settings.SCHEDULER_ENABLED:
         scheduler_service.start()
@@ -93,7 +124,20 @@ app = FastAPI(
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
+app.add_middleware(
+    RateLimitMiddleware,
+    enabled=settings.RATE_LIMIT_ENABLED,
+    requests_per_minute=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
+    auth_requests_per_minute=settings.RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE,
+)
+
 
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics() -> str:
+    """Unauthenticated Prometheus scrape endpoint."""
+    return observability_metrics_service.to_prometheus()

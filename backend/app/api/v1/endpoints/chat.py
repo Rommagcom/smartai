@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from uuid import UUID
 
@@ -7,8 +6,6 @@ from sqlalchemy import select
 
 from app.api.types import CurrentUser, CurrentUserId, DBSession
 from app.core.config import settings
-from app.db.session import AsyncSessionLocal
-from app.models.code_snippet import CodeSnippet
 from app.models.message import Message
 from app.models.user import User
 from app.models.worker_task import WorkerTask
@@ -26,16 +23,13 @@ from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
-from app.services.short_term_memory_service import short_term_memory_service
 from app.services.skills_registry_service import skills_registry_service
-from app.services.sandbox_service import sandbox_service
 from app.services.self_improvement_service import self_improvement_service
 from app.services.soul_service import soul_service
 from app.services.worker_result_service import worker_result_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-_background_tasks: set[asyncio.Task] = set()
 
 
 def _safe_task_payload(payload: dict | None) -> dict:
@@ -55,33 +49,6 @@ def _safe_task_result(result: dict | None) -> dict | None:
         preview.pop("file_base64", None)
         preview["artifact_ready"] = True
     return preview
-
-
-async def _extract_facts_background(user_id: UUID, user_text: str, assistant_text: str) -> None:
-    try:
-        async with AsyncSessionLocal() as bg_db:
-            await asyncio.wait_for(
-                memory_service.extract_and_store_facts(bg_db, user_id, user_text, assistant_text),
-                timeout=15,
-            )
-            await bg_db.commit()
-    except Exception as exc:
-        logger.warning("background fact extraction skipped: %s: %s", type(exc).__name__, exc)
-
-
-async def _save_stm_background(user_id: UUID, user_text: str, assistant_text: str) -> None:
-    """Save a compact context snippet to short-term memory (Redis)."""
-    try:
-        user_short = (user_text or "").strip()[:200]
-        assistant_short = (assistant_text or "").strip()[:200]
-        if not user_short:
-            return
-        summary = f"Пользователь: {user_short}"
-        if assistant_short:
-            summary += f" → Ассистент: {assistant_short}"
-        await short_term_memory_service.append(str(user_id), summary)
-    except Exception as exc:
-        logger.debug("STM background save skipped: %s", exc)
 
 
 @router.post("")
@@ -135,7 +102,7 @@ async def chat(
     await memory_service.append_message(db, current_user.id, session.id, "user", payload.message)
     await db.commit()
 
-    response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond(
+    response_text, used_memory_ids, rag_sources, tool_calls, artifacts = await chat_service.respond_via_graph(
         db,
         current_user,
         session.id,
@@ -171,25 +138,6 @@ async def chat(
     )
 
     await db.commit()
-    task = asyncio.create_task(
-        _extract_facts_background(
-            user_id=current_user.id,
-            user_text=payload.message,
-            assistant_text=response_text,
-        )
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-    stm_task = asyncio.create_task(
-        _save_stm_background(
-            user_id=current_user.id,
-            user_text=payload.message,
-            assistant_text=response_text,
-        )
-    )
-    _background_tasks.add(stm_task)
-    stm_task.add_done_callback(_background_tasks.discard)
 
     if settings.DEV_VERBOSE_LOGGING:
         logger.info(
@@ -215,9 +163,8 @@ async def chat(
 
 @router.get("/skills", response_model=SkillsRegistryResponse)
 async def skills_registry(
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> SkillsRegistryResponse:
-    del current_user
     return SkillsRegistryResponse(
         registry_version=skills_registry_service.REGISTRY_VERSION,
         skills=skills_registry_service.list_contracts(),
@@ -271,36 +218,11 @@ async def self_improve(
     return await self_improvement_service.adapt_preferences(db, current_user)
 
 
-@router.post("/execute-python", responses={400: {"description": "code is required"}})
-async def execute_python(
-    body: dict,
-    db: DBSession,
-    current_user: CurrentUser,
-) -> dict:
-    code = body.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="code is required")
-
-    result = await sandbox_service.execute_python_code(code, current_user.id)
-    snippet = CodeSnippet(
-        user_id=current_user.id,
-        code=code,
-        language="python",
-        execution_result=result,
-        is_successful=result.get("success", False),
-        created_by="assistant",
-    )
-    db.add(snippet)
-    await db.commit()
-    return result
-
-
 @router.post("/tools/pdf-create")
 async def pdf_create(
     payload: PdfCreateRequest,
-    current_user: CurrentUser,
+    _current_user: CurrentUser,
 ) -> dict:
-    del current_user
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 

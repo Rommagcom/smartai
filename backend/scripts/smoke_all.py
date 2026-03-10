@@ -15,6 +15,7 @@ from scripts.smoke_telegram_bridge import run as run_telegram_bridge
 from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
 from scripts.smoke_ws_cron import run as run_ws_cron
 from scripts.smoke_tool_routing import run as run_tool_routing
+from scripts.smoke_web_compose_fallback import run as run_web_compose_fallback
 
 
 def reset_scheduler() -> None:
@@ -91,6 +92,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_TOOL_ROUTING")
         await run_tool_routing()
+
+        print("RUN_SMOKE_WEB_COMPOSE_FALLBACK")
+        await run_web_compose_fallback()
 
         print("SMOKE_ALL_OK")
     finally:

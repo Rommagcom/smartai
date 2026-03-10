@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime
 import json
+from typing import Any
 from uuid import UUID
 
 from anyio import to_thread
@@ -17,12 +18,12 @@ from app.models.cron_job import CronJob
 from app.models.user import User
 from app.services.api_executor import api_executor
 from app.services.auth_data_security_service import auth_data_security_service
+from app.services.dynamic_tool_service import dynamic_tool_service
 from app.services.memory_service import memory_service
 from app.services.integration_onboarding_service import integration_onboarding_service
 from app.services.ollama_client import ollama_client
 from app.services.pdf_service import pdf_service
 from app.services.rag_service import rag_service
-from app.services.sandbox_service import sandbox_service
 from app.services.schedule_parser_service import schedule_parser_service
 from app.services.scheduler_service import scheduler_service
 from app.services.skills_registry_service import skills_registry_service
@@ -45,16 +46,173 @@ def _dev_verbose_log(event: str, **context: object) -> None:
     )
 
 
+# ---- Prompt-like content detection for PDF/Excel ----
+
+_PROMPT_VERBS = re.compile(
+    r"^(расскажи|напиши|опиши|составь|сгенерируй|создай|подготовь|придумай|"
+    r"сделай|объясни|перечисли|покажи|дай|выведи|"
+    r"write|tell|describe|generate|create|explain|list|show|make|prepare)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_prompt(text: str) -> bool:
+    """Check if short text looks like an instruction/prompt rather than ready content."""
+    return bool(_PROMPT_VERBS.match(text.strip()))
+
+
+async def _expand_prompt_to_content(prompt_text: str, title_hint: str = "") -> str:
+    """Expand a prompt-like instruction into actual document content via LLM."""
+    try:
+        from app.llm import llm_provider
+        system = (
+            "Ты готовишь содержимое для документа (PDF/Excel). "
+            "Пользователь дал инструкцию, что написать. "
+            "Напиши развёрнутый, информативный текст на русском языке. "
+            "Используй абзацы, списки где уместно. "
+            "НЕ пиши 'Вот текст для PDF' — просто выдай сам контент."
+        )
+        if title_hint:
+            system += f"\nТема документа: {title_hint}"
+
+        result = await asyncio.wait_for(
+            llm_provider.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt_text},
+                ],
+                temperature=0.5,
+                retries=1,
+            ),
+            timeout=60,
+        )
+        expanded = (result or "").strip()
+        if expanded and len(expanded) > len(prompt_text):
+            return expanded
+    except Exception:
+        logger.warning("LLM expand prompt for document failed", exc_info=True)
+    return prompt_text
+
+
+# ---- $prev / $step[N] placeholder resolution ----
+
+_PREV_RE = re.compile(r"^\$prev(?:\.(\w+))?$")
+_STEP_RE = re.compile(r"^\$step\[(\d+)\](?:\.(\w+))?$")
+_INLINE_PREV_RE = re.compile(r"\$prev(?:\.(\w+))?")
+_INLINE_STEP_RE = re.compile(r"\$step\[(\d+)\](?:\.(\w+))?")
+
+
+def _deep_get(data: dict | None, key: str | None) -> object:
+    """Get a top-level key from a dict, or the whole dict if key is None."""
+    if data is None:
+        return ""
+    if key is None:
+        return data
+    val = data.get(key)
+    if val is None:
+        return ""
+    return val
+
+
+def _resolve_value(value: object, *, prev: dict | None, steps: list[dict]) -> object:
+    """Resolve a single argument value; recurse into dicts and lists."""
+    if isinstance(value, str):
+        # Exact match: entire value is a placeholder
+        m = _PREV_RE.match(value)
+        if m:
+            return _deep_get(prev, m.group(1))
+        m = _STEP_RE.match(value)
+        if m:
+            idx = int(m.group(1))
+            if 0 <= idx < len(steps):
+                return _deep_get(steps[idx].get("result"), m.group(2))
+            return ""
+
+        # Inline replacement: placeholder embedded in a larger string
+        def _sub_prev(m: re.Match) -> str:
+            v = _deep_get(prev, m.group(1))
+            return str(v) if not isinstance(v, str) else v
+
+        def _sub_step(m: re.Match) -> str:
+            idx = int(m.group(1))
+            if 0 <= idx < len(steps):
+                v = _deep_get(steps[idx].get("result"), m.group(2))
+                return str(v) if not isinstance(v, str) else v
+            return ""
+
+        if "$prev" in value:
+            value = _INLINE_PREV_RE.sub(_sub_prev, value)
+        if "$step[" in value:
+            value = _INLINE_STEP_RE.sub(_sub_step, value)
+        return value
+
+    if isinstance(value, dict):
+        return {k: _resolve_value(v, prev=prev, steps=steps) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_value(item, prev=prev, steps=steps) for item in value]
+    return value
+
+
+def _resolve_placeholders(arguments: dict, *, prev: dict | None, steps: list[dict]) -> dict:
+    """Resolve $prev.* and $step[N].* placeholders in tool arguments."""
+    return {k: _resolve_value(v, prev=prev, steps=steps) for k, v in arguments.items()}
+
+
 class ToolOrchestratorService:
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
         normalized = str(action_type or "send_message").strip().lower()
         if normalized in {"reminder", "notification", "daily_briefing"}:
             return "send_message"
+        if normalized in {"chat", "tool_call", "api_call", "integration", "integration_call", "execute", "display"}:
+            return "chat"
         return normalized
 
-    async def plan_tool_calls(self, user_message: str, system_prompt: str) -> dict:
+    async def plan_tool_calls(
+        self,
+        user_message: str,
+        system_prompt: str,
+        *,
+        db: AsyncSession | None = None,
+        user_id: UUID | None = None,
+    ) -> dict:
         del system_prompt
+
+        # Build dynamic tools suffix if DB context is available
+        dynamic_tools_block = ""
+        if db is not None and user_id is not None:
+            try:
+                dynamic_sigs = await dynamic_tool_service.get_tools_for_planner(db, user_id)
+                if dynamic_sigs:
+                    dynamic_tools_block = (
+                        f"\nПользовательские API-инструменты (динамические): {dynamic_sigs}. "
+                        "Вызывай их точно по имени с префиксом dyn: (например dyn:weather_api)."
+                    )
+            except Exception as exc:
+                logger.debug("failed to load dynamic tools for planner: %s", exc)
+
+        # Build user integrations context for planner
+        integrations_block = ""
+        if db is not None and user_id is not None:
+            try:
+                from app.models.api_integration import ApiIntegration
+                from sqlalchemy import select as sa_select
+                integ_result = await db.execute(
+                    sa_select(ApiIntegration).where(
+                        ApiIntegration.user_id == user_id,
+                        ApiIntegration.is_active.is_(True),
+                    )
+                )
+                integrations = integ_result.scalars().all()
+                if integrations:
+                    names = [integ.service_name for integ in integrations]
+                    integrations_block = (
+                        f"\nПодключённые интеграции пользователя (вызывай через integration_call с service_name): "
+                        f"{', '.join(names)}. "
+                    )
+            except Exception as exc:
+                logger.debug("failed to load integrations for planner: %s", exc)
+
         planner_prompt = (
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
             "Формат: {\"use_tools\": bool, \"steps\": [{\"tool\": \"...\", \"arguments\": {...}}], \"response_hint\": \"...\"}. "
@@ -62,11 +220,16 @@ class ToolOrchestratorService:
             "Если нужны: 1..3 шага в порядке выполнения. "
             "Доступные инструменты: "
             f"{skills_registry_service.planner_signatures()}. "
+            f"{dynamic_tools_block}"
+            f"{integrations_block}"
             "Правила: "
             "1) Для PDF отчета используй pdf_create. "
+            "1a) Для Excel/таблицы используй excel_create. "
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
-            "3) Если пользователь просит 'подключить API', используй integration_add. "
-            "4) Для запросов 'возьми данные из моего API' сначала вызови integrations_list, затем integration_call. "
+            "Если задача требует выполнения инструмента (integration_call, API-вызов, получение данных) — устанавливай action_type='chat'. "
+            "Если задача — простое текстовое напоминание, action_type не указывай (по умолчанию send_message). "
+            "3) Если пользователь просит 'подключить API' или 'запомни мой API', используй dynamic_tool_register с user_message. "
+            "4) Для запросов 'возьми данные из моего API' или использования ранее подключённого API используй dyn:<имя_инструмента> с нужными аргументами. "
             "5) НИКОГДА не используй worker_enqueue для отключённых инструментов. "
             "6) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
             "7) Не выдумывай аргументы, если их нет в сообщении. "
@@ -74,17 +237,33 @@ class ToolOrchestratorService:
             "9) Для удаления ВСЕХ напоминаний используй cron_delete_all (без аргументов). "
             "10) Для просмотра списка напоминаний используй cron_list. "
             "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
-            "12) Для очистки памяти пользователя используй memory_delete_all."
+            "12) Для очистки памяти пользователя используй memory_delete_all. "
+            "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
+            "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id. "
+            "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
+            "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call. "
+            "16) Для списка загруженных документов — doc_list. "
+            "17) Для удаления одного документа — doc_delete с source_doc (имя файла). "
+            "18) Для удаления всех документов — doc_delete_all. "
+            "19) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+            "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
+            "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
+            "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
         )
 
         try:
-            planner_raw = await ollama_client.chat(
+            # Use LiteLLM via unified provider (supports OpenAI, Anthropic, Ollama, etc.)
+            from app.llm import llm_provider
+            planner_model = settings.LITELLM_PLANNER_MODEL or None
+
+            planner_raw = await llm_provider.chat(
                 messages=[
                     {"role": "system", "content": planner_prompt},
                     {"role": "user", "content": user_message},
                 ],
-                stream=False,
-                options={"temperature": 0.0, "top_p": 0.1, "num_predict": settings.OLLAMA_NUM_PREDICT_PLANNER},
+                model=planner_model,
+                temperature=settings.LITELLM_PLANNER_TEMPERATURE,
+                max_tokens=settings.OLLAMA_NUM_PREDICT_PLANNER,
             )
             plan = self._normalize_plan(self._parse_json(planner_raw))
             if not plan.get("use_tools"):
@@ -102,6 +281,10 @@ class ToolOrchestratorService:
                 exc,
             )
             return {"use_tools": False, "steps": [], "response_hint": ""}
+
+    # Per-step timeout (seconds).  Prevents a single slow tool (e.g. browser)
+    # from blocking the whole chain indefinitely.
+    TOOL_STEP_TIMEOUT_SECONDS: int = 90
 
     async def execute_tool_chain(
         self,
@@ -124,6 +307,35 @@ class ToolOrchestratorService:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
             _dev_verbose_log("step_start", tool=tool, arguments=arguments)
+
+            # Dynamic tool dispatch: dyn:tool_name or dyn_tool_name
+            if self.is_dynamic_tool(tool):
+                # Resolve $prev/$step[N] placeholders for dynamic tools too
+                arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
+                try:
+                    result = await asyncio.wait_for(
+                        dynamic_tool_service.call_dynamic_tool(
+                            db=db,
+                            user_id=user.id,
+                            tool_name=tool,
+                            arguments=arguments,
+                        ),
+                        timeout=TOOL_STEP_TIMEOUT_SECONDS,
+                    )
+                    self._update_chain_context(tool=tool, result=result, context=context)
+                    _dev_verbose_log("step_success_dynamic", tool=tool, result=result)
+                    results.append({
+                        "tool": tool,
+                        "arguments": arguments,
+                        "success": bool(result.get("success")),
+                        "result": result,
+                    })
+                except asyncio.TimeoutError:
+                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s"})
+                except Exception as exc:
+                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": str(exc)})
+                continue
+
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
             arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
             arguments = self._coerce_argument_types(tool, arguments)
@@ -197,17 +409,22 @@ class ToolOrchestratorService:
         return results
 
     @staticmethod
-    def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, dict]) -> dict:
+    def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, Any]) -> dict:
         merged = dict(arguments)
 
-        if tool not in {"integration_onboarding_test", "integration_onboarding_save"}:
-            return merged
+        # --- Onboarding draft propagation (legacy) ---
+        if tool in {"integration_onboarding_test", "integration_onboarding_save"}:
+            onboarding = context.get("integration_onboarding") or {}
+            if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
+                merged["draft"] = onboarding["draft"]
+            if not merged.get("draft_id") and onboarding.get("draft_id"):
+                merged["draft_id"] = onboarding["draft_id"]
 
-        onboarding = context.get("integration_onboarding") or {}
-        if not merged.get("draft") and isinstance(onboarding.get("draft"), dict):
-            merged["draft"] = onboarding["draft"]
-        if not merged.get("draft_id") and onboarding.get("draft_id"):
-            merged["draft_id"] = onboarding["draft_id"]
+        # --- Generic $prev / $step[N] resolution ---
+        prev = context.get("_prev")
+        steps_results: list = context.get("_steps") or []
+        merged = _resolve_placeholders(merged, prev=prev, steps=steps_results)
+
         return merged
 
     @staticmethod
@@ -264,25 +481,29 @@ class ToolOrchestratorService:
         return coerced
 
     @staticmethod
-    def _update_chain_context(tool: str, result: dict, context: dict[str, dict]) -> None:
-        if tool not in {
+    def _update_chain_context(tool: str, result: dict, context: dict[str, Any]) -> None:
+        if not isinstance(result, dict):
+            return
+
+        # --- Generic: always store for $prev / $step[N] ---
+        context["_prev"] = result
+        steps_list: list = context.setdefault("_steps", [])
+        steps_list.append({"tool": tool, "result": result})
+
+        # --- Onboarding draft propagation (legacy) ---
+        if tool in {
             "integration_onboarding_connect",
             "integration_onboarding_test",
             "integration_onboarding_save",
         }:
-            return
-
-        if not isinstance(result, dict):
-            return
-
-        onboarding = dict(context.get("integration_onboarding") or {})
-        draft = result.get("draft") if isinstance(result.get("draft"), dict) else None
-        draft_id = str(result.get("draft_id") or "").strip()
-        if draft is not None:
-            onboarding["draft"] = draft
-        if draft_id:
-            onboarding["draft_id"] = draft_id
-        context["integration_onboarding"] = onboarding
+            onboarding = dict(context.get("integration_onboarding") or {})
+            draft = result.get("draft") if isinstance(result.get("draft"), dict) else None
+            draft_id = str(result.get("draft_id") or "").strip()
+            if draft is not None:
+                onboarding["draft"] = draft
+            if draft_id:
+                onboarding["draft_id"] = draft_id
+            context["integration_onboarding"] = onboarding
 
     async def compose_final_answer(
         self,
@@ -292,6 +513,7 @@ class ToolOrchestratorService:
         response_hint: str,
     ) -> str:
         all_failed = all(not c.get("success") for c in tool_calls) if tool_calls else True
+        has_integration = any(str(c.get("tool") or "") == "integration_call" for c in tool_calls)
         _dev_verbose_log(
             "compose_final_answer_start",
             tool_calls_count=len(tool_calls),
@@ -299,10 +521,21 @@ class ToolOrchestratorService:
             tools=[str(call.get("tool") or "") for call in tool_calls],
         )
         
-        summary_prompt = (
-            "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
-            "Если есть числовые значения, дай их кратко и явно. "
-        )
+        if has_integration and not all_failed:
+            summary_prompt = (
+                "Ты получил ответ от внешнего API (интеграции). "
+                "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
+                "Если данные в XML/JSON - извлеки ключевые значения и представь "
+                "в удобном виде (таблица, список, текст). "
+                "НЕ выводи сырой XML/JSON. НЕ обрезай данные - покажи ВСЕ основные записи. "
+                "Если пользователь просил конкретные данные - выдели их."
+            )
+        else:
+            summary_prompt = (
+                "Сформируй финальный ответ пользователю по результатам выполнения инструментов. "
+                "Если есть числовые значения, дай их кратко и явно. "
+            )
+
         if all_failed:
             summary_prompt += (
                 "ВСЕ инструменты завершились с ошибкой. "
@@ -316,7 +549,8 @@ class ToolOrchestratorService:
             )
             
         compact = json.dumps(tool_calls, ensure_ascii=False)[:16000]
-        return await ollama_client.chat(
+        from app.llm import llm_provider
+        return await llm_provider.chat(
             messages=[
                 {"role": "system", "content": f"{system_prompt}\n\n{summary_prompt}"},
                 {
@@ -328,19 +562,22 @@ class ToolOrchestratorService:
                     ),
                 },
             ],
-            stream=False,
+            temperature=settings.LITELLM_TEMPERATURE,
         )
 
     def _handlers(self) -> dict:
         return {
             "pdf_create": self._pdf_create,
-            "execute_python": self._execute_python,
+            "excel_create": self._excel_create,
             "memory_add": self._memory_add,
             "memory_list": self._memory_list,
             "memory_search": self._memory_search,
             "memory_delete": self._memory_delete,
             "memory_delete_all": self._memory_delete_all,
             "doc_search": self._doc_search,
+            "doc_list": self._doc_list,
+            "doc_delete": self._doc_delete,
+            "doc_delete_all": self._doc_delete_all,
             "cron_add": self._cron_add,
             "cron_list": self._cron_list,
             "cron_delete": self._cron_delete,
@@ -353,6 +590,14 @@ class ToolOrchestratorService:
             "integrations_list": self._integrations_list,
             "integrations_delete_all": self._integrations_delete_all,
             "integration_call": self._integration_call,
+            # Dynamic Tool Injection
+            "dynamic_tool_register": self._dynamic_tool_register,
+            "dynamic_tool_call": self._dynamic_tool_call,
+            "dynamic_tool_list": self._dynamic_tool_list,
+            "dynamic_tool_delete": self._dynamic_tool_delete,
+            "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
+            # Register API Tool (with Milvus vector storage)
+            "register_api_tool": self._register_api_tool,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -487,10 +732,11 @@ class ToolOrchestratorService:
 
         mapping = {
             "pdf_create": WorkerJobType.PDF_CREATE,
+            "excel_create": WorkerJobType.EXCEL_CREATE,
         }
         job_type = mapping.get(job_type_raw)
         if not job_type:
-            raise ValueError("worker_enqueue supports only: pdf_create")
+            raise ValueError("worker_enqueue supports only: pdf_create, excel_create")
 
         payload["__user_id"] = str(user.id)
         payload["__requested_job_type"] = job_type_raw
@@ -508,27 +754,155 @@ class ToolOrchestratorService:
         }
 
     async def _pdf_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        del db, user
-        content = str(arguments.get("content") or "").strip()
-        if not content:
-            raise ValueError("pdf_create requires content")
+        """Delegate PDF creation to background worker to avoid chat timeout."""
+        del db
         title = str(arguments.get("title") or "Generated document").strip()
+        raw_content = arguments.get("content")
         filename = str(arguments.get("filename") or "document.pdf").strip()
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
-        return await to_thread.run_sync(
-            pdf_service.create_pdf_base64,
-            title,
-            content,
-            filename,
-        )
 
-    async def _execute_python(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        # Serialize content for the worker payload
+        if isinstance(raw_content, dict):
+            content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
+        else:
+            content_str = str(raw_content or "")
+        if not content_str.strip():
+            raise ValueError(
+                "pdf_create requires non-empty content. "
+                "Предыдущий шаг не вернул данных для формирования документа."
+            )
+
+        payload = {
+            "title": title,
+            "content": content_str,
+            "filename": filename,
+            "__user_id": str(user.id),
+            "__priority": "high",
+        }
+        enqueue_result = await worker_service.enqueue(
+            job_type=WorkerJobType.PDF_CREATE,
+            payload=payload,
+            priority="high",
+        )
+        deduplicated = bool(enqueue_result.get("deduplicated"))
+        return {
+            "status": "queued" if not deduplicated else "deduplicated",
+            "message": (
+                "📄 Документ готовится в фоновом режиме. Отправлю PDF как только будет готов."
+                if not deduplicated
+                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
+            ),
+        }
+
+    @staticmethod
+    async def _maybe_summarize_content(raw_content: object, title_hint: str = "") -> str:
+        """If content is a raw API dict/large JSON, summarize with LLM.
+        If content is a short prompt-like string, expand it with LLM."""
+        # Already a clean string — check if it needs expansion or is ready
+        if isinstance(raw_content, str):
+            text = raw_content.strip()
+            # Heuristic: if it looks like stringified dict from $prev, try to parse
+            if text.startswith("{") and ("status_code" in text or "body" in text):
+                try:
+                    raw_content = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    return text
+            # Heuristic: if short text looks like a prompt/instruction, expand with LLM
+            elif len(text) < 200 and not any(ch in text for ch in "\n|;") and _looks_like_prompt(text):
+                return await _expand_prompt_to_content(text, title_hint)
+            else:
+                return text
+
+        if not isinstance(raw_content, dict):
+            return str(raw_content or "").strip()
+
+        # Extract the meaningful payload from API response dicts
+        body = raw_content.get("body") or raw_content.get("result") or raw_content
+        body_text = json.dumps(body, ensure_ascii=False, default=str) if not isinstance(body, str) else body
+        if not body_text.strip():
+            return str(raw_content)
+
+        # Summarize with LLM
+        try:
+            from app.llm import llm_provider
+            prompt = (
+                "Ты создаёшь документа (PDF/Excel). "
+                "Проанализируй данные ниже и сформируй КРАТКИЙ, но ИНФОРМАТИВНЫЙ текст. "
+                "НЕ выводи сырой JSON/XML. Извлеки ключевые значения. "
+                "Используй списки, абзацы. Будь лаконичным."
+            )
+            if title_hint:
+                prompt += f"\nТема документа: {title_hint}"
+
+            result = await asyncio.wait_for(
+                llm_provider.chat(
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": body_text[:12000]},
+                    ],
+                    temperature=0.3,
+                    retries=1,
+                ),
+                timeout=60,
+            )
+            summary = (result or "").strip()
+            if summary:
+                return summary
+        except Exception:
+            logger.warning("LLM summarize for document creation failed", exc_info=True)
+
+        # Fallback: use raw text
+        return body_text[:8000]
+
+    async def _excel_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Delegate Excel creation to background worker to avoid chat timeout."""
         del db
-        code = str(arguments.get("code") or "").strip()
-        if not code:
-            raise ValueError("execute_python requires code")
-        return await sandbox_service.execute_python_code(code=code, user_id=user.id)
+
+        title = str(arguments.get("title") or "Generated document").strip()
+        raw_content = arguments.get("content")
+        rows = arguments.get("rows")
+        filename = str(arguments.get("filename") or "document.xlsx").strip()
+        if not filename.lower().endswith(".xlsx"):
+            filename = f"{filename}.xlsx"
+
+        if isinstance(raw_content, dict):
+            content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
+        else:
+            content_str = str(raw_content or "")
+        if not content_str.strip() and not (isinstance(rows, list) and rows):
+            raise ValueError(
+                "excel_create requires non-empty content or rows. "
+                "Предыдущий шаг не вернул данных для формирования таблицы."
+            )
+
+        payload = {
+            "title": title,
+            "content": content_str,
+            "filename": filename,
+            "__user_id": str(user.id),
+            "__priority": "high",
+        }
+        columns = arguments.get("columns")
+        if isinstance(columns, list):
+            payload["columns"] = columns
+        if isinstance(rows, list):
+            payload["rows"] = rows
+
+        enqueue_result = await worker_service.enqueue(
+            job_type=WorkerJobType.EXCEL_CREATE,
+            payload=payload,
+            priority="high",
+        )
+        deduplicated = bool(enqueue_result.get("deduplicated"))
+        return {
+            "status": "queued" if not deduplicated else "deduplicated",
+            "message": (
+                "📊 Документ готовится в фоновом режиме. Отправлю Excel как только будет готов."
+                if not deduplicated
+                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
+            ),
+        }
 
     async def _memory_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         fact_type = str(arguments.get("fact_type") or "fact")
@@ -643,6 +1017,31 @@ class ToolOrchestratorService:
         top_k = int(arguments.get("top_k", 5))
         chunks = await rag_service.retrieve_context(str(user.id), query, top_k=max(1, min(top_k, 10)))
         return {"items": chunks}
+
+    async def _doc_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, arguments
+        docs = await rag_service.list_documents(str(user.id))
+        return {"items": docs}
+
+    async def _doc_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db
+        source_doc = str(arguments.get("source_doc") or "").strip()
+        if not source_doc:
+            raise ValueError("doc_delete requires source_doc (filename)")
+        deleted_count = await rag_service.delete_document(str(user.id), source_doc)
+        return {
+            "deleted": deleted_count > 0,
+            "source_doc": source_doc,
+            "deleted_chunks": deleted_count,
+        }
+
+    async def _doc_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db, arguments
+        deleted_count = await rag_service.delete_all_documents(str(user.id))
+        return {
+            "deleted": True,
+            "deleted_count": deleted_count,
+        }
 
     async def _cron_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         _dev_verbose_log(
@@ -1011,7 +1410,13 @@ class ToolOrchestratorService:
                 parsed_base = urlparse(stored_base_url)
                 endpoint = f"{parsed_base.scheme}://{parsed_base.netloc}{endpoint}"
 
+        # Merge params: call_params override stored, EXCEPT stored template values
+        # (e.g. fdate={{today}}) which should always win so the date format is correct.
         merged_params = {**stored_params, **call_params}
+        for k, v in stored_params.items():
+            sv = str(v)
+            if "{{" in sv or re.search(r"\{(?:today|today_iso|now)\}", sv):
+                merged_params[k] = sv  # template takes priority
 
         # Resolve URL templates: {key} placeholders + {{today}}/{{today_iso}}/{{now}}
         resolved_url = resolve_url_template(endpoint, merged_params)
@@ -1054,7 +1459,8 @@ class ToolOrchestratorService:
             tool = str(step.get("tool") or "").strip().lower()
             arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
 
-            if tool in TOOL_NAMES:
+            # Accept static tools AND dynamic tools (dyn: or dyn_ prefix)
+            if tool in TOOL_NAMES or tool.startswith("dyn:") or tool.startswith("dyn_"):
                 normalized_steps.append({"tool": tool, "arguments": arguments})
         return normalized_steps
 
@@ -1121,6 +1527,91 @@ class ToolOrchestratorService:
 
         logger.warning("planner output JSON parse failed: %.300s", raw)
         return {"use_tools": False, "steps": [], "response_hint": ""}
+
+
+    # ------------------------------------------------------------------ #
+    # Dynamic Tool Injection handlers
+    # ------------------------------------------------------------------ #
+
+    async def _dynamic_tool_register(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Meta-tool: LLM-assisted registration of a new dynamic API tool."""
+        user_message = str(arguments.get("user_message") or arguments.get("description") or "").strip()
+        if not user_message:
+            raise ValueError("dynamic_tool_register requires user_message with API description")
+        return await dynamic_tool_service.register_from_user_message(
+            db=db, user_id=user.id, user_message=user_message,
+        )
+
+    async def _dynamic_tool_call(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Call a user-registered dynamic API tool by name."""
+        tool_name = str(arguments.get("tool_name") or "").strip()
+        if not tool_name:
+            raise ValueError("dynamic_tool_call requires tool_name")
+        call_args = arguments.get("arguments") if isinstance(arguments.get("arguments"), dict) else {}
+        return await dynamic_tool_service.call_dynamic_tool(
+            db=db, user_id=user.id, tool_name=tool_name, arguments=call_args,
+        )
+
+    async def _dynamic_tool_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """List all registered dynamic tools for the user."""
+        del arguments
+        tools = await dynamic_tool_service.list_tools(db=db, user_id=user.id)
+        return {
+            "items": [
+                {
+                    "id": str(t.id),
+                    "name": t.name,
+                    "description": t.description,
+                    "endpoint": t.endpoint,
+                    "method": t.method,
+                    "parameters_schema": t.parameters_schema,
+                    "is_active": t.is_active,
+                }
+                for t in tools
+            ]
+        }
+
+    async def _dynamic_tool_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Delete a specific dynamic tool by id."""
+        tool_id_raw = str(arguments.get("tool_id") or "").strip()
+        if not tool_id_raw:
+            raise ValueError("dynamic_tool_delete requires tool_id")
+        deleted = await dynamic_tool_service.delete_tool(
+            db=db, user_id=user.id, tool_id=UUID(tool_id_raw),
+        )
+        return {"deleted": deleted}
+
+    async def _dynamic_tool_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Delete all dynamic tools for the user."""
+        del arguments
+        count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id)
+        return {"deleted_count": count}
+
+    # ------------------------------------------------------------------ #
+    # Register API Tool (with Milvus vector storage)
+    # ------------------------------------------------------------------ #
+
+    async def _register_api_tool(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Register a new API tool via LLM extraction + DB + Milvus."""
+        from app.services.register_api_tool_service import register_api_tool_service
+
+        user_message = str(arguments.get("user_message") or "").strip()
+        if not user_message:
+            return {"success": False, "error": "Не указано описание API (user_message)."}
+
+        return await register_api_tool_service.register_from_message(
+            db=db,
+            user_id=user.id,
+            user_message=user_message,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Dynamic tool dispatch for dyn: prefixed tools
+    # ------------------------------------------------------------------ #
+
+    def is_dynamic_tool(self, tool_name: str) -> bool:
+        """Check if a tool name refers to a dynamic (dyn:) tool."""
+        return tool_name.startswith("dyn:") or tool_name.startswith("dyn_")
 
 
 tool_orchestrator_service = ToolOrchestratorService()

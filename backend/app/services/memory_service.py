@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
@@ -9,6 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.session import AsyncSessionLocal
 from app.models.long_term_memory import LongTermMemory
 from app.models.message import Message
 from app.models.session import Session
@@ -127,6 +129,22 @@ class MemoryService:
             existing = result.scalar_one_or_none()
             if existing:
                 return existing
+
+        # No session_id provided (or not found) — try to reuse the user's
+        # most recent active session so conversation history is preserved
+        # across reconnects / timeout losses.
+        try:
+            recent_result = await db.execute(
+                select(Session)
+                .where(Session.user_id == user_id, Session.active.is_(True))
+                .order_by(Session.last_activity.desc())
+                .limit(1)
+            )
+            recent = recent_result.scalar_one_or_none()
+            if recent:
+                return recent
+        except Exception:
+            logger.debug("Failed to look up recent session for user %s", user_id, exc_info=True)
 
         new_session = Session(user_id=user_id, context_window=[], active=True, last_activity=datetime.now(timezone.utc))
         db.add(new_session)
@@ -261,6 +279,15 @@ class MemoryService:
             .limit(max(1, min(limit, 500)))
         )
         return result.scalars().all()
+
+    async def _safe_decay(self, user_id: UUID) -> None:
+        """Run importance decay in an independent DB session. Fire-and-forget safe."""
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                await self.apply_importance_decay(bg_db, user_id)
+                await bg_db.commit()
+        except Exception as exc:
+            logger.debug("background decay skipped for user %s: %s", user_id, exc)
 
     async def apply_importance_decay(self, db: AsyncSession, user_id: UUID) -> None:
         now = datetime.now(timezone.utc)
