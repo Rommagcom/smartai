@@ -242,10 +242,12 @@ class ToolOrchestratorService:
             "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id. "
             "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
             "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call. "
-            "16) Для списка загруженных документов — doc_list. "
-            "17) Для удаления одного документа — doc_delete с source_doc (имя файла). "
-            "18) Для удаления всех документов — doc_delete_all. "
-            "19) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
+            "16) Для вопроса по содержимому документов с готовым ответом используй doc_ask (query, top_k). "
+            "17) Для сырого поиска сниппетов по документам используй doc_search. "
+            "18) Для списка загруженных документов — doc_list. "
+            "19) Для удаления одного документа — doc_delete с source_doc (имя файла). "
+            "20) Для удаления всех документов — doc_delete_all. "
+            "21) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
             "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
             "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
             "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
@@ -570,6 +572,7 @@ class ToolOrchestratorService:
             "memory_search": self._memory_search,
             "memory_delete": self._memory_delete,
             "memory_delete_all": self._memory_delete_all,
+            "doc_ask": self._doc_ask,
             "doc_search": self._doc_search,
             "doc_list": self._doc_list,
             "doc_delete": self._doc_delete,
@@ -1013,6 +1016,14 @@ class ToolOrchestratorService:
         top_k = int(arguments.get("top_k", 5))
         chunks = await rag_service.retrieve_context(str(user.id), query, top_k=max(1, min(top_k, 10)))
         return {"items": chunks}
+
+    async def _doc_ask(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        del db
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("doc_ask requires query")
+        top_k = int(arguments.get("top_k", 8))
+        return await rag_service.answer_question(str(user.id), query, top_k=max(1, min(top_k, 10)))
 
     async def _doc_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del db, arguments

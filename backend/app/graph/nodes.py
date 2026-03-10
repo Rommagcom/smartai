@@ -698,6 +698,77 @@ async def compose_node(state: dict) -> dict:
             "iteration": iterations,
         }
 
+    doc_ask_result = next(
+        (
+            tr.result
+            for tr in tool_results
+            if tr.success and str(tr.tool or "") == "doc_ask" and isinstance(tr.result, dict)
+        ),
+        None,
+    )
+    if isinstance(doc_ask_result, dict):
+        doc_answer = str(doc_ask_result.get("answer") or "").strip()
+        doc_items = doc_ask_result.get("items", [])
+        source_lines: list[str] = []
+        if isinstance(doc_items, list):
+            for idx, item in enumerate(doc_items[:10], start=1):
+                if not isinstance(item, dict):
+                    continue
+                source_doc = str(item.get("source_doc") or "документ").strip()
+                chunk = str(item.get("chunk_text") or "").strip()
+                if len(chunk) > 1200:
+                    chunk = chunk[:1200].rstrip() + "..."
+                score = item.get("score")
+                score_text = f"{float(score):.3f}" if isinstance(score, (int, float)) else "n/a"
+                source_lines.append(f"{idx}) {source_doc} (score={score_text})")
+                if chunk:
+                    source_lines.append(chunk)
+        doc_context = "\n\n".join(source_lines).strip()
+        try:
+            llm_doc_answer = await llm_provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты формируешь финальный ответ пользователю на основе результатов поиска по его документам. "
+                            "Учитывай формулировку вопроса пользователя. "
+                            "Не выдумывай факты вне предоставленного контекста. "
+                            "Пиши подробно и структурировано. "
+                            "В конце добавь раздел 'Источники' с кратким перечислением документов, на которые опираешься."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Вопрос пользователя:\n{user_message}\n\n"
+                            f"Черновой ответ инструмента doc_ask:\n{doc_answer or '(пусто)'}\n\n"
+                            f"Фрагменты источников:\n{doc_context or '(источники не переданы)'}"
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
+            )
+            llm_doc_answer = _sanitize_llm_answer(llm_doc_answer)
+            if llm_doc_answer:
+                return {
+                    "final_answer": llm_doc_answer,
+                    "is_complete": True,
+                    "feedback_plan": "",
+                    "iterations": iterations,
+                    "iteration": iterations,
+                }
+        except Exception as exc:
+            logger.warning("Doc ask compose via LLM failed: %s", exc)
+            if doc_answer:
+                return {
+                    "final_answer": _sanitize_llm_answer(doc_answer),
+                    "is_complete": True,
+                    "feedback_plan": "",
+                    "iterations": iterations,
+                    "iteration": iterations,
+                }
+
     context_chunks: list[str] = list(state.get("context") or [])
 
     if web_fetch_content:
@@ -767,7 +838,9 @@ async def compose_node(state: dict) -> dict:
             response_model=ReflexionComposeOutput,
             model=settings.LITELLM_PLANNER_MODEL or None,
             temperature=0.0,
-            max_tokens=settings.OLLAMA_NUM_PREDICT_PLANNER,
+            # Compose can legitimately produce long, structured answers.
+            # Planner token budget is too small and may truncate JSON.
+            max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
         )
     except Exception as exc:
         logger.warning("Compose reflexion failed: %s", exc)
@@ -1150,6 +1223,20 @@ def _extract_non_json_answer_from_exception(exc: Exception) -> str:
     if idx == -1:
         return ""
     candidate = text[idx + len(marker):].strip()
+
+    # Try extracting `answer` field from JSON-like text first.
+    match = re.search(r'"answer"\s*:\s*"([\s\S]*?)"\s*,\s*"feedback_plan"', candidate)
+    if match:
+        extracted = match.group(1)
+        try:
+            # Decode escaped sequences from JSON string body.
+            extracted = bytes(extracted, "utf-8").decode("unicode_escape")
+        except Exception:
+            pass
+        cleaned = extracted.replace('\\"', '"').strip()
+        if cleaned:
+            return cleaned[:12000]
+
     return candidate[:4000]
 
 
