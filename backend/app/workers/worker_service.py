@@ -295,8 +295,27 @@ class WorkerService:
         if not ready_ids:
             return
 
+        valid_task_ids: list[str] = []
+        invalid_task_ids: list[str] = []
+        uuids: list[UUID] = []
+        for task_id in ready_ids:
+            raw_id = str(task_id)
+            try:
+                uuids.append(UUID(raw_id))
+                valid_task_ids.append(raw_id)
+            except ValueError:
+                invalid_task_ids.append(raw_id)
+
+        if invalid_task_ids:
+            pipe = redis.pipeline()
+            for invalid_id in invalid_task_ids:
+                pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, invalid_id)
+            await pipe.execute()
+
+        if not uuids:
+            return
+
         async with AsyncSessionLocal() as db:
-            uuids = [UUID(task_id) for task_id in ready_ids]
             result = await db.execute(select(WorkerTask).where(WorkerTask.id.in_(uuids)))
             rows = result.scalars().all()
             for row in rows:
@@ -309,9 +328,10 @@ class WorkerService:
             str(row.id): self._normalize_priority((row.payload or {}).get("__priority"))
             for row in rows
         }
-        for task_id in ready_ids:
+        for task_id in valid_task_ids:
             pipe.zrem(settings.WORKER_RETRY_ZSET_KEY, task_id)
-            pipe.lpush(self._queue_key_for_priority(priority_by_task_id.get(task_id)), task_id)
+            if task_id in priority_by_task_id:
+                pipe.lpush(self._queue_key_for_priority(priority_by_task_id.get(task_id)), task_id)
         await pipe.execute()
 
     async def _recover_processing_queue(self) -> None:
@@ -465,24 +485,46 @@ class WorkerService:
 
     async def _handle_pdf_create(self, payload: dict) -> dict:
         title = str(payload.get("title") or "Generated document")
-        content = str(payload.get("content") or "").strip()
+        raw_content = str(payload.get("content") or "").strip()
         filename = str(payload.get("filename") or "document.pdf")
-        if not content:
+        if not raw_content:
             raise ValueError("pdf_create job requires content")
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
+
+        # Expand prompt-like content via LLM before generating PDF
+        try:
+            from app.services.tool_orchestrator_service import ToolOrchestratorService
+            content = await ToolOrchestratorService._maybe_summarize_content(raw_content, title)
+            if not content:
+                content = raw_content
+        except Exception:
+            logger.warning("worker pdf content expansion failed, using raw", exc_info=True)
+            content = raw_content
+
         return await asyncio.to_thread(pdf_service.create_pdf_base64, title, content, filename)
 
     async def _handle_excel_create(self, payload: dict) -> dict:
         from app.services.excel_service import excel_service
 
         title = str(payload.get("title") or "Generated document")
-        content = str(payload.get("content") or "").strip()
+        raw_content = str(payload.get("content") or "").strip()
         filename = str(payload.get("filename") or "document.xlsx")
-        if not content:
+        if not raw_content:
             raise ValueError("excel_create job requires content")
         if not filename.lower().endswith(".xlsx"):
             filename = f"{filename}.xlsx"
+
+        # Expand prompt-like content via LLM before generating Excel
+        try:
+            from app.services.tool_orchestrator_service import ToolOrchestratorService
+            content = await ToolOrchestratorService._maybe_summarize_content(raw_content, title)
+            if not content:
+                content = raw_content
+        except Exception:
+            logger.warning("worker excel content expansion failed, using raw", exc_info=True)
+            content = raw_content
+
         columns = payload.get("columns")
         rows = payload.get("rows")
         return await asyncio.to_thread(

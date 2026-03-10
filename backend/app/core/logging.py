@@ -52,5 +52,17 @@ def setup_logging() -> None:
     root_logger.setLevel(level)
     root_logger.addHandler(handler)
 
+    third_party_level_name = str(settings.OBS_THIRD_PARTY_LOG_LEVEL or "WARNING").upper()
+    third_party_level = getattr(logging, third_party_level_name, logging.WARNING)
+    for logger_name in (
+        "LiteLLM",
+        "litellm",
+        "httpcore",
+        "httpx",
+        "aiohttp",
+        "urllib3",
+    ):
+        logging.getLogger(logger_name).setLevel(third_party_level)
+
     # Reduce poll endpoint noise in uvicorn access log
     logging.getLogger("uvicorn.access").addFilter(_PollAccessFilter())

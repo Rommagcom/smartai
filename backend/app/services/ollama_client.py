@@ -1,9 +1,13 @@
 import asyncio
+import logging
 from typing import AsyncGenerator
 
+import httpx
 from ollama import AsyncClient  # type: ignore[import-not-found]
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaClient:
@@ -44,6 +48,31 @@ class OllamaClient:
         message = str(exc)
         return "429" in message or "Too Many Requests" in message
 
+    @staticmethod
+    def _is_model_not_found_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "model" in message and "not found" in message
+
+    async def _discover_fallback_model(self, current_model: str) -> str | None:
+        """Pick a local Ollama model if configured model does not exist."""
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                resp = await client.get(f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/tags")
+                resp.raise_for_status()
+            payload = resp.json()
+            models = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(models, list):
+                return None
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name and name != current_model:
+                    return name
+        except Exception:
+            logger.debug("Failed to query /api/tags for model fallback", exc_info=True)
+        return None
+
     async def _run_with_retry(self, request_factory):
         attempts = max(1, int(settings.OLLAMA_RETRY_ATTEMPTS))
         base_delay = max(0.05, float(settings.OLLAMA_RETRY_BASE_DELAY_SECONDS))
@@ -75,28 +104,73 @@ class OllamaClient:
 
     async def chat(self, messages: list[dict], stream: bool = False, options: dict | None = None) -> str:
         merged = self._merge_options(options, {"num_predict": settings.OLLAMA_NUM_PREDICT})
-        response = await self._run_with_retry(
-            lambda: self._client.chat(
-                model=settings.OLLAMA_MODEL_NAME,
-                messages=messages,
-                stream=stream,
-                options=merged,
-                keep_alive=settings.OLLAMA_KEEP_ALIVE,
+        model_name = str(settings.OLLAMA_MODEL_NAME or "").strip()
+
+        async def _chat(model: str):
+            return await self._run_with_retry(
+                lambda: self._client.chat(
+                    model=model,
+                    messages=messages,
+                    stream=stream,
+                    options=merged,
+                    keep_alive=settings.OLLAMA_KEEP_ALIVE,
+                )
             )
-        )
+
+        try:
+            response = await _chat(model_name)
+        except Exception as exc:
+            if self._is_model_not_found_error(exc):
+                if not settings.OLLAMA_MODEL_FALLBACK_ENABLED:
+                    logger.error(
+                        "Configured Ollama model is missing and fallback is disabled: %s",
+                        model_name,
+                    )
+                    raise
+                fallback_model = await self._discover_fallback_model(model_name)
+                if fallback_model and fallback_model != model_name:
+                    logger.warning("Switching Ollama model fallback: %s -> %s", model_name, fallback_model)
+                    response = await _chat(fallback_model)
+                else:
+                    raise
+            else:
+                raise
         return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
         merged = self._merge_options(options, {"num_predict": settings.OLLAMA_NUM_PREDICT})
-        stream = await self._run_with_retry(
-            lambda: self._client.chat(
-                model=settings.OLLAMA_MODEL_NAME,
-                messages=messages,
-                stream=True,
-                options=merged,
-                keep_alive=settings.OLLAMA_KEEP_ALIVE,
+        model_name = str(settings.OLLAMA_MODEL_NAME or "").strip()
+
+        async def _chat_stream(model: str):
+            return await self._run_with_retry(
+                lambda: self._client.chat(
+                    model=model,
+                    messages=messages,
+                    stream=True,
+                    options=merged,
+                    keep_alive=settings.OLLAMA_KEEP_ALIVE,
+                )
             )
-        )
+
+        try:
+            stream = await _chat_stream(model_name)
+        except Exception as exc:
+            if self._is_model_not_found_error(exc):
+                if not settings.OLLAMA_MODEL_FALLBACK_ENABLED:
+                    logger.error(
+                        "Configured Ollama stream model is missing and fallback is disabled: %s",
+                        model_name,
+                    )
+                    raise
+                fallback_model = await self._discover_fallback_model(model_name)
+                if fallback_model and fallback_model != model_name:
+                    logger.warning("Switching Ollama stream model fallback: %s -> %s", model_name, fallback_model)
+                    stream = await _chat_stream(fallback_model)
+                else:
+                    raise
+            else:
+                raise
+
         async for chunk in stream:
             content = self._extract_message_content(chunk)
             if content:

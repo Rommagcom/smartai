@@ -11,6 +11,8 @@ class TelegramBridgeSettings(BaseSettings):
     TELEGRAM_BACKEND_BRIDGE_SECRET: str = "change-me-telegram-bridge-secret"
     TELEGRAM_POLL_CONCURRENCY: int = 10
     TELEGRAM_KNOWN_USER_TTL_SECONDS: int = 2592000  # 30 days
+    TELEGRAM_CHAT_TIMEOUT_SECONDS: int = 300  # timeout for /chat API calls (LLM + tools)
+    TELEGRAM_DEFAULT_TIMEOUT_SECONDS: int = 60  # default timeout for other API calls
     OBS_LOG_LEVEL: str = "INFO"
     DEV_VERBOSE_LOGGING: bool = False
 
