@@ -23,14 +23,15 @@ class FakeUser:
 
 
 class FakeChat:
-    def __init__(self, chat_id: int) -> None:
+    def __init__(self, chat_id: int, chat_type: str = "private") -> None:
         self.id = chat_id
+        self.type = chat_type
 
 
 class FakeUpdate:
-    def __init__(self, user_id: int, text: str | None = None, document=None) -> None:
+    def __init__(self, user_id: int, text: str | None = None, document=None, chat_type: str = "private") -> None:
         self.effective_user = FakeUser(user_id)
-        self.effective_chat = FakeChat(user_id)
+        self.effective_chat = FakeChat(user_id, chat_type=chat_type)
         self.effective_message = FakeMessage(text=text, document=document)
 
 
@@ -58,9 +59,16 @@ class FakeTelegramFile:
 
 class FakeBot:
     def __init__(self) -> None:
+        self.id = 99901
+        self.username = "smartai_bot"
+        self.first_name = "SmartAi"
         self.sent_messages: list[tuple[int, str]] = []
         self.sent_documents: list[tuple[int, str]] = []
         self.files_by_id: dict[str, bytes] = {}
+
+    async def get_me(self):
+        await asyncio.sleep(0)
+        return self
 
     async def send_message(self, chat_id: int, text: str) -> None:
         await asyncio.sleep(0)
@@ -88,6 +96,8 @@ def ensure(condition: bool, message: str) -> None:
 
 async def run() -> None:
     adapter = TelegramAdapter()
+    adapter.settings.TELEGRAM_GROUP_REQUIRE_NAME = True
+    adapter.settings.TELEGRAM_GROUP_NAME_ALIASES = "smart ai"
 
     async def fake_auth(update):
         await asyncio.sleep(0)
@@ -153,6 +163,28 @@ async def run() -> None:
     ensure(
         any("ok-from-backend" in text for _, text in context.bot.sent_messages),
         "chat should deliver backend response asynchronously",
+    )
+
+    # In group chats the bot should answer only when explicitly addressed.
+    context_group = FakeContext()
+    context_group.user_data.clear()
+    before_group_silent = len(context_group.bot.sent_messages)
+    update_group_silent = FakeUpdate(user_id=123, text="привет всем", chat_type="group")
+    await adapter.chat_message(update_group_silent, context_group)
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+    ensure(
+        len(context_group.bot.sent_messages) == before_group_silent,
+        "group message without bot name should be ignored",
+    )
+
+    update_group_named = FakeUpdate(user_id=123, text="SmartAi, привет", chat_type="group")
+    await adapter.chat_message(update_group_named, context_group)
+    if adapter._background_tasks:
+        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+    ensure(
+        any("ok-from-backend" in text for _, text in context_group.bot.sent_messages),
+        "group message with bot name should be processed",
     )
 
     memory_args = ["preference|любит краткие ответы|0.8"]
