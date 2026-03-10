@@ -89,6 +89,13 @@ def test_doc_routes():
             f"{msg!r}: expected {expected_tool}, got {result}"
         )
         print(f"  OK: {msg!r} -> {result[0]['tool']}")
+
+    mixed = "проанализируй загруженные документы и создай pdf"
+    mixed_result = ChatService._deterministic_tool_steps(mixed)
+    assert mixed_result and len(mixed_result) >= 2, f"{mixed!r}: expected 2-step chain, got {mixed_result}"
+    assert mixed_result[0]["tool"] == "doc_ask", f"{mixed!r}: first step should be doc_ask, got {mixed_result}"
+    assert mixed_result[1]["tool"] == "pdf_create", f"{mixed!r}: second step should be pdf_create, got {mixed_result}"
+    print(f"  OK: {mixed!r} -> doc_ask + pdf_create")
     print("PASS")
 
 
