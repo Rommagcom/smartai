@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import socket
 from fnmatch import fnmatch
@@ -48,7 +47,7 @@ class EgressPolicyService:
             or ip_obj.is_unspecified
         )
 
-    async def _ensure_host_is_not_private(self, host: str) -> None:
+    def _ensure_host_is_not_private(self, host: str) -> None:
         try:
             ipaddress.ip_address(host)
             if self._ip_is_private(host):
@@ -58,8 +57,7 @@ class EgressPolicyService:
             pass
 
         try:
-            loop = asyncio.get_running_loop()
-            addresses = await loop.getaddrinfo(host, None)
+            addresses = socket.getaddrinfo(host, None)
         except socket.gaierror:
             return
 
@@ -89,11 +87,10 @@ class EgressPolicyService:
         if settings.SANDBOX_EGRESS_ALLOWLIST_MODE and not self._match_host(host, allowed_hosts):
             raise ValueError("Egress policy blocked host not in allowlist")
 
-    async def _enforce_private_network_policy(self, *, host: str) -> None:
         if settings.SANDBOX_EGRESS_BLOCK_PRIVATE_NETWORKS:
-            await self._ensure_host_is_not_private(host)
+            self._ensure_host_is_not_private(host)
 
-    async def validate_url(self, url: str) -> str:
+    def validate_url(self, url: str) -> str:
         normalized_url = str(url or "").strip()
         parsed = urlparse(normalized_url)
         if parsed.scheme not in {"http", "https"}:
@@ -105,7 +102,6 @@ class EgressPolicyService:
         if settings.SANDBOX_EGRESS_ENABLED:
             host, port = self._extract_host_port(parsed)
             self._enforce_host_port_policy(host=host, port=port)
-            await self._enforce_private_network_policy(host=host)
 
         return validated_url
 
