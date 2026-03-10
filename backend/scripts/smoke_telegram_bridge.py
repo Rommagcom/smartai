@@ -318,7 +318,8 @@ async def run() -> None:
     ensure(len(app.bot.sent_messages) == 1, "expected one delivered worker result message")
     delivered_text = app.bot.sent_messages[0][1]
     ensure("Фоновая задача выполнена" in delivered_text, f"unexpected delivery text: {delivered_text}")
-    ensure("Файл готов" in delivered_text, f"artifact hint missing in delivery text: {delivered_text}")
+    ensure("artifact_ready" in delivered_text, f"artifact preview missing in delivery text: {delivered_text}")
+    ensure("report.pdf" in delivered_text, f"filename missing in delivery text: {delivered_text}")
 
     print("SMOKE_TELEGRAM_BRIDGE_OK")
 

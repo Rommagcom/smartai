@@ -399,6 +399,14 @@ class ChatService:
         if not lowered:
             return None
 
+        wants_pdf_artifact = bool(
+            re.search(
+                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|выгрузи|экспорт|отправ|пришли|generate|create|export|attach)"
+                r"|\b(?:сделай|создай|сформируй|выгрузи|экспорт|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b",
+                lowered,
+            )
+        )
+
         cron_add_args = ChatService._extract_cron_add_structured_args(user_message)
         if cron_add_args:
             ChatService._dev_verbose_log(
@@ -502,6 +510,18 @@ class ChatService:
             r"|analy[sz]e|explain|summari[sz]e|what\s+does|key\s+points?)"
         )
         if re.search(_doc_entity, lowered) and re.search(_doc_qa_intent, lowered):
+            if wants_pdf_artifact:
+                return [
+                    {"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 5}},
+                    {
+                        "tool": "pdf_create",
+                        "arguments": {
+                            "title": "Анализ документов",
+                            "filename": "document-analysis.pdf",
+                            "content": "$prev.answer",
+                        },
+                    },
+                ]
             return [{"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 5}}]
 
         # Document management: list, delete one, delete all
@@ -1708,12 +1728,20 @@ class ChatService:
                 return f"Ответ интеграции (HTTP {status_code}):\n```\n{preview}\n```"
 
             if tool == "pdf_create":
+                status = str(result.get("status") or "").strip().lower()
+                message = str(result.get("message") or "").strip()
+                if status in {"queued", "deduplicated"}:
+                    return message or "PDF поставлен в очередь и будет отправлен отдельным сообщением."
                 fname = str(result.get("file_name") or "document.pdf")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
                 return f"Документ {fname} создан{size_kb}."
 
             if tool == "excel_create":
+                status = str(result.get("status") or "").strip().lower()
+                message = str(result.get("message") or "").strip()
+                if status in {"queued", "deduplicated"}:
+                    return message or "Excel поставлен в очередь и будет отправлен отдельным сообщением."
                 fname = str(result.get("file_name") or "document.xlsx")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -1862,7 +1890,7 @@ class ChatService:
                 db=db,
                 user=user,
                 steps=steps,
-                max_steps=1,
+                max_steps=max(1, len(steps)),
             )
         except Exception:
             logger.warning("deterministic tool route failed", exc_info=True)
@@ -1902,6 +1930,48 @@ class ChatService:
                 }
             )
         return artifacts
+
+    @staticmethod
+    def _sanitize_false_attachment_claims(answer: str, tool_calls: list[dict], artifacts: list[dict]) -> str:
+        text = str(answer or "").strip()
+        if not text:
+            return text
+
+        has_artifact = bool(artifacts)
+        if has_artifact:
+            return text
+
+        has_pdf_queue = False
+        for call in tool_calls:
+            if not bool(call.get("success")):
+                continue
+            if str(call.get("tool") or "").strip().lower() != "pdf_create":
+                continue
+            result = call.get("result") if isinstance(call.get("result"), dict) else {}
+            status = str(result.get("status") or "").strip().lower()
+            if status in {"queued", "deduplicated"}:
+                has_pdf_queue = True
+                break
+
+        claim_re = re.compile(
+            r"(?:pdf|пдф|файл).{0,40}(?:приложен|вложен|прикрепл(?:ен|ён)|attached|uploaded|готов\s+к\s+выгрузке)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not claim_re.search(text):
+            return text
+
+        if has_pdf_queue:
+            return (
+                text
+                + "\n\n"
+                + "Примечание: файл ещё не приложен. PDF поставлен в очередь и будет отправлен отдельным сообщением после обработки."
+            )
+
+        return (
+            text
+            + "\n\n"
+            + "Примечание: PDF-файл не был создан этим ответом. Сформировать PDF можно отдельной командой или запросом."
+        )
 
     @staticmethod
     def _adaptation_hint(preferences: dict | None) -> str:
@@ -2604,6 +2674,12 @@ class ChatService:
         # LangGraph state propagation (e.g. reducer replaced list with []).
         if not artifacts and tool_calls_log:
             artifacts = self._extract_artifacts(tool_calls_log)
+
+        final_answer = self._sanitize_false_attachment_claims(
+            answer=final_answer,
+            tool_calls=tool_calls_log,
+            artifacts=artifacts,
+        )
 
         # Memory IDs from LTM context (for tracking)
         used_memory_ids: list[str] = []
