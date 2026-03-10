@@ -3,7 +3,6 @@ import asyncio
 import logging
 
 from fastapi import FastAPI
-from starlette.responses import PlainTextResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -12,7 +11,6 @@ from app.db.session import close_engine
 from app.services.alerting_service import alerting_service
 from app.services.http_client_service import http_client_service
 from app.services.milvus_service import milvus_service
-from app.services.observability_metrics_service import observability_metrics_service
 from app.services.scheduler_service import scheduler_service
 from app.services.websocket_manager import connection_manager
 from app.workers.worker_service import worker_service
@@ -127,9 +125,3 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
-
-
-@app.get("/metrics", response_class=PlainTextResponse)
-async def prometheus_metrics() -> str:
-    """Unauthenticated Prometheus scrape endpoint."""
-    return observability_metrics_service.to_prometheus()

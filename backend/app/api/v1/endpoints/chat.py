@@ -163,8 +163,9 @@ async def chat(
 
 @router.get("/skills", response_model=SkillsRegistryResponse)
 async def skills_registry(
-    _current_user: CurrentUser,
+    current_user: CurrentUser,
 ) -> SkillsRegistryResponse:
+    del current_user
     return SkillsRegistryResponse(
         registry_version=skills_registry_service.REGISTRY_VERSION,
         skills=skills_registry_service.list_contracts(),
@@ -221,8 +222,9 @@ async def self_improve(
 @router.post("/tools/pdf-create")
 async def pdf_create(
     payload: PdfCreateRequest,
-    _current_user: CurrentUser,
+    current_user: CurrentUser,
 ) -> dict:
+    del current_user
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="content must not be empty")
 
