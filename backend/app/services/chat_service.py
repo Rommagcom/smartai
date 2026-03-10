@@ -502,7 +502,7 @@ class ChatService:
             r"|analy[sz]e|explain|summari[sz]e|what\s+does|key\s+points?)"
         )
         if re.search(_doc_entity, lowered) and re.search(_doc_qa_intent, lowered):
-            return [{"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 10}}]
+            return [{"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 5}}]
 
         # Document management: list, delete one, delete all
         if re.search(

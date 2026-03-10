@@ -157,7 +157,7 @@ class SkillsRegistryService:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"},
-                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 5},
                     },
                     "required": ["query"],
                     "additionalProperties": False,
@@ -175,7 +175,7 @@ class SkillsRegistryService:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"},
-                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 5},
                     },
                     "required": ["query"],
                     "additionalProperties": False,
