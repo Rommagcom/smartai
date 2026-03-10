@@ -180,7 +180,7 @@ class BackendApiClient:
     async def documents_search(self, token: str, query: str, top_k: int = 5) -> dict[str, Any]:
         return await self._request("GET", "/documents/search", token=token, params={"query": query, "top_k": top_k})
 
-    async def documents_ask(self, token: str, query: str, top_k: int = 8) -> dict[str, Any]:
+    async def documents_ask(self, token: str, query: str, top_k: int = 6) -> dict[str, Any]:
         return await self._request("GET", "/documents/ask", token=token, params={"query": query, "top_k": top_k})
 
     async def documents_list(self, token: str, limit: int = 200) -> dict[str, Any]:
