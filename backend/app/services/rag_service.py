@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 DOC_EMBEDDING_UNAVAILABLE = "Document embedding is temporarily unavailable"
 DOC_SEARCH_EMBEDDING_UNAVAILABLE = "Document search embedding is temporarily unavailable"
+DOC_QA_UNAVAILABLE = "Document QA is temporarily unavailable"
+DOC_QA_FALLBACK_ANSWER = "I don't know"
 
 
 def chunk_text(text: str, chunk_size: int = 1800, overlap: int = 300) -> list[str]:
@@ -95,7 +97,32 @@ class RagService:
             raise RuntimeError(DOC_EMBEDDING_UNAVAILABLE)
 
         text = self.parse_document(filename, content)
-        chunks = chunk_text(text)
+        text_len = len(text)
+        if text_len >= max(1, int(settings.RAG_DOC_LARGE_TEXT_THRESHOLD_CHARS)):
+            chunk_size = max(500, int(settings.RAG_DOC_LARGE_CHUNK_SIZE))
+            overlap = max(0, int(settings.RAG_DOC_LARGE_CHUNK_OVERLAP))
+        else:
+            chunk_size = max(500, int(settings.RAG_DOC_CHUNK_SIZE))
+            overlap = max(0, int(settings.RAG_DOC_CHUNK_OVERLAP))
+
+        if overlap >= chunk_size:
+            overlap = max(0, chunk_size // 4)
+
+        chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+        logger.info(
+            "rag ingest chunking profile",
+            extra={
+                "context": {
+                    "component": "documents",
+                    "event": "chunking",
+                    "filename": filename,
+                    "text_len": text_len,
+                    "chunk_size": chunk_size,
+                    "overlap": overlap,
+                    "chunks": len(chunks),
+                }
+            },
+        )
         if not chunks:
             return 0
 
@@ -153,6 +180,67 @@ class RagService:
                 raise
             self._trigger_embedding_cooldown()
             raise RuntimeError(DOC_SEARCH_EMBEDDING_UNAVAILABLE) from exc
+
+    async def answer_question(self, user_id: str, query: str, top_k: int = 8) -> dict:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise ValueError("query is required")
+
+        chunks = await self.retrieve_context(user_id=user_id, query=normalized_query, top_k=top_k)
+        if not chunks:
+            return {
+                "answer": DOC_QA_FALLBACK_ANSWER,
+                "items": [],
+            }
+
+        context_lines: list[str] = []
+        for item in chunks:
+            if not isinstance(item, dict):
+                continue
+            source_doc = str(item.get("source_doc") or "document").strip() or "document"
+            chunk_text = str(item.get("chunk_text") or "").strip()
+            if not chunk_text:
+                continue
+            context_lines.append(f"[{source_doc}] {chunk_text}")
+
+        if not context_lines:
+            return {
+                "answer": DOC_QA_FALLBACK_ANSWER,
+                "items": chunks,
+            }
+
+        system_prompt = (
+            "You are an AI assistant. Answer only from provided context snippets. "
+            "Provide a detailed and structured answer in Russian with key points. "
+            "If answer is not present in context, reply exactly: I don't know"
+        )
+        user_prompt = (
+            "Use only the information in <context> to answer <question>.\n"
+            "When enough context is available, provide a fuller explanation (not one short sentence).\n"
+            f"<context>\n{chr(10).join(context_lines)}\n</context>\n"
+            f"<question>\n{normalized_query}\n</question>"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            answer = (
+                await ollama_client.chat(
+                    messages=messages,
+                    stream=False,
+                    options={"temperature": 0.1, "num_predict": 4096},
+                )
+            ).strip()
+        except Exception as exc:
+            logger.warning("rag answer_question skipped: %s", exc)
+            raise RuntimeError(DOC_QA_UNAVAILABLE) from exc
+
+        return {
+            "answer": answer or DOC_QA_FALLBACK_ANSWER,
+            "items": chunks,
+        }
 
     async def list_documents(self, user_id: str, limit: int = 1000) -> list[dict]:
         await asyncio.sleep(0)

@@ -148,6 +148,24 @@ class SkillsRegistryService:
             },
             {
                 "manifest": {
+                    "name": "doc_ask",
+                    "title": "Document Ask",
+                    "description": "Вопрос-ответ по загруженным документам с итоговым ответом и источниками",
+                    "version": "1.0.0",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                "permissions": ["documents.read"],
+            },
+            {
+                "manifest": {
                     "name": "doc_search",
                     "title": "Document Search",
                     "description": "RAG-поиск по загруженным документам",
