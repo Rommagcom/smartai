@@ -303,6 +303,9 @@ class ChatService:
             r"\bdelete\b|\bremove\b|\blist\b|\bshow\b",
             r"\bпокажи|список|мои\s+напомин|мои\s+задач|мои\s+cron\b",
             r"\bмои\s+(?:задач|напоминан|cron)|список\s+(?:задач|напоминан)",
+            r"\b(?:найди|поищи|загугли|погугли|ищи|нагугли)\b.*\b(?:интернет|сети|гугл|google|инет)",
+            r"\bweb\s+search|search\s+(?:the\s+)?(?:web|internet|online)\b",
+            r"\bзагугли|погугли\b",
         ]
         return any(re.search(pattern, lowered) for pattern in tool_intent_patterns)
 
@@ -491,6 +494,33 @@ class ChatService:
 
         if re.search(r"\b(что\s+ты\s+помниш|что\s+ты\s+знаеш|покажи\s+памят|список\s+памят|моя\s+памят)\b", lowered):
             return [{"tool": "memory_list", "arguments": {}}]
+
+        # Document management: list, delete one, delete all
+        if re.search(
+            r"\b(?:удали|удалить|очисти|очистить|сотри|стереть)\b.*\bвс[\u0435\u0451]\b.*\b(?:документ|файл)"
+            r"|delete\s+all\s+(?:my\s+)?(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_delete_all", "arguments": {}}]
+
+        _doc_del_m = re.search(
+            r"\b(?:удали|удалить|убери|убрать|сотри|стереть)\b.*\b(?:документ|файл)\w*\s+([\w._-]+\.[\w]+)"
+            r"|delete\s+(?:document|file)\s+([\w._-]+\.[\w]+)",
+            lowered,
+        )
+        if _doc_del_m:
+            source_doc = (_doc_del_m.group(1) or _doc_del_m.group(2) or "").strip()
+            if source_doc:
+                return [{"tool": "doc_delete", "arguments": {"source_doc": source_doc}}]
+
+        if re.search(
+            r"\b(покажи|список|какие|мои|выведи)\b.*\b(?:документ|файл)"
+            r"|list\s+(?:my\s+)?(?:documents?|files?)"
+            r"|show\s+(?:my\s+)?(?:documents?|files?)"
+            r"|my\s+(?:documents?|files?)",
+            lowered,
+        ):
+            return [{"tool": "doc_list", "arguments": {}}]
 
         return None
 
@@ -1614,6 +1644,16 @@ class ChatService:
 
     @classmethod
     def _format_deterministic_tool_answer(cls, tool_calls: list[dict]) -> str | None:
+        # Mixed chains (data-fetching + artifact-creation) → skip, let LLM compose
+        _data_tools = {"integration_call", "dynamic_tool_call"}
+        _artifact_tools = {"pdf_create", "excel_create"}
+        tools_in_chain = {
+            str(c.get("tool") or "").strip().lower()
+            for c in tool_calls if c.get("success")
+        }
+        if tools_in_chain & _data_tools and tools_in_chain & _artifact_tools:
+            return None
+
         for call in tool_calls:
             if not call.get("success"):
                 continue
@@ -1747,6 +1787,34 @@ class ChatService:
                 if len(items) > 8:
                     lines.append(f"- …и ещё {len(items) - 8}")
                 return "\n".join(lines)
+
+            if tool == "doc_list":
+                items = result.get("items") if isinstance(result.get("items"), list) else []
+                if not items:
+                    return "У вас нет загруженных документов."
+                lines = ["Ваши документы:"]
+                for item in items[:20]:
+                    if isinstance(item, dict):
+                        name = str(item.get("source_doc") or item.get("name") or "?").strip()
+                        chunks = item.get("chunk_count", "")
+                        suffix = f" ({chunks} частей)" if chunks else ""
+                        lines.append(f"- {name}{suffix}")
+                if len(items) > 20:
+                    lines.append(f"- …и ещё {len(items) - 20}")
+                return "\n".join(lines)
+
+            if tool == "doc_delete":
+                source = str(result.get("source_doc") or "").strip()
+                deleted_chunks = int(result.get("deleted_chunks") or 0)
+                if not result.get("deleted"):
+                    return f"Документ {source} не найден." if source else "Документ не найден."
+                return f"Документ {source} удалён ({deleted_chunks} частей)."
+
+            if tool == "doc_delete_all":
+                deleted = int(result.get("deleted_count") or 0)
+                if deleted <= 0:
+                    return "У вас не было загруженных документов."
+                return f"Все документы удалены ({deleted} частей)."
         return None
 
     async def _maybe_fast_tool_answer(
@@ -2461,11 +2529,15 @@ class ChatService:
         from app.graph import agent_graph
 
         initial_state = {
+            "messages": [user_message],
+            "context": [],
+            "client_id": str(user.id),
             "user_id": user.id,
             "session_id": session_id,
             "user_message": user_message,
             "system_prompt": user.system_prompt_template,
             "permissions": [],
+            "intent": "",
             "history_messages": [],
             "stm_context": [],
             "ltm_context": [],
@@ -2473,6 +2545,7 @@ class ChatService:
             "history_summary": None,
             "extracted_entities": [],
             "router_output": None,
+            "feedback_plan": "",
             "tool_results": [],
             "artifacts": [],
             "input_guardrail": None,
@@ -2481,6 +2554,7 @@ class ChatService:
             "tool_calls_log": [],
             "next_step": "",
             "iteration": 0,
+            "iterations": 0,
             "max_iterations": settings.LANGGRAPH_MAX_ITERATIONS,
             "error": None,
         }
@@ -2501,6 +2575,11 @@ class ChatService:
         final_answer = str(result.get("final_answer") or "")
         tool_calls_log = result.get("tool_calls_log") or []
         artifacts = result.get("artifacts") or []
+
+        # Safety net: re-extract artifacts from tool_calls_log if lost during
+        # LangGraph state propagation (e.g. reducer replaced list with []).
+        if not artifacts and tool_calls_log:
+            artifacts = self._extract_artifacts(tool_calls_log)
 
         # Memory IDs from LTM context (for tracking)
         used_memory_ids: list[str] = []
