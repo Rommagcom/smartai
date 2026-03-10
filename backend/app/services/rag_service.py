@@ -181,7 +181,7 @@ class RagService:
             self._trigger_embedding_cooldown()
             raise RuntimeError(DOC_SEARCH_EMBEDDING_UNAVAILABLE) from exc
 
-    async def answer_question(self, user_id: str, query: str, top_k: int = 8) -> dict:
+    async def answer_question(self, user_id: str, query: str, top_k: int = 5) -> dict:
         normalized_query = str(query or "").strip()
         if not normalized_query:
             raise ValueError("query is required")

@@ -87,9 +87,9 @@ async def search_document(query: str, current_user: CurrentUser, top_k: int = 5)
         503: {"description": "Document QA unavailable"},
     },
 )
-async def ask_document(query: str, current_user: CurrentUser, top_k: int = 8) -> dict:
+async def ask_document(query: str, current_user: CurrentUser, top_k: int = 5) -> dict:
     try:
-        result = await rag_service.answer_question(str(current_user.id), query, top_k=max(1, min(top_k, 10)))
+        result = await rag_service.answer_question(str(current_user.id), query, top_k=max(1, min(top_k, 5)))
         if settings.DEV_VERBOSE_LOGGING:
             logger.info(
                 "documents ask",
