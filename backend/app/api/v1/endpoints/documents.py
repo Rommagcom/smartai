@@ -80,6 +80,37 @@ async def search_document(query: str, current_user: CurrentUser, top_k: int = 5)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get(
+    "/ask",
+    responses={
+        400: {"description": "Invalid query"},
+        503: {"description": "Document QA unavailable"},
+    },
+)
+async def ask_document(query: str, current_user: CurrentUser, top_k: int = 8) -> dict:
+    try:
+        result = await rag_service.answer_question(str(current_user.id), query, top_k=max(1, min(top_k, 10)))
+        if settings.DEV_VERBOSE_LOGGING:
+            logger.info(
+                "documents ask",
+                extra={
+                    "context": {
+                        "component": "documents",
+                        "event": "ask",
+                        "user_id": str(current_user.id),
+                        "query": query,
+                        "top_k": top_k,
+                        "items_count": len(result.get("items") or []),
+                    }
+                },
+            )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("", responses={503: {"description": "Document list unavailable"}})
 async def list_documents(current_user: CurrentUser, limit: int = 200) -> DocumentListResponse:
     try:
