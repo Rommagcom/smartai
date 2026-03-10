@@ -1064,8 +1064,6 @@ class TelegramAdapter(MessengerAdapter):
                 telegram_user_id=telegram_user_id,
                 token=token,
                 text=text,
-                backend_username=backend_username,
-                context=context,
             )
         )
         self._background_tasks.add(task)
