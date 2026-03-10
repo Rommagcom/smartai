@@ -8,7 +8,6 @@ from starlette.responses import PlainTextResponse
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
-from app.core.rate_limit import RateLimitMiddleware
 from app.db.session import close_engine
 from app.services.alerting_service import alerting_service
 from app.services.http_client_service import http_client_service
@@ -123,13 +122,6 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
-app.add_middleware(
-    RateLimitMiddleware,
-    enabled=settings.RATE_LIMIT_ENABLED,
-    requests_per_minute=settings.RATE_LIMIT_REQUESTS_PER_MINUTE,
-    auth_requests_per_minute=settings.RATE_LIMIT_AUTH_REQUESTS_PER_MINUTE,
-)
 
 
 @app.get("/health")
