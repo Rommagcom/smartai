@@ -135,6 +135,7 @@ class Settings(BaseSettings):
     LITELLM_ANTHROPIC_API_KEY: str = ""
     LITELLM_TEMPERATURE: float = 0.7
     LITELLM_PLANNER_TEMPERATURE: float = 0.0
+    LITELLM_STRUCTURED_PARSE_LOG_LEVEL: str = "INFO"
 
     # --- Guardrails ---
     GUARDRAILS_ENABLED: bool = True
@@ -144,6 +145,9 @@ class Settings(BaseSettings):
     # --- LangGraph ---
     LANGGRAPH_MAX_ITERATIONS: int = 5
     LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
+    ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS: bool = False
+    ROUTER_ENABLE_DETERMINISTIC_FALLBACKS: bool = True
+    ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT: bool = True
 
     # --- Tool Vector Registry (Milvus semantic tool search) ---
     TOOL_RETRIEVER_TOP_K: int = 5

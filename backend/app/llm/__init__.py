@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+
+class StructuredParseError(Exception):
+    """Raised when structured JSON payload cannot be extracted from LLM text."""
+
 # Suppress verbose litellm logging
 litellm.suppress_debug_info = True
 litellm.set_verbose = False
@@ -206,6 +210,32 @@ class LLMProvider:
     # Structured output (Pydantic v2)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_expected_structured_parse_error(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return (
+            "structured json payload not found" in text
+            or "invalid json" in text
+            or "json_invalid" in text
+        )
+
+    @staticmethod
+    def _log_structured_parse_failure(attempt: int, retries: int, exc: Exception) -> None:
+        configured = str(getattr(settings, "LITELLM_STRUCTURED_PARSE_LOG_LEVEL", "INFO") or "INFO").upper()
+        expected = LLMProvider._is_expected_structured_parse_error(exc)
+        message = "structured parse attempt %d/%d failed: %s"
+        if configured == "DEBUG":
+            logger.debug(message, attempt, retries, exc)
+            return
+        if configured == "WARNING":
+            logger.warning(message, attempt, retries, exc)
+            return
+        # INFO (default): keep expected parser misses less noisy.
+        if expected:
+            logger.info(message, attempt, retries, exc)
+        else:
+            logger.warning(message, attempt, retries, exc)
+
     async def chat_structured(
         self,
         messages: list[dict[str, str]],
@@ -251,12 +281,9 @@ class LLMProvider:
                 )
                 parsed = self._parse_structured_response(raw, response_model)
                 return parsed
-            except (ValidationError, json.JSONDecodeError) as exc:
+            except (ValidationError, json.JSONDecodeError, StructuredParseError) as exc:
                 last_exc = exc
-                logger.warning(
-                    "structured parse attempt %d/%d failed: %s",
-                    attempt, retries, exc,
-                )
+                self._log_structured_parse_failure(attempt, retries, exc)
                 if attempt < retries:
                     await asyncio.sleep(0.1 * attempt)
 
@@ -292,7 +319,7 @@ class LLMProvider:
             candidate = text[brace_start: brace_end + 1]
             return model.model_validate_json(candidate)
 
-        raise ValueError(f"No valid JSON found in LLM response: {text[:200]}")
+        raise StructuredParseError(f"Structured JSON payload not found in LLM response: {text[:200]}")
 
     # ------------------------------------------------------------------
     # Embeddings
