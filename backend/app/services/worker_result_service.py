@@ -23,14 +23,22 @@ class WorkerResultService:
     def _key(user_id: str) -> str:
         return f"{settings.WORKER_RESULT_QUEUE_PREFIX}:{user_id}"
 
+    @staticmethod
+    def _redis_timeout_seconds() -> float:
+        return max(0.5, float(settings.WORKER_RESULT_REDIS_TIMEOUT_SECONDS))
+
     async def push(self, user_id: str, payload: dict) -> None:
         try:
             redis = self._get_redis()
             key = self._key(user_id)
             max_items = max(10, int(settings.WORKER_RESULT_QUEUE_MAX_ITEMS))
-            await asyncio.wait_for(redis.rpush(key, json.dumps(payload, ensure_ascii=False)), timeout=0.5)
-            await asyncio.wait_for(redis.ltrim(key, -max_items, -1), timeout=0.5)
-            await asyncio.wait_for(redis.expire(key, max(60, int(settings.WORKER_RESULT_TTL_SECONDS))), timeout=0.5)
+            redis_timeout = self._redis_timeout_seconds()
+            await asyncio.wait_for(redis.rpush(key, json.dumps(payload, ensure_ascii=False)), timeout=redis_timeout)
+            await asyncio.wait_for(redis.ltrim(key, -max_items, -1), timeout=redis_timeout)
+            await asyncio.wait_for(
+                redis.expire(key, max(60, int(settings.WORKER_RESULT_TTL_SECONDS))),
+                timeout=redis_timeout,
+            )
             return
         except Exception:
             self._results[user_id].append(payload)
@@ -40,9 +48,10 @@ class WorkerResultService:
         try:
             redis = self._get_redis()
             key = self._key(user_id)
-            raw_items = await asyncio.wait_for(redis.lrange(key, 0, count - 1), timeout=0.5)
+            redis_timeout = self._redis_timeout_seconds()
+            raw_items = await asyncio.wait_for(redis.lrange(key, 0, count - 1), timeout=redis_timeout)
             if raw_items:
-                await asyncio.wait_for(redis.ltrim(key, count, -1), timeout=0.5)
+                await asyncio.wait_for(redis.ltrim(key, count, -1), timeout=redis_timeout)
                 items: list[dict] = []
                 for raw in raw_items:
                     try:
@@ -73,7 +82,10 @@ class WorkerResultService:
     async def clear_user_results(self, user_id: str) -> None:
         try:
             redis = self._get_redis()
-            await asyncio.wait_for(redis.delete(self._key(user_id)), timeout=0.5)
+            await asyncio.wait_for(
+                redis.delete(self._key(user_id)),
+                timeout=self._redis_timeout_seconds(),
+            )
         except Exception:
             self._results.pop(user_id, None)
             return

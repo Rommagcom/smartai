@@ -1220,7 +1220,13 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return
         token, _ = auth
-        res = await self.client.pdf_create(token, title=title, content=content, filename="telegram_document.pdf")
+        try:
+            res = await self.client.pdf_create(token, title=title, content=content, filename="telegram_document.pdf")
+        except httpx.TimeoutException:
+            await update.effective_message.reply_text(
+                "Генерация PDF заняла слишком много времени. Попробуйте уменьшить объём текста или повторите позже."
+            )
+            return
         if res["status"] != 200:
             await self._reply_api_result(update, res)
             return

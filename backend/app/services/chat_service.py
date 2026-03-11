@@ -401,8 +401,9 @@ class ChatService:
 
         wants_pdf_artifact = bool(
             re.search(
-                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|выгрузи|экспорт|отправ|пришли|generate|create|export|attach)"
-                r"|\b(?:сделай|создай|сформируй|выгрузи|экспорт|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b",
+                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|сгенерируй|генерируй|выгрузи|экспорт|сохрани|оформи|отправ|пришли|generate|create|export|attach)"
+                r"|\b(?:сделай|создай|сформируй|сгенерируй|генерируй|выгрузи|экспорт|сохрани|оформи|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b"
+                r"|\bв\s+pdf\b",
                 lowered,
             )
         )
@@ -550,6 +551,18 @@ class ChatService:
             lowered,
         ):
             return [{"tool": "doc_list", "arguments": {}}]
+
+        if wants_pdf_artifact:
+            return [
+                {
+                    "tool": "pdf_create",
+                    "arguments": {
+                        "title": "Документ",
+                        "filename": "generated-document.pdf",
+                        "content": str(user_message or "").strip(),
+                    },
+                }
+            ]
 
         return None
 
@@ -1735,7 +1748,7 @@ class ChatService:
                 fname = str(result.get("file_name") or "document.pdf")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-                return f"Документ {fname} создан{size_kb}."
+                return f"Документ {fname} в процессе создания{size_kb}."
 
             if tool == "excel_create":
                 status = str(result.get("status") or "").strip().lower()
@@ -1745,7 +1758,7 @@ class ChatService:
                 fname = str(result.get("file_name") or "document.xlsx")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-                return f"Документ {fname} создан{size_kb}."
+                return f"Документ {fname} в процессе создания{size_kb}."
 
             if tool == "integrations_delete_all":
                 deleted_count = int(result.get("deleted_count") or 0)

@@ -1298,12 +1298,12 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
             fname = tr.result.get("file_name") or "document.pdf"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-            return f"Документ {fname} создан{size_kb}."
+            return f"Документ {fname} в процессе создания{size_kb}."
         if tr.tool == "excel_create":
             fname = tr.result.get("file_name") or "document.xlsx"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-            return f"Документ {fname} создан{size_kb}."
+            return f"Документ {fname} в процессе создания{size_kb}."
         if tr.tool == "cron_add":
             payload = tr.result.get("payload", {})
             if isinstance(payload, dict):
