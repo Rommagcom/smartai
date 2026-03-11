@@ -836,7 +836,7 @@ class ToolOrchestratorService:
             "Будь конкретным и понятным."
         )
         if title_hint:
-            prompt += f"\nТема документа: {title_hint}"
+            prompt += f"\nТема: {title_hint}"
 
         result = await asyncio.wait_for(
             llm_provider.chat(
