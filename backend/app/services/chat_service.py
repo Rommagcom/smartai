@@ -1391,7 +1391,7 @@ class ChatService:
                 db=db,
                 user=user,
                 steps=planned_steps,
-                max_steps=3,
+                max_steps=5,
             )
             response_hint = str(planner.get("response_hint") or "")
             return tool_calls, response_hint

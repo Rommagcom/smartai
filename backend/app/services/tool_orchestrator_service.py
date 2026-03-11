@@ -317,7 +317,7 @@ class ToolOrchestratorService:
         db: AsyncSession,
         user: User,
         steps: list[dict],
-        max_steps: int = 3,
+        max_steps: int = 5,
     ) -> list[dict]:
         handlers = self._handlers()
         results: list[dict] = []

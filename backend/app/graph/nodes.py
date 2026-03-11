@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -51,6 +52,11 @@ from app.schemas.graph import (
 
 logger = logging.getLogger(__name__)
 _WEB_SEARCH_HINT = "Выполни поиск в интернете"
+_EXPORT_SUBJECT_RE = re.compile(r"(?:pdf|пдф|excel|xlsx|документ|файл)", re.IGNORECASE)
+_EXPORT_READY_RE = re.compile(
+    r"(?:успешно\s+создан|создан|готов|готов\s+к\s+скачиванию|приложен|вложен|attached|uploaded)",
+    re.IGNORECASE,
+)
 
 
 class IntentClassifierOutput(BaseModel):
@@ -1026,6 +1032,12 @@ async def output_node(state: dict) -> dict:
             f"{status_text} поставлен в очередь и будет отправлен отдельным сообщением."
         )
 
+    final_answer = _sanitize_false_attachment_claims(
+        answer=final_answer,
+        tool_calls=all_calls,
+        artifacts=all_artifacts,
+    )
+
     # Append to STM + extract facts to LTM
     if user_id and final_answer:
         try:
@@ -1050,9 +1062,6 @@ async def output_node(state: dict) -> dict:
 # ======================================================================
 # Helper functions (shared across nodes)
 # ======================================================================
-
-
-import re
 
 
 async def _extract_facts_to_ltm(user_id, user_message: str, assistant_response: str) -> None:
@@ -1453,11 +1462,19 @@ def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | N
         if not tr.success or not tr.result:
             continue
         if tr.tool == "pdf_create":
+            status = str(tr.result.get("status") or "").strip().lower()
+            message = str(tr.result.get("message") or "").strip()
+            if status in {"queued", "deduplicated"}:
+                return message or "PDF поставлен в очередь и будет отправлен отдельным сообщением."
             fname = tr.result.get("file_name") or "document.pdf"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
             return f"Документ {fname} в процессе создания{size_kb}."
         if tr.tool == "excel_create":
+            status = str(tr.result.get("status") or "").strip().lower()
+            message = str(tr.result.get("message") or "").strip()
+            if status in {"queued", "deduplicated"}:
+                return message or "Excel поставлен в очередь и будет отправлен отдельным сообщением."
             fname = tr.result.get("file_name") or "document.xlsx"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -1593,6 +1610,43 @@ def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
     if not parts:
         return "Не удалось получить данные. Повторите запрос позже."
     return "Результат:\n\n" + "\n\n".join(parts)
+
+
+def _has_queued_export(tool_calls: list[dict]) -> bool:
+    for call in tool_calls:
+        if not isinstance(call, dict) or not bool(call.get("success")):
+            continue
+        tool_name = str(call.get("tool") or "").strip().lower()
+        if tool_name not in {"pdf_create", "excel_create"}:
+            continue
+        result = call.get("result") if isinstance(call.get("result"), dict) else {}
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"queued", "deduplicated"}:
+            return True
+    return False
+
+
+def _contains_export_success_claim(text: str) -> bool:
+    return bool(_EXPORT_SUBJECT_RE.search(text) and _EXPORT_READY_RE.search(text))
+
+
+def _sanitize_false_attachment_claims(answer: str, tool_calls: list[dict], artifacts: list[dict]) -> str:
+    """Prevent claiming export delivery when no artifact is actually attached."""
+    text = str(answer or "").strip()
+    if not text or artifacts or not _contains_export_success_claim(text):
+        return text
+
+    if _has_queued_export(tool_calls):
+        return (
+            "Файл поставлен в очередь и будет отправлен отдельным сообщением после обработки. "
+            "Текущий ответ не содержит вложения."
+        )
+
+    return (
+        text
+        + "\n\n"
+        + "Примечание: в этом ответе файл не был приложен. Запросите экспорт повторно, чтобы получить документ."
+    )
 
 
 

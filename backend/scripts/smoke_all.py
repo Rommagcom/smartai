@@ -16,6 +16,8 @@ from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
 from scripts.smoke_ws_cron import run as run_ws_cron
 from scripts.smoke_tool_routing import run as run_tool_routing
 from scripts.smoke_web_compose_fallback import run as run_web_compose_fallback
+from scripts.smoke_export_claim_guard import run as run_export_claim_guard
+from scripts.smoke_export_claim_guard_e2e import run as run_export_claim_guard_e2e
 
 
 def reset_scheduler() -> None:
@@ -95,6 +97,12 @@ async def run() -> None:
 
         print("RUN_SMOKE_WEB_COMPOSE_FALLBACK")
         await run_web_compose_fallback()
+
+        print("RUN_SMOKE_EXPORT_CLAIM_GUARD")
+        await run_export_claim_guard()
+
+        print("RUN_SMOKE_EXPORT_CLAIM_GUARD_E2E")
+        await run_export_claim_guard_e2e()
 
         print("SMOKE_ALL_OK")
     finally:
