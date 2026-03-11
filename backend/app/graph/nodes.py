@@ -369,6 +369,9 @@ async def router_node(state: dict) -> dict:
         "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
         "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
         "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
+        "16) Если пользователь просит актуальные данные (погода, курс валют, новости и т.п.) И одновременно экспорт в PDF/Excel, "
+        "сначала получи данные (decision='web_search' или integration_call), затем сформируй файл по результатам. "
+        "Нельзя сразу делать pdf_create/excel_create только из исходного текста запроса.\n"
     )
 
     # Build messages with recent history for context continuity

@@ -552,7 +552,7 @@ class ChatService:
         ):
             return [{"tool": "doc_list", "arguments": {}}]
 
-        if wants_pdf_artifact:
+        if wants_pdf_artifact and not ChatService._is_live_data_intent(user_message):
             return [
                 {
                     "tool": "pdf_create",
