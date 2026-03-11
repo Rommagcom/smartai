@@ -50,6 +50,7 @@ from app.schemas.graph import (
 )
 
 logger = logging.getLogger(__name__)
+_WEB_SEARCH_HINT = "Выполни поиск в интернете"
 
 
 class IntentClassifierOutput(BaseModel):
@@ -399,6 +400,17 @@ async def router_node(state: dict) -> dict:
         }
     except Exception as exc:
         logger.warning("Router LLM failed: %s, using fallback routing", exc)
+        salvaged = _extract_router_output_from_exception(exc, user_message)
+        if salvaged is not None:
+            _dev_log(
+                "router_fallback_salvaged",
+                decision=salvaged.decision.value,
+                steps_count=len(salvaged.steps),
+            )
+            return {
+                "router_output": salvaged,
+                "next_step": salvaged.decision.value,
+            }
         # If the message clearly asks for web search, don't lose the intent
         if _is_web_search_intent(user_message):
             query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
@@ -406,7 +418,7 @@ async def router_node(state: dict) -> dict:
             fallback = RouterOutput(
                 decision=RouterDecision.WEB_SEARCH,
                 steps=[ToolStep(tool="web_search", arguments={"query": query})],
-                response_hint="Выполни поиск в интернете",
+                response_hint=_WEB_SEARCH_HINT,
                 confidence=0.5,
             )
             return {
@@ -1322,6 +1334,65 @@ def _extract_non_json_answer_from_exception(exc: Exception) -> str:
             return cleaned[:12000]
 
     return candidate[:4000]
+
+
+def _extract_router_output_from_exception(exc: Exception, user_message: str) -> RouterOutput | None:
+    """Recover a minimal RouterOutput from malformed JSON text in exception message."""
+    text = str(exc or "")
+    marker = "No valid JSON found in LLM response:"
+    idx = text.find(marker)
+    if idx == -1:
+        return None
+
+    candidate = text[idx + len(marker):].strip()
+    if not candidate:
+        return None
+
+    decision_match = re.search(
+        r'"decision"\s*:\s*"(tool|chat|memory|clarify|web_search)"',
+        candidate,
+        re.IGNORECASE,
+    )
+
+    # Sometimes JSON is truncated before the decision field closes.
+    if not decision_match and re.search(r'"tool"\s*:\s*"web_search"', candidate, re.IGNORECASE):
+        query_match = re.search(r'"query"\s*:\s*"([\s\S]*?)"', candidate, re.IGNORECASE)
+        query = (query_match.group(1) if query_match else "").replace('\\"', '"').strip()
+        query = query or _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
+        return RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint=_WEB_SEARCH_HINT,
+            confidence=0.45,
+        )
+
+    if not decision_match:
+        return None
+
+    decision_raw = decision_match.group(1).lower()
+    if decision_raw == RouterDecision.WEB_SEARCH.value:
+        query_match = re.search(r'"query"\s*:\s*"([\s\S]*?)"', candidate, re.IGNORECASE)
+        query = (query_match.group(1) if query_match else "").replace('\\"', '"').strip()
+        query = query or _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
+        return RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint=_WEB_SEARCH_HINT,
+            confidence=0.45,
+        )
+
+    if decision_raw == RouterDecision.TOOL.value:
+        # Unsafe to execute arbitrary half-parsed tool calls with missing arguments.
+        return None
+
+    if decision_raw == RouterDecision.MEMORY.value:
+        decision = RouterDecision.MEMORY
+    elif decision_raw == RouterDecision.CLARIFY.value:
+        decision = RouterDecision.CLARIFY
+    else:
+        decision = RouterDecision.CHAT
+
+    return RouterOutput(decision=decision, confidence=0.4)
 
 
 def _build_raw_web_summary(web_fetch_content: str, web_search_results: list[dict], tool_results: list[ToolResult]) -> str:
