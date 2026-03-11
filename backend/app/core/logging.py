@@ -27,11 +27,15 @@ class JsonFormatter(logging.Formatter):
 
 
 class _PollAccessFilter(logging.Filter):
-    """Suppress noisy 200 OK lines for the worker-results/poll endpoint."""
+    """Suppress noisy, expected uvicorn access-log lines for service endpoints."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if "worker-results/poll" in msg and "200" in msg:
+            return False
+        # Prometheus metrics endpoint is commonly probed without auth.
+        # Keep unauthorized probes out of INFO access logs.
+        if "/observability/metrics/prometheus" in msg and "401" in msg:
             return False
         return True
 
