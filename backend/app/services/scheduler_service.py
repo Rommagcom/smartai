@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from time import perf_counter
 
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy import func, select
 
@@ -23,6 +24,12 @@ from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
 
 logger = logging.getLogger(__name__)
+
+
+class _InactivityReminderPlan(BaseModel):
+    send_now: bool = Field(default=True)
+    message: str = Field(default="")
+    next_reminder_hours: int = Field(default=24, ge=1, le=336)
 
 
 class SchedulerService:
@@ -61,6 +68,10 @@ class SchedulerService:
         """Rate-limit inactivity reminders per user using Redis NX lock."""
         cooldown_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS))
         ttl_seconds = cooldown_hours * 3600
+        return await self._acquire_inactivity_reminder_slot_with_ttl(user_id, ttl_seconds)
+
+    async def _acquire_inactivity_reminder_slot_with_ttl(self, user_id: str, ttl_seconds: int) -> bool:
+        ttl_seconds = max(60, int(ttl_seconds))
         lock_key = f"scheduler:inactive-reminder:{user_id}"
         try:
             redis = self._get_redis()
@@ -69,6 +80,86 @@ class SchedulerService:
         except Exception:
             logger.debug("inactivity reminder lock unavailable", exc_info=True)
             return True
+
+    async def _recent_dialog_excerpt(self, user_id: str, limit: int = 6) -> str:
+        async with AsyncSessionLocal() as db:
+            user_uuid = user_id
+            result = await db.execute(
+                select(Message.role, Message.content)
+                .where(Message.user_id == user_uuid)
+                .order_by(Message.created_at.desc())
+                .limit(max(1, limit))
+            )
+            rows = list(reversed(result.all()))
+
+        lines: list[str] = []
+        for role, content in rows:
+            role_name = "Пользователь" if str(role or "") == "user" else "Ассистент"
+            text = str(content or "").strip()
+            if not text:
+                continue
+            if len(text) > 280:
+                text = text[:279] + "…"
+            lines.append(f"{role_name}: {text}")
+        return "\n".join(lines)
+
+    async def _plan_inactivity_reminder(self, user_id: str) -> _InactivityReminderPlan:
+        fallback_message = str(settings.SCHEDULER_INACTIVITY_REMINDER_MESSAGE or "").strip()
+        fallback_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS))
+
+        if not bool(settings.SCHEDULER_INACTIVITY_REMINDER_LLM_ENABLED):
+            return _InactivityReminderPlan(
+                send_now=True,
+                message=fallback_message,
+                next_reminder_hours=fallback_hours,
+            )
+
+        try:
+            from app.llm import llm_provider
+
+            history_excerpt = await self._recent_dialog_excerpt(user_id=user_id, limit=6)
+            min_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_MIN_HOURS))
+            max_hours = max(min_hours, int(settings.SCHEDULER_INACTIVITY_REMINDER_MAX_HOURS))
+            planner_prompt = (
+                "Ты планируешь напоминание пользователю после длительной неактивности. "
+                "Сформируй короткий дружелюбный текст на русском языке без давления. "
+                "Также выбери, когда следующее напоминание уместно. "
+                f"Границы next_reminder_hours: от {min_hours} до {max_hours}. "
+                "Если сейчас лучше НЕ отправлять сообщение, поставь send_now=false. "
+                "Никогда не упоминай внутренние системы или технические детали."
+            )
+
+            out = await llm_provider.chat_structured(
+                messages=[
+                    {"role": "system", "content": planner_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"recent_dialog:\n{history_excerpt or '(пусто)'}\n\n"
+                            "Верни план напоминания."
+                        ),
+                    },
+                ],
+                response_model=_InactivityReminderPlan,
+                model=settings.LITELLM_PLANNER_MODEL or None,
+                temperature=0.2,
+                max_tokens=max(256, int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
+            )
+            message = str(out.message or "").strip() or fallback_message
+            hours = int(out.next_reminder_hours or fallback_hours)
+            hours = max(min_hours, min(max_hours, hours))
+            return _InactivityReminderPlan(
+                send_now=bool(out.send_now),
+                message=message,
+                next_reminder_hours=hours,
+            )
+        except Exception:
+            logger.warning("inactivity reminder LLM planning failed", exc_info=True)
+            return _InactivityReminderPlan(
+                send_now=True,
+                message=fallback_message,
+                next_reminder_hours=fallback_hours,
+            )
 
     async def _load_inactive_user_ids(self) -> list[str]:
         """Return users with no user messages for configured inactivity window."""
@@ -93,14 +184,19 @@ class SchedulerService:
         if not bool(settings.SCHEDULER_INACTIVITY_REMINDER_ENABLED):
             return 0
 
-        reminder_message = str(settings.SCHEDULER_INACTIVITY_REMINDER_MESSAGE or "").strip()
-        if not reminder_message:
-            return 0
-
         sent_count = 0
         user_ids = await self._load_inactive_user_ids()
         for user_id in user_ids:
-            if not await self._acquire_inactivity_reminder_slot(user_id):
+            plan = await self._plan_inactivity_reminder(user_id=user_id)
+            reminder_message = str(plan.message or "").strip()
+            if not reminder_message:
+                continue
+
+            lock_ttl = max(60, int(plan.next_reminder_hours) * 3600)
+            if not await self._acquire_inactivity_reminder_slot_with_ttl(user_id, lock_ttl):
+                continue
+
+            if not bool(plan.send_now):
                 continue
 
             payload = {
