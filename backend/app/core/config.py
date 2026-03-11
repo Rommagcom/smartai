@@ -61,6 +61,8 @@ class Settings(BaseSettings):
 
     WORKER_ENABLED: bool = True
     SCHEDULER_ENABLED: bool = True
+    SCHEDULER_JOB_MISFIRE_GRACE_SECONDS: int = 300
+    SCHEDULER_ONCE_MAX_LAG_SECONDS: int = 300
 
     WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
     WS_FANOUT_REDIS_ENABLED: bool = True
