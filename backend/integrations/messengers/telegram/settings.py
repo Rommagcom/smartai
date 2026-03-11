@@ -24,6 +24,7 @@ class TelegramBridgeSettings(BaseSettings):
     TELEGRAM_KNOWN_USER_TTL_SECONDS: int = 2592000  # 30 days
     TELEGRAM_CHAT_TIMEOUT_SECONDS: int = 300  # timeout for /chat API calls (LLM + tools)
     TELEGRAM_DEFAULT_TIMEOUT_SECONDS: int = 60  # default timeout for other API calls
+    TELEGRAM_PDF_CREATE_TIMEOUT_SECONDS: int = 300  # timeout for /chat/tools/pdf-create
     TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS: int = 1200  # timeout for /documents/upload processing
     TELEGRAM_GROUP_REQUIRE_NAME: bool = True
     TELEGRAM_GROUP_NAME_ALIASES: str = "smartai"  # comma-separated aliases, e.g. "smart ai,смарт"
