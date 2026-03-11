@@ -1,12 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from time import perf_counter
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.session import AsyncSessionLocal
 from app.models.cron_job import CronJob
+from app.models.message import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -55,6 +56,74 @@ class SchedulerService:
         normalized = self._normalize_run_at(run_at)
         lag_seconds = (datetime.now(timezone.utc) - normalized).total_seconds()
         return lag_seconds > max(0, int(settings.SCHEDULER_ONCE_MAX_LAG_SECONDS))
+
+    async def _acquire_inactivity_reminder_slot(self, user_id: str) -> bool:
+        """Rate-limit inactivity reminders per user using Redis NX lock."""
+        cooldown_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS))
+        ttl_seconds = cooldown_hours * 3600
+        lock_key = f"scheduler:inactive-reminder:{user_id}"
+        try:
+            redis = self._get_redis()
+            acquired = await redis.set(lock_key, "1", nx=True, ex=ttl_seconds)
+            return bool(acquired)
+        except Exception:
+            logger.debug("inactivity reminder lock unavailable", exc_info=True)
+            return True
+
+    async def _load_inactive_user_ids(self) -> list[str]:
+        """Return users with no user messages for configured inactivity window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            hours=max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_AFTER_HOURS))
+        )
+        batch_limit = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_BATCH_LIMIT))
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Message.user_id)
+                .where(Message.role == "user")
+                .group_by(Message.user_id)
+                .having(func.max(Message.created_at) <= cutoff)
+                .limit(batch_limit)
+            )
+            rows = result.scalars().all()
+
+        return [str(user_id) for user_id in rows if user_id]
+
+    async def _send_inactivity_reminders(self, now_iso: str) -> int:
+        if not bool(settings.SCHEDULER_INACTIVITY_REMINDER_ENABLED):
+            return 0
+
+        reminder_message = str(settings.SCHEDULER_INACTIVITY_REMINDER_MESSAGE or "").strip()
+        if not reminder_message:
+            return 0
+
+        sent_count = 0
+        user_ids = await self._load_inactive_user_ids()
+        for user_id in user_ids:
+            if not await self._acquire_inactivity_reminder_slot(user_id):
+                continue
+
+            payload = {
+                "type": "proactive_message",
+                "message": reminder_message,
+                "timestamp": now_iso,
+            }
+            await connection_manager.send_to_user(user_id, payload)
+
+            delivery_payload = build_worker_delivery_payload(
+                job_type="inactivity_reminder",
+                is_success=True,
+                result={
+                    "message": reminder_message,
+                    "source": "scheduler",
+                    "timestamp": now_iso,
+                },
+                human_message=reminder_message,
+            )
+            await worker_result_service.push(user_id=user_id, payload=delivery_payload)
+            sent_count += 1
+
+        return sent_count
 
     def start(self) -> None:
         started_at = perf_counter()
@@ -536,6 +605,19 @@ class SchedulerService:
                         "type": "proactive_message",
                         "message": "Я на связи. Хотите, помогу с задачами на сегодня?",
                         "timestamp": now,
+                    },
+                )
+
+            inactivity_sent = await self._send_inactivity_reminders(now_iso=now)
+            if inactivity_sent > 0:
+                logger.info(
+                    "scheduler inactivity reminders sent",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "inactivity_reminders",
+                            "sent": inactivity_sent,
+                        }
                     },
                 )
             success = True

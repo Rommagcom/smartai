@@ -935,11 +935,19 @@ async def compose_node(state: dict) -> dict:
 
 async def output_node(state: dict) -> dict:
     """Final output processing: guardrail check + STM append."""
+    from app.db.session import AsyncSessionLocal
+    from app.models.user import User
     from app.memory import memory_manager
+    from app.services.tool_orchestrator_service import tool_orchestrator_service
+    from sqlalchemy import select
 
     final_answer = state.get("final_answer", "")
     user_message = state.get("user_message", "")
     user_id = state.get("user_id")
+    web_fetch_content = str(state.get("web_fetch_content") or "").strip()
+    web_search_results = state.get("web_search_results") or []
+    existing_calls = state.get("tool_calls_log") or []
+    existing_artifacts = state.get("artifacts") or []
 
     # Output guardrail
     if settings.GUARDRAILS_ENABLED:
@@ -951,6 +959,57 @@ async def output_node(state: dict) -> dict:
             final_answer = result.modified_text
     else:
         result = GuardrailResult(verdict=GuardrailVerdict.PASS)
+
+    extra_calls: list[dict] = []
+    should_export = bool(final_answer) and bool(web_fetch_content or web_search_results)
+    if should_export:
+        export_kind = _requested_export_kind(user_message)
+        already_has_export_call = any(
+            str(call.get("tool") or "").strip().lower() in {"pdf_create", "excel_create"}
+            for call in existing_calls
+            if isinstance(call, dict)
+        )
+        if export_kind and not already_has_export_call and user_id:
+            try:
+                async with AsyncSessionLocal() as db:
+                    user_res = await db.execute(select(User).where(User.id == user_id))
+                    user = user_res.scalar_one_or_none()
+                    if user is not None:
+                        tool_name = "pdf_create" if export_kind == "pdf" else "excel_create"
+                        file_name = (
+                            "web-search-result.pdf"
+                            if export_kind == "pdf"
+                            else "web-search-result.xlsx"
+                        )
+                        steps = [
+                            {
+                                "tool": tool_name,
+                                "arguments": {
+                                    "title": "Результат поиска",
+                                    "filename": file_name,
+                                    "content": final_answer,
+                                },
+                            }
+                        ]
+                        extra_calls = await tool_orchestrator_service.execute_tool_chain(
+                            db=db,
+                            user=user,
+                            steps=steps,
+                            max_steps=1,
+                        )
+                        await db.commit()
+            except Exception:
+                logger.warning("output export enqueue failed", exc_info=True)
+
+    all_calls = [*existing_calls, *extra_calls]
+    all_artifacts = [*existing_artifacts, *_extract_artifacts(extra_calls)]
+
+    if extra_calls:
+        status_text = "PDF" if _requested_export_kind(user_message) == "pdf" else "Excel"
+        final_answer = (
+            f"{final_answer}\n\n"
+            f"{status_text} поставлен в очередь и будет отправлен отдельным сообщением."
+        )
 
     # Append to STM + extract facts to LTM
     if user_id and final_answer:
@@ -968,6 +1027,8 @@ async def output_node(state: dict) -> dict:
     return {
         "final_answer": final_answer,
         "output_guardrail": result,
+        "tool_calls_log": all_calls,
+        "artifacts": all_artifacts,
     }
 
 
@@ -1213,6 +1274,29 @@ def _extract_completeness(text: str) -> bool:
 def _strip_completeness_marker(text: str) -> str:
     """Remove the COMPLETENESS: ... marker line from LLM output."""
     return _COMPLETENESS_RE.sub("", text or "").strip()
+
+
+def _requested_export_kind(user_message: str) -> str | None:
+    """Return explicit export target kind requested by user: pdf | excel | None."""
+    lowered = str(user_message or "").strip().lower()
+    if not lowered:
+        return None
+
+    has_explicit_export = bool(
+        re.search(
+            r"\b(?:сохрани|сохранить|выгрузи|выгрузить|экспорт|экспортируй|создай\s+файл|"
+            r"скачай|download|export|save|attach)\b",
+            lowered,
+        )
+    )
+    if not has_explicit_export:
+        return None
+
+    if re.search(r"\b(?:pdf|пдф)\b|\bв\s+pdf\b", lowered):
+        return "pdf"
+    if re.search(r"\b(?:excel|xlsx|таблиц)\b|\bв\s+excel\b", lowered):
+        return "excel"
+    return None
 
 
 def _extract_non_json_answer_from_exception(exc: Exception) -> str:
