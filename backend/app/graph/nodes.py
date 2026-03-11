@@ -901,6 +901,15 @@ async def compose_node(state: dict) -> dict:
             logger.info("Compose reflexion used fallback synthesis (non-JSON output)")
         else:
             logger.warning("Compose reflexion failed: %s", exc)
+        recovered = _extract_non_json_answer_from_exception(exc)
+        if recovered:
+            return {
+                "final_answer": _sanitize_llm_answer(recovered),
+                "is_complete": True,
+                "feedback_plan": "",
+                "iterations": iterations,
+                "iteration": iterations,
+            }
         # 1) If web context exists, run non-structured synthesis first.
         # Structured parse errors often contain a truncated preview (~200 chars).
         if web_fetch_content or web_search_results:
@@ -940,11 +949,7 @@ async def compose_node(state: dict) -> dict:
                 )
         # 2) Recover plain answer embedded in structured-parse error text.
         else:
-            recovered = _extract_non_json_answer_from_exception(exc)
-            if recovered:
-                fallback_answer = _sanitize_llm_answer(recovered)
-            else:
-                fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
+            fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
         return {
             "final_answer": fallback_answer,
             "is_complete": True,

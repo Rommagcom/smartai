@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, AsyncGenerator, Type, TypeVar
 
 import httpx
@@ -211,8 +212,50 @@ class LLMProvider:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _is_tool_payload_schema_mismatch(exc: Exception) -> bool:
+        """Detect cases where model returned a tool call object for a non-tool schema."""
+        if not isinstance(exc, ValidationError):
+            return False
+        try:
+            for item in exc.errors() or []:
+                payload = item.get("input")
+                if isinstance(payload, dict) and "tool" in payload:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _compact_structured_parse_error(exc: Exception) -> str:
+        """Return a short, redacted parse error summary for logs."""
+        if isinstance(exc, ValidationError):
+            try:
+                first = (exc.errors() or [{}])[0]
+                code = str(first.get("type") or "validation_error")
+                msg = str(first.get("msg") or "validation failed")
+                return f"{code}: {msg}"
+            except Exception:
+                pass
+
+        text = str(exc or "").strip()
+        if not text:
+            return "structured parse failed"
+
+        # Hide verbose payload snippets often present in pydantic/litellm errors.
+        text = re.sub(r"input_value\s*=\s*'[^']*'", "input_value='<redacted>'", text, flags=re.IGNORECASE)
+        text = re.sub(r"input_value\s*=\s*\"[^\"]*\"", "input_value=\"<redacted>\"", text, flags=re.IGNORECASE)
+        return text[:240]
+
+    @staticmethod
     def _is_expected_structured_parse_error(exc: Exception) -> bool:
         text = str(exc or "").lower()
+        if isinstance(exc, ValidationError):
+            try:
+                for item in exc.errors() or []:
+                    if str(item.get("type") or "").lower() == "json_invalid":
+                        return True
+            except Exception:
+                pass
         return (
             "structured json payload not found" in text
             or "invalid json" in text
@@ -223,18 +266,19 @@ class LLMProvider:
     def _log_structured_parse_failure(attempt: int, retries: int, exc: Exception) -> None:
         configured = str(getattr(settings, "LITELLM_STRUCTURED_PARSE_LOG_LEVEL", "INFO") or "INFO").upper()
         expected = LLMProvider._is_expected_structured_parse_error(exc)
+        compact = LLMProvider._compact_structured_parse_error(exc)
         message = "structured parse attempt %d/%d failed: %s"
         if configured == "DEBUG":
-            logger.debug(message, attempt, retries, exc)
+            logger.debug(message, attempt, retries, compact)
             return
         if configured == "WARNING":
-            logger.warning(message, attempt, retries, exc)
+            logger.warning(message, attempt, retries, compact)
             return
         # INFO (default): keep expected parser misses less noisy.
         if expected:
-            logger.info(message, attempt, retries, exc)
+            logger.info(message, attempt, retries, compact)
         else:
-            logger.warning(message, attempt, retries, exc)
+            logger.warning(message, attempt, retries, compact)
 
     async def chat_structured(
         self,
@@ -282,6 +326,12 @@ class LLMProvider:
                 parsed = self._parse_structured_response(raw, response_model)
                 return parsed
             except (ValidationError, json.JSONDecodeError, StructuredParseError) as exc:
+                if self._is_tool_payload_schema_mismatch(exc):
+                    last_exc = StructuredParseError(
+                        "Structured schema mismatch: got tool payload for non-tool response model"
+                    )
+                    self._log_structured_parse_failure(attempt, retries, last_exc)
+                    break
                 last_exc = exc
                 self._log_structured_parse_failure(attempt, retries, exc)
                 if attempt < retries:
