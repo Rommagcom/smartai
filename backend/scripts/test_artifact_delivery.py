@@ -63,11 +63,28 @@ check("artifact has mime_type", artifacts[0].get("mime_type") == "application/pd
 
 print("\n=== _extract_artifacts (nodes.py) ===")
 from app.graph.nodes import _extract_artifacts as graph_extract
+from app.graph.nodes import _deterministic_route as graph_deterministic_route
 
 artifacts_graph = graph_extract(tool_calls)
 check("graph extracts 1 artifact", len(artifacts_graph) == 1)
 check("graph artifact has file_base64", "file_base64" in artifacts_graph[0])
 check("graph artifact file_name", artifacts_graph[0].get("file_name") == "test.pdf")
+
+print("\n=== Deterministic PDF fallback route ===")
+pdf_intent_message = "Напиши рассказ на целый лист и сгенерируй pdf документ"
+deterministic_steps = ChatService._deterministic_tool_steps(pdf_intent_message)
+check("deterministic steps found for pdf intent", isinstance(deterministic_steps, list) and len(deterministic_steps) > 0)
+if deterministic_steps:
+    check("first deterministic tool is pdf_create", deterministic_steps[0].get("tool") == "pdf_create")
+    args = deterministic_steps[0].get("arguments") if isinstance(deterministic_steps[0], dict) else {}
+    check("deterministic pdf args has content", isinstance(args, dict) and bool(str(args.get("content") or "").strip()))
+
+det_route = graph_deterministic_route(pdf_intent_message)
+check("graph deterministic route is set", det_route is not None)
+if det_route is not None:
+    check("graph route decision is tool", str(det_route.decision.value) == "tool")
+    has_pdf_step = any(str(step.tool) == "pdf_create" for step in det_route.steps)
+    check("graph route includes pdf_create", has_pdf_step)
 
 print("\n=== _extract_artifacts with failed tool ===")
 failed_calls = [

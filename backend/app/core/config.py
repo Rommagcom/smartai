@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     WORKER_RESULT_QUEUE_PREFIX: str = "assistant:worker:result"
     WORKER_RESULT_QUEUE_MAX_ITEMS: int = 200
     WORKER_RESULT_TTL_SECONDS: int = 86400
+    WORKER_RESULT_REDIS_TIMEOUT_SECONDS: float = 10.0
     WORKER_BRPOP_TIMEOUT_SECONDS: int = 5
     WORKER_MAX_RETRIES: int = 3
     WORKER_DEDUPE_WINDOW_SECONDS: int = 300
@@ -60,6 +61,8 @@ class Settings(BaseSettings):
 
     WORKER_ENABLED: bool = True
     SCHEDULER_ENABLED: bool = True
+    SCHEDULER_JOB_MISFIRE_GRACE_SECONDS: int = 300
+    SCHEDULER_ONCE_MAX_LAG_SECONDS: int = 300
 
     WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
     WS_FANOUT_REDIS_ENABLED: bool = True

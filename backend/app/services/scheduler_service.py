@@ -45,15 +45,51 @@ class SchedulerService:
             logger.debug("scheduler execution lock unavailable", exc_info=True)
             return True
 
+    @staticmethod
+    def _normalize_run_at(run_at: datetime) -> datetime:
+        if run_at.tzinfo is None:
+            return run_at.replace(tzinfo=timezone.utc)
+        return run_at.astimezone(timezone.utc)
+
+    def _should_skip_stale_once_job(self, run_at: datetime) -> bool:
+        normalized = self._normalize_run_at(run_at)
+        lag_seconds = (datetime.now(timezone.utc) - normalized).total_seconds()
+        return lag_seconds > max(0, int(settings.SCHEDULER_ONCE_MAX_LAG_SECONDS))
+
     def start(self) -> None:
         started_at = perf_counter()
         success = False
         try:
             if not self.scheduler.running:
                 self.scheduler.start()
-                self.scheduler.add_job(self.periodic_proactive_ping, "interval", minutes=30, id="global_proactive_ping", replace_existing=True)
-                self.scheduler.add_job(self.sync_jobs_from_db, "interval", seconds=30, id="global_cron_sync", replace_existing=True)
-                self.scheduler.add_job(self._run_memory_decay, "interval", minutes=60, id="global_memory_decay", replace_existing=True)
+                misfire = max(1, int(settings.SCHEDULER_JOB_MISFIRE_GRACE_SECONDS))
+                self.scheduler.add_job(
+                    self.periodic_proactive_ping,
+                    "interval",
+                    minutes=30,
+                    id="global_proactive_ping",
+                    replace_existing=True,
+                    coalesce=True,
+                    misfire_grace_time=misfire,
+                )
+                self.scheduler.add_job(
+                    self.sync_jobs_from_db,
+                    "interval",
+                    seconds=30,
+                    id="global_cron_sync",
+                    replace_existing=True,
+                    coalesce=True,
+                    misfire_grace_time=misfire,
+                )
+                self.scheduler.add_job(
+                    self._run_memory_decay,
+                    "interval",
+                    minutes=60,
+                    id="global_memory_decay",
+                    replace_existing=True,
+                    coalesce=True,
+                    misfire_grace_time=misfire,
+                )
                 logger.info("scheduler started", extra={"context": {"component": "scheduler", "event": "start"}})
             success = True
         except Exception as exc:
@@ -140,14 +176,15 @@ class SchedulerService:
             if not force_reload_all and row_id in existing_ids:
                 continue
             try:
-                self.add_or_replace_job(
+                added = self.add_or_replace_job(
                     job_id=row_id,
                     cron_expression=row.cron_expression,
                     user_id=str(row.user_id),
                     action_type=row.action_type,
                     payload=row.payload if isinstance(row.payload, dict) else {},
                 )
-                loaded += 1
+                if added:
+                    loaded += 1
             except Exception:
                 failed += 1
 
@@ -216,12 +253,26 @@ class SchedulerService:
                 latency_ms=(perf_counter() - started_at) * 1000,
             )
 
-    def add_or_replace_job(self, job_id: str, cron_expression: str, user_id: str, action_type: str, payload: dict) -> None:
+    def add_or_replace_job(self, job_id: str, cron_expression: str, user_id: str, action_type: str, payload: dict) -> bool:
         started_at = perf_counter()
         success = False
         try:
             if cron_expression.startswith("@once:"):
                 run_at = datetime.fromisoformat(cron_expression.replace("@once:", "", 1))
+                if self._should_skip_stale_once_job(run_at):
+                    logger.info(
+                        "scheduler stale once job skipped",
+                        extra={
+                            "context": {
+                                "component": "scheduler",
+                                "event": "job_skip_stale_once",
+                                "job_id": job_id,
+                                "action_type": action_type,
+                            }
+                        },
+                    )
+                    success = True
+                    return False
                 trigger = DateTrigger(run_date=run_at)
             else:
                 trigger = CronTrigger.from_crontab(cron_expression)
@@ -230,6 +281,8 @@ class SchedulerService:
                 trigger=trigger,
                 id=job_id,
                 replace_existing=True,
+                coalesce=True,
+                misfire_grace_time=max(1, int(settings.SCHEDULER_JOB_MISFIRE_GRACE_SECONDS)),
                 kwargs={
                     "job_id": job_id,
                     "user_id": user_id,
@@ -242,6 +295,7 @@ class SchedulerService:
                 "scheduler job added",
                 extra={"context": {"component": "scheduler", "event": "job_add", "job_id": job_id, "action_type": action_type}},
             )
+            return True
         except Exception as exc:
             alerting_service.emit(
                 component="scheduler",

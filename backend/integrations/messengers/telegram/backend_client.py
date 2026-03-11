@@ -154,6 +154,7 @@ class BackendApiClient:
             "/chat/tools/pdf-create",
             token=token,
             json={"title": title, "content": content, "filename": filename},
+            timeout=get_telegram_settings().TELEGRAM_PDF_CREATE_TIMEOUT_SECONDS,
         )
 
     async def memory_add(self, token: str, fact_type: str, content: str, importance_score: float) -> dict[str, Any]:
