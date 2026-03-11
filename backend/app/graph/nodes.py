@@ -52,6 +52,10 @@ from app.schemas.graph import (
 
 logger = logging.getLogger(__name__)
 _WEB_SEARCH_HINT = "Выполни поиск в интернете"
+_STRUCTURED_PARSE_MARKERS = (
+    "Structured JSON payload not found in LLM response:",
+    "No valid JSON found in LLM response:",
+)
 _EXPORT_SUBJECT_RE = re.compile(r"(?:pdf|пдф|excel|xlsx|документ|файл)", re.IGNORECASE)
 _EXPORT_READY_RE = re.compile(
     r"(?:успешно\s+создан|создан|готов|готов\s+к\s+скачиванию|приложен|вложен|attached|uploaded)",
@@ -294,13 +298,14 @@ async def router_node(state: dict) -> dict:
         }
 
     # 1. Try deterministic shortcuts first (fast path, no LLM call)
-    deterministic = _deterministic_route(user_message)
-    if deterministic is not None:
-        _dev_log("router_deterministic", decision=deterministic.decision.value)
-        return {
-            "router_output": deterministic,
-            "next_step": deterministic.decision.value,
-        }
+    if settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
+        deterministic = _deterministic_route(user_message)
+        if deterministic is not None:
+            _dev_log("router_deterministic", decision=deterministic.decision.value)
+            return {
+                "router_output": deterministic,
+                "next_step": deterministic.decision.value,
+            }
 
     # 2. Load user integrations & dynamic tools for context
     integrations_block = ""
@@ -403,48 +408,64 @@ async def router_node(state: dict) -> dict:
             steps_count=len(router_output.steps),
             confidence=router_output.confidence,
         )
+        if (
+            settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT
+            and router_output.decision in {RouterDecision.CLARIFY, RouterDecision.CHAT}
+        ):
+            live_export_override = _fallback_live_data_export_route(user_message)
+            if live_export_override is not None:
+                _dev_log(
+                    "router_override_live_export",
+                    original_decision=router_output.decision.value,
+                    steps_count=len(live_export_override.steps),
+                )
+                return {
+                    "router_output": live_export_override,
+                    "next_step": "tool",
+                }
         return {
             "router_output": router_output,
             "next_step": router_output.decision.value,
         }
     except Exception as exc:
         logger.warning("Router LLM failed: %s, using fallback routing", exc)
-        salvaged = _extract_router_output_from_exception(exc, user_message)
-        if salvaged is not None:
-            _dev_log(
-                "router_fallback_salvaged",
-                decision=salvaged.decision.value,
-                steps_count=len(salvaged.steps),
-            )
-            return {
-                "router_output": salvaged,
-                "next_step": salvaged.decision.value,
-            }
-        live_export_fallback = _fallback_live_data_export_route(user_message)
-        if live_export_fallback is not None:
-            _dev_log(
-                "router_fallback_live_export",
-                decision=live_export_fallback.decision.value,
-                steps_count=len(live_export_fallback.steps),
-            )
-            return {
-                "router_output": live_export_fallback,
-                "next_step": "tool",
-            }
-        # If the message clearly asks for web search, don't lose the intent
-        if _is_web_search_intent(user_message):
-            query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
-            _dev_log("router_fallback_web_search", query=query[:120])
-            fallback = RouterOutput(
-                decision=RouterDecision.WEB_SEARCH,
-                steps=[ToolStep(tool="web_search", arguments={"query": query})],
-                response_hint=_WEB_SEARCH_HINT,
-                confidence=0.5,
-            )
-            return {
-                "router_output": fallback,
-                "next_step": "web_search",
-            }
+        if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
+            salvaged = _extract_router_output_from_exception(exc, user_message)
+            if salvaged is not None:
+                _dev_log(
+                    "router_fallback_salvaged",
+                    decision=salvaged.decision.value,
+                    steps_count=len(salvaged.steps),
+                )
+                return {
+                    "router_output": salvaged,
+                    "next_step": salvaged.decision.value,
+                }
+            live_export_fallback = _fallback_live_data_export_route(user_message)
+            if live_export_fallback is not None:
+                _dev_log(
+                    "router_fallback_live_export",
+                    decision=live_export_fallback.decision.value,
+                    steps_count=len(live_export_fallback.steps),
+                )
+                return {
+                    "router_output": live_export_fallback,
+                    "next_step": "tool",
+                }
+            # If the message clearly asks for web search, don't lose the intent
+            if _is_web_search_intent(user_message):
+                query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
+                _dev_log("router_fallback_web_search", query=query[:120])
+                fallback = RouterOutput(
+                    decision=RouterDecision.WEB_SEARCH,
+                    steps=[ToolStep(tool="web_search", arguments={"query": query})],
+                    response_hint=_WEB_SEARCH_HINT,
+                    confidence=0.5,
+                )
+                return {
+                    "router_output": fallback,
+                    "next_step": "web_search",
+                }
         fallback = RouterOutput(decision=RouterDecision.CHAT, confidence=0.3)
         return {
             "router_output": fallback,
@@ -1400,10 +1421,10 @@ def _requested_export_kind(user_message: str) -> str | None:
 def _extract_non_json_answer_from_exception(exc: Exception) -> str:
     """Extract raw assistant text from structured parse exceptions when possible."""
     text = str(exc or "")
-    marker = "No valid JSON found in LLM response:"
-    idx = text.find(marker)
-    if idx == -1:
+    marker = next((m for m in _STRUCTURED_PARSE_MARKERS if m in text), None)
+    if marker is None:
         return ""
+    idx = text.find(marker)
     candidate = text[idx + len(marker):].strip()
 
     # Try extracting `answer` field from JSON-like text first.
@@ -1425,10 +1446,10 @@ def _extract_non_json_answer_from_exception(exc: Exception) -> str:
 def _extract_router_output_from_exception(exc: Exception, user_message: str) -> RouterOutput | None:
     """Recover a minimal RouterOutput from malformed JSON text in exception message."""
     text = str(exc or "")
-    marker = "No valid JSON found in LLM response:"
-    idx = text.find(marker)
-    if idx == -1:
+    marker = next((m for m in _STRUCTURED_PARSE_MARKERS if m in text), None)
+    if marker is None:
         return None
+    idx = text.find(marker)
 
     candidate = text[idx + len(marker):].strip()
     if not candidate:
