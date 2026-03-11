@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     GUARDRAILS_BLOCK_PROMPT_INJECTION: bool = True
 
     # --- LangGraph ---
-    LANGGRAPH_MAX_ITERATIONS: int = 3
+    LANGGRAPH_MAX_ITERATIONS: int = 5
     LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
 
     # --- Tool Vector Registry (Milvus semantic tool search) ---
