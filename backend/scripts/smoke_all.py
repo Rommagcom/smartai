@@ -18,6 +18,7 @@ from scripts.smoke_tool_routing import run as run_tool_routing
 from scripts.smoke_web_compose_fallback import run as run_web_compose_fallback
 from scripts.smoke_export_claim_guard import run as run_export_claim_guard
 from scripts.smoke_export_claim_guard_e2e import run as run_export_claim_guard_e2e
+from scripts.smoke_export_reenqueue_guard import run as run_export_reenqueue_guard
 from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
 
 
@@ -104,6 +105,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_EXPORT_CLAIM_GUARD_E2E")
         await run_export_claim_guard_e2e()
+
+        print("RUN_SMOKE_EXPORT_REENQUEUE_GUARD")
+        await run_export_reenqueue_guard()
 
         print("RUN_SMOKE_ROUTER_CLARIFY_LIVE_EXPORT_OVERRIDE")
         await run_router_clarify_live_export_override()
