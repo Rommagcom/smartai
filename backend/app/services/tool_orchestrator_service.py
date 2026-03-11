@@ -61,6 +61,31 @@ def _looks_like_prompt(text: str) -> bool:
     return bool(_PROMPT_VERBS.match(text.strip()))
 
 
+def _looks_like_structured_payload(text: str) -> bool:
+    """Detect JSON/XML-like payloads that should be summarized before document generation."""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+
+    if normalized.startswith("{") or normalized.startswith("["):
+        return True
+
+    lowered = normalized.lower()
+    if lowered.startswith("<?xml") or lowered.startswith("<html"):
+        return True
+    if re.search(r"</?[a-zA-Z][\w:-]*[^>]*>", normalized[:1000]):
+        return True
+
+    # Heuristic for JSON-like plain strings that may not start with '{'
+    if (
+        ("\"" in normalized and ":" in normalized and "{" in normalized)
+        or (normalized.count(":") >= 8 and normalized.count("{") + normalized.count("[") >= 2)
+    ):
+        return True
+
+    return False
+
+
 async def _expand_prompt_to_content(prompt_text: str, title_hint: str = "") -> str:
     """Expand a prompt-like instruction into actual document content via LLM."""
     try:
@@ -68,8 +93,9 @@ async def _expand_prompt_to_content(prompt_text: str, title_hint: str = "") -> s
         system = (
             "Ты готовишь содержимое для документа (PDF/Excel). "
             "Пользователь дал инструкцию, что написать. "
-            "Напиши развёрнутый, информативный текст на русском языке. "
-            "Используй абзацы, списки где уместно. "
+            "Напиши развёрнутый, информативный текст на русском языке в структурированном формате. "
+            "Используй markdown-подобную структуру: заголовки (##), списки, нумерованные шаги, таблицы при необходимости. "
+            "Сначала короткое резюме, затем секции по теме, в конце практические выводы. "
             "НЕ пиши 'Вот текст для PDF' — просто выдай сам контент."
         )
         if title_hint:
@@ -795,6 +821,36 @@ class ToolOrchestratorService:
         }
 
     @staticmethod
+    async def _summarize_for_document(body_text: str, title_hint: str = "") -> str:
+        """Summarize raw payload text into structured document content via LLM."""
+        from app.llm import llm_provider
+
+        prompt = (
+            "Ты создаёшь документа (PDF/Excel). "
+            "Проанализируй данные ниже и сформируй структурированный, читабельный текст документа. "
+            "Форматируй markdown-подобно: заголовки (##), маркированные/нумерованные списки, при уместности таблицы. "
+            "Добавь секции: 'Краткое резюме', 'Ключевые факты', 'Выводы/Рекомендации'. "
+            "НЕ выводи сырой JSON/XML. Извлеки ключевые значения. "
+            "НЕ выводи инструкции как выгружать данные в PDF/Excel, просто представь их в удобном виде. "
+            "Будь конкретным и понятным."
+        )
+        if title_hint:
+            prompt += f"\nТема документа: {title_hint}"
+
+        result = await asyncio.wait_for(
+            llm_provider.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": body_text[:12000]},
+                ],
+                temperature=0.3,
+                retries=1,
+            ),
+            timeout=60,
+        )
+        return str(result or "").strip()
+
+    @staticmethod
     async def _maybe_summarize_content(raw_content: object, title_hint: str = "") -> str:
         """If content is a raw API dict/large JSON, summarize with LLM.
         If content is a short prompt-like string, expand it with LLM."""
@@ -806,11 +862,19 @@ class ToolOrchestratorService:
                 try:
                     raw_content = json.loads(text)
                 except (json.JSONDecodeError, ValueError):
-                    return text
+                    # Keep as string and let structured-payload summarization handle it below.
+                    pass
             # Heuristic: if short text looks like a prompt/instruction, expand with LLM
             elif len(text) < 200 and not any(ch in text for ch in "\n|;") and _looks_like_prompt(text):
                 return await _expand_prompt_to_content(text, title_hint)
             else:
+                if _looks_like_structured_payload(text):
+                    try:
+                        summary = await ToolOrchestratorService._summarize_for_document(text, title_hint)
+                        if summary:
+                            return summary
+                    except Exception:
+                        logger.warning("LLM summarize for structured string payload failed", exc_info=True)
                 return text
 
         if not isinstance(raw_content, dict):
@@ -824,28 +888,7 @@ class ToolOrchestratorService:
 
         # Summarize with LLM
         try:
-            from app.llm import llm_provider
-            prompt = (
-                "Ты создаёшь документа (PDF/Excel). "
-                "Проанализируй данные ниже и сформируй КРАТКИЙ, но ИНФОРМАТИВНЫЙ текст. "
-                "НЕ выводи сырой JSON/XML. Извлеки ключевые значения. "
-                "Используй списки, абзацы. Будь лаконичным."
-            )
-            if title_hint:
-                prompt += f"\nТема документа: {title_hint}"
-
-            result = await asyncio.wait_for(
-                llm_provider.chat(
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": body_text[:12000]},
-                    ],
-                    temperature=0.3,
-                    retries=1,
-                ),
-                timeout=60,
-            )
-            summary = (result or "").strip()
+            summary = await ToolOrchestratorService._summarize_for_document(body_text, title_hint)
             if summary:
                 return summary
         except Exception:
