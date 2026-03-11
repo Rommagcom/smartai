@@ -1006,8 +1006,6 @@ async def output_node(state: dict) -> dict:
     final_answer = state.get("final_answer", "")
     user_message = state.get("user_message", "")
     user_id = state.get("user_id")
-    web_fetch_content = str(state.get("web_fetch_content") or "").strip()
-    web_search_results = state.get("web_search_results") or []
     existing_calls = state.get("tool_calls_log") or []
     existing_artifacts = state.get("artifacts") or []
 
@@ -1023,15 +1021,15 @@ async def output_node(state: dict) -> dict:
         result = GuardrailResult(verdict=GuardrailVerdict.PASS)
 
     extra_calls: list[dict] = []
-    should_export = bool(final_answer) and bool(web_fetch_content or web_search_results)
-    if should_export:
-        export_kind = _requested_export_kind(user_message)
-        already_has_export_call = any(
-            str(call.get("tool") or "").strip().lower() in {"pdf_create", "excel_create"}
-            for call in existing_calls
-            if isinstance(call, dict)
+    export_kind = _requested_export_kind(user_message)
+    should_export = bool(export_kind) and bool(final_answer)
+    if should_export and user_id:
+        should_reenqueue = _should_reenqueue_export(
+            export_kind=export_kind,
+            existing_calls=existing_calls,
+            existing_artifacts=existing_artifacts,
         )
-        if export_kind and not already_has_export_call and user_id:
+        if should_reenqueue:
             try:
                 async with AsyncSessionLocal() as db:
                     user_res = await db.execute(select(User).where(User.id == user_id))
@@ -1066,8 +1064,8 @@ async def output_node(state: dict) -> dict:
     all_calls = [*existing_calls, *extra_calls]
     all_artifacts = [*existing_artifacts, *_extract_artifacts(extra_calls)]
 
-    if extra_calls:
-        status_text = "PDF" if _requested_export_kind(user_message) == "pdf" else "Excel"
+    if extra_calls and export_kind and _has_successful_export_call(extra_calls, export_kind):
+        status_text = "PDF" if export_kind == "pdf" else "Excel"
         final_answer = (
             f"{final_answer}\n\n"
             f"{status_text} поставлен в очередь и будет отправлен отдельным сообщением."
@@ -1421,6 +1419,54 @@ def _requested_export_kind(user_message: str) -> str | None:
     if re.search(r"\b(?:excel|xlsx|таблиц)\b|\bв\s+excel\b", lowered):
         return "excel"
     return None
+
+
+def _export_tool_name(export_kind: str) -> str:
+    return "pdf_create" if export_kind == "pdf" else "excel_create"
+
+
+def _has_matching_artifact(export_kind: str, artifacts: list[dict]) -> bool:
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        mime = str(item.get("mime_type") or "").lower()
+        if export_kind == "pdf" and "pdf" in mime:
+            return True
+        if export_kind == "excel" and ("spreadsheet" in mime or "excel" in mime):
+            return True
+        file_name = str(item.get("file_name") or "").lower()
+        if export_kind == "pdf" and file_name.endswith(".pdf"):
+            return True
+        if export_kind == "excel" and (file_name.endswith(".xlsx") or file_name.endswith(".xls")):
+            return True
+    return False
+
+
+def _has_successful_export_call(calls: list[dict], export_kind: str) -> bool:
+    tool_name = _export_tool_name(export_kind)
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        if str(call.get("tool") or "").strip().lower() != tool_name:
+            continue
+        if not bool(call.get("success")):
+            continue
+        result = call.get("result") if isinstance(call.get("result"), dict) else {}
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"queued", "deduplicated", "ok", "created", "processing"}:
+            return True
+        if result.get("file_base64"):
+            return True
+    return False
+
+
+def _should_reenqueue_export(export_kind: str, existing_calls: list[dict], existing_artifacts: list[dict]) -> bool:
+    """Re-enqueue export if user asked for it and no successful signal is present."""
+    if _has_matching_artifact(export_kind, existing_artifacts):
+        return False
+    if _has_successful_export_call(existing_calls, export_kind):
+        return False
+    return True
 
 
 def _extract_non_json_answer_from_exception(exc: Exception) -> str:
