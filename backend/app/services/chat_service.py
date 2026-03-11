@@ -2696,13 +2696,62 @@ class ChatService:
         try:
             result = await agent_graph.ainvoke(initial_state)
         except Exception:
-            logger.exception("LangGraph agent failed, falling back to legacy respond")
+            logger.exception("LangGraph agent failed, attempting structured fallback")
+
+            manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
+            fast_tool = await self._maybe_fast_tool_answer(
+                db=db,
+                user=user,
+                user_message=user_message,
+                manual_tool_calls=manual_tool_calls,
+            )
+            if fast_tool:
+                answer, ft_tool_calls, ft_artifacts = fast_tool
+                return answer, [], [], ft_tool_calls, ft_artifacts
+
+            logger.exception("Structured fallback unavailable, falling back to legacy respond")
             return await self.respond(db, user, session_id, user_message)
 
         # Extract results in the legacy format
         final_answer = str(result.get("final_answer") or "")
         tool_calls_log = result.get("tool_calls_log") or []
         artifacts = result.get("artifacts") or []
+
+        # If graph path degraded and produced no tool calls, try executing
+        # explicit structured directives via the current request DB session.
+        if not tool_calls_log:
+            manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
+            fast_tool = await self._maybe_fast_tool_answer(
+                db=db,
+                user=user,
+                user_message=user_message,
+                manual_tool_calls=manual_tool_calls,
+            )
+            if fast_tool:
+                fast_answer, fast_calls, fast_artifacts = fast_tool
+                return fast_answer, [], [], fast_calls, fast_artifacts
+
+        # Graph-first safety bridge: if final text still contains explicit
+        # inline directives, execute them and normalize the user-facing answer.
+        if not tool_calls_log and final_answer:
+            inline_cron = await self._maybe_execute_llm_inline_cron(
+                db=db,
+                user=user,
+                llm_answer=final_answer,
+                manual_tool_calls=[],
+            )
+            if inline_cron:
+                final_answer, tool_calls_log, artifacts = inline_cron
+
+        if not tool_calls_log and final_answer:
+            inline_integration = await self._maybe_execute_llm_inline_integration(
+                db=db,
+                user=user,
+                llm_answer=final_answer,
+                manual_tool_calls=[],
+            )
+            if inline_integration:
+                final_answer, tool_calls_log, artifacts = inline_integration
 
         # Safety net: re-extract artifacts from tool_calls_log if lost during
         # LangGraph state propagation (e.g. reducer replaced list with []).

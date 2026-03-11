@@ -20,6 +20,7 @@ from scripts.smoke_export_claim_guard import run as run_export_claim_guard
 from scripts.smoke_export_claim_guard_e2e import run as run_export_claim_guard_e2e
 from scripts.smoke_export_reenqueue_guard import run as run_export_reenqueue_guard
 from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
+from scripts.smoke_graph_structured_fallback import run as run_graph_structured_fallback
 
 
 def reset_scheduler() -> None:
@@ -111,6 +112,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_ROUTER_CLARIFY_LIVE_EXPORT_OVERRIDE")
         await run_router_clarify_live_export_override()
+
+        print("RUN_SMOKE_GRAPH_STRUCTURED_FALLBACK")
+        await run_graph_structured_fallback()
 
         print("SMOKE_ALL_OK")
     finally:
