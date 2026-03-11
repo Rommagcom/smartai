@@ -297,6 +297,16 @@ async def router_node(state: dict) -> dict:
             "next_step": "web_search",
         }
 
+    # 0. Hard structured command fast-path (graph-only command contract).
+    # This path is intentionally independent from generic deterministic shortcuts.
+    hard_route = _hard_structured_route(user_message)
+    if hard_route is not None:
+        _dev_log("router_hard_structured", steps_count=len(hard_route.steps))
+        return {
+            "router_output": hard_route,
+            "next_step": hard_route.decision.value,
+        }
+
     # 1. Try deterministic shortcuts first (fast path, no LLM call)
     if settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
         deterministic = _deterministic_route(user_message)
@@ -1339,6 +1349,34 @@ def _deterministic_route(user_message: str) -> RouterOutput | None:
         )
 
     return None
+
+
+def _hard_structured_route(user_message: str) -> RouterOutput | None:
+    """Route explicit command-style directives directly to tool execution.
+
+    This ensures graph-first behavior for strongly-typed user directives
+    even when planner/LLM is unavailable.
+    """
+    from app.services.chat_service import ChatService
+
+    steps = ChatService._direct_route_from_message(user_message)
+    if not steps:
+        return None
+
+    tool_steps = [
+        ToolStep(tool=s["tool"], arguments=s.get("arguments", {}))
+        for s in steps
+        if isinstance(s, dict) and s.get("tool")
+    ]
+    if not tool_steps:
+        return None
+
+    return RouterOutput(
+        decision=RouterDecision.TOOL,
+        steps=tool_steps,
+        response_hint="Выполнить явную команду пользователя",
+        confidence=0.99,
+    )
 
 
 def _build_enriched_system_prompt(
