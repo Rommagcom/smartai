@@ -64,5 +64,18 @@ def setup_logging() -> None:
     ):
         logging.getLogger(logger_name).setLevel(third_party_level)
 
+    # Trafilatura can be extremely noisy on DEBUG and pollutes request logs.
+    # Keep it informative by default unless explicit deep-debug is enabled.
+    trafilatura_level = logging.DEBUG if settings.DEV_VERBOSE_LOGGING else logging.INFO
+    for logger_name in (
+        "trafilatura",
+        "trafilatura.main_extractor",
+        "trafilatura.htmlprocessing",
+        "trafilatura.readability_lxml",
+        "trafilatura.external",
+        "trafilatura.core",
+    ):
+        logging.getLogger(logger_name).setLevel(trafilatura_level)
+
     # Reduce poll endpoint noise in uvicorn access log
     logging.getLogger("uvicorn.access").addFilter(_PollAccessFilter())

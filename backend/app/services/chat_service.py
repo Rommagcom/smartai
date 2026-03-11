@@ -1950,40 +1950,61 @@ class ChatService:
         if not text:
             return text
 
-        has_artifact = bool(artifacts)
-        if has_artifact:
+        if artifacts:
             return text
 
-        has_pdf_queue = False
+        has_export_success = False
+        has_export_queue = False
         for call in tool_calls:
             if not bool(call.get("success")):
                 continue
-            if str(call.get("tool") or "").strip().lower() != "pdf_create":
+            tool_name = str(call.get("tool") or "").strip().lower()
+            if tool_name not in {"pdf_create", "excel_create"}:
                 continue
+            has_export_success = True
             result = call.get("result") if isinstance(call.get("result"), dict) else {}
             status = str(result.get("status") or "").strip().lower()
             if status in {"queued", "deduplicated"}:
-                has_pdf_queue = True
+                has_export_queue = True
                 break
+
+        queue_note = (
+            "Файл поставлен в очередь и будет отправлен отдельным сообщением после обработки. "
+            "Текущий ответ не содержит вложения."
+        )
+        if has_export_queue:
+            # Queue state is authoritative: avoid contradictory long text
+            # like "я не могу сгенерировать PDF" in the same response.
+            return queue_note
+
+        if not has_export_success:
+            return text
 
         claim_re = re.compile(
             r"(?:pdf|пдф|файл).{0,40}(?:приложен|вложен|прикрепл(?:ен|ён)|attached|uploaded|готов\s+к\s+выгрузке)",
             re.IGNORECASE | re.DOTALL,
         )
-        if not claim_re.search(text):
+        cannot_export_re = re.compile(
+            r"(?:не\s+могу|не\s+получается|cannot)\b.{0,60}(?:pdf|пдф|файл)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if cannot_export_re.search(text):
+            return (
+                "PDF-задача принята. Документ будет отправлен отдельным сообщением, "
+                "как только обработка завершится."
+            )
+
+        note_text = "Примечание: PDF-файл не был создан этим ответом. Сформировать PDF можно отдельной командой или запросом."
+        if note_text in text:
             return text
 
-        if has_pdf_queue:
-            return (
-                text
-                + "\n\n"
-                + "Примечание: файл ещё не приложен. PDF поставлен в очередь и будет отправлен отдельным сообщением после обработки."
-            )
+        if not claim_re.search(text):
+            return text
 
         return (
             text
             + "\n\n"
-            + "Примечание: PDF-файл не был создан этим ответом. Сформировать PDF можно отдельной командой или запросом."
+            + note_text
         )
 
     @staticmethod

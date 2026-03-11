@@ -593,6 +593,7 @@ class ToolOrchestratorService:
 
     def _handlers(self) -> dict:
         return {
+            "web_search": self._web_search,
             "pdf_create": self._pdf_create,
             "excel_create": self._excel_create,
             "memory_add": self._memory_add,
@@ -625,6 +626,55 @@ class ToolOrchestratorService:
             "dynamic_tool_delete_all": self._dynamic_tool_delete_all,
             # Register API Tool (with Milvus vector storage)
             "register_api_tool": self._register_api_tool,
+        }
+
+    async def _web_search(self, db: AsyncSession, user: User, arguments: dict) -> dict:
+        """Tool-chain web search handler for cases when planner emits web_search as a step."""
+        del db, user
+
+        from app.services.web_search_service import web_search_service
+
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("web_search requires non-empty query")
+
+        max_results_raw = arguments.get("max_results", 5)
+        try:
+            max_results = int(max_results_raw)
+        except Exception:
+            max_results = 5
+        max_results = max(1, min(max_results, 10))
+
+        result = await web_search_service.search(query=query, max_results=max_results)
+        items = result.get("results") if isinstance(result.get("results"), list) else []
+
+        lines: list[str] = []
+        for idx, item in enumerate(items[:8], start=1):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "Без названия").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            url = str(item.get("url") or "").strip()
+            line = f"{idx}) {title}"
+            if snippet:
+                line += f"\n{snippet}"
+            if url:
+                line += f"\nИсточник: {url}"
+            lines.append(line)
+
+        body = "\n\n".join(lines).strip()
+        if not body:
+            body = (
+                f"По запросу '{query}' релевантные результаты не найдены. "
+                "Сформируй документ с этим статусом и рекомендацией уточнить запрос."
+            )
+
+        return {
+            "query": query,
+            "results": items,
+            "results_count": int(result.get("results_count") or len(items)),
+            "body": body,
+            "content": body,
         }
 
     async def _integration_onboarding_connect(self, db: AsyncSession, user: User, arguments: dict) -> dict:

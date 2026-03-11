@@ -420,6 +420,17 @@ async def router_node(state: dict) -> dict:
                 "router_output": salvaged,
                 "next_step": salvaged.decision.value,
             }
+        live_export_fallback = _fallback_live_data_export_route(user_message)
+        if live_export_fallback is not None:
+            _dev_log(
+                "router_fallback_live_export",
+                decision=live_export_fallback.decision.value,
+                steps_count=len(live_export_fallback.steps),
+            )
+            return {
+                "router_output": live_export_fallback,
+                "next_step": "tool",
+            }
         # If the message clearly asks for web search, don't lose the intent
         if _is_web_search_intent(user_message):
             query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
@@ -864,7 +875,11 @@ async def compose_node(state: dict) -> dict:
             max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
         )
     except Exception as exc:
-        logger.warning("Compose reflexion failed: %s", exc)
+        err_text = str(exc or "")
+        if "No valid JSON found in LLM response" in err_text:
+            logger.info("Compose reflexion used fallback synthesis (non-JSON output)")
+        else:
+            logger.warning("Compose reflexion failed: %s", exc)
         # 1) If web context exists, run non-structured synthesis first.
         # Structured parse errors often contain a truncated preview (~200 chars).
         if web_fetch_content or web_search_results:
@@ -1160,6 +1175,65 @@ _WEB_SEARCH_RE = re.compile(
 def _is_web_search_intent(user_message: str) -> bool:
     """Check if user message clearly asks for a web search."""
     return bool(_WEB_SEARCH_RE.search(user_message or ""))
+
+
+_LIVE_DATA_RE = re.compile(
+    r"\b(?:погод|weather|прогноз|курс\s+валют|валют|usd|eur|kzt|новост|цена|стоимост|сегодня|актуальн)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_live_data_intent(user_message: str) -> bool:
+    return bool(_LIVE_DATA_RE.search(user_message or ""))
+
+
+def _fallback_live_data_export_route(user_message: str) -> RouterOutput | None:
+    """Build deterministic web_search -> export chain when router LLM fails."""
+    export_kind = _requested_export_kind(user_message)
+    lowered = str(user_message or "").strip().lower()
+    if not export_kind:
+        has_export_verb = bool(
+            re.search(
+                r"\b(?:сделай|создай|сформируй|сгенерируй|выгрузи|экспорт|сохрани|оформи|отправ|пришли|generate|create|export|attach)\b",
+                lowered,
+            )
+        )
+        if has_export_verb and re.search(r"\b(?:pdf|пдф)\b|\bв\s+pdf\b", lowered):
+            export_kind = "pdf"
+        elif has_export_verb and re.search(r"\b(?:excel|xlsx|таблиц)\b|\bв\s+excel\b", lowered):
+            export_kind = "excel"
+    if export_kind not in {"pdf", "excel"}:
+        return None
+    if not _is_live_data_intent(user_message):
+        return None
+
+    query = str(user_message or "").strip()
+    if not query:
+        return None
+
+    if export_kind == "pdf":
+        export_tool = "pdf_create"
+        file_name = "weather-report.pdf"
+    else:
+        export_tool = "excel_create"
+        file_name = "weather-report.xlsx"
+
+    return RouterOutput(
+        decision=RouterDecision.TOOL,
+        steps=[
+            ToolStep(tool="web_search", arguments={"query": query}),
+            ToolStep(
+                tool=export_tool,
+                arguments={
+                    "title": "Актуальные данные",
+                    "filename": file_name,
+                    "content": "$prev.body",
+                },
+            ),
+        ],
+        response_hint="Сначала получи актуальные данные, затем сформируй файл",
+        confidence=0.55,
+    )
 
 
 _SMALL_TALK_RE = re.compile(
