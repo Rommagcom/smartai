@@ -142,6 +142,9 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("doc_ask", self.doc_ask))
         application.add_handler(CommandHandler("doc_delete", self.doc_delete))
         application.add_handler(CommandHandler("doc_delete_all", self.doc_delete_all))
+        application.add_handler(CommandHandler("skill_list", self.skill_list))
+        application.add_handler(CommandHandler("skill_delete", self.skill_delete))
+        application.add_handler(CommandHandler("skill_delete_all", self.skill_delete_all))
         application.add_handler(CommandHandler("cron_add", self.cron_add))
         application.add_handler(CommandHandler("cron_list", self.cron_list))
         application.add_handler(CommandHandler("cron_del", self.cron_del))
@@ -1006,6 +1009,9 @@ class TelegramAdapter(MessengerAdapter):
             "/doc_ask <question>\n"
             "/doc_delete <filename>\n"
             "/doc_delete_all\n"
+            "/skill_list\n"
+            "/skill_delete <skill_name>\n"
+            "/skill_delete_all\n"
             "/cron_add <name>|<cron>|<action_type>|<payload_json>\n"
             "/cron_list, /cron_del <job_id>\n"
             "/integrations_add <service>|<auth_json>|<endpoints_json>\n"
@@ -1497,6 +1503,68 @@ class TelegramAdapter(MessengerAdapter):
         self._dev_log("doc_delete_all", deleted_count=deleted_count)
         await update.effective_message.reply_text(
             f"Удалены все загруженные документы. Удалено чанков: {deleted_count}."
+        )
+
+    async def skill_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_list(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            await update.effective_message.reply_text("Dynamic Skills пока не зарегистрированы.")
+            return
+
+        lines = ["Dynamic Skills:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or "skill"
+            method = str(item.get("method") or "").strip() or "UNKNOWN"
+            lines.append(f"- {name} ({method})")
+        if len(items) > 30:
+            lines.append(f"- ...и еще {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def skill_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        skill_name = " ".join(context.args).strip()
+        if not skill_name:
+            await update.effective_message.reply_text("Использование: /skill_delete <skill_name>")
+            return
+
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete(token, skill_name)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        await update.effective_message.reply_text(f"Dynamic Skill '{skill_name}' удален ✅")
+
+    async def skill_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        await update.effective_message.reply_text(
+            f"Удалены все Dynamic Skills. Количество: {deleted_count}."
         )
 
     async def cron_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
