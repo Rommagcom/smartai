@@ -1289,21 +1289,42 @@ class TelegramAdapter(MessengerAdapter):
         doc = update.effective_message.document
         tg_file = await context.bot.get_file(doc.file_id)
         content = await tg_file.download_as_bytearray()
+        filename = str(doc.file_name or "document.bin").strip() or "document.bin"
+        lowered_name = filename.lower()
+        is_skill_archive = lowered_name.endswith(".zip") and (
+            lowered_name == "add_skill.zip" or "skill" in lowered_name
+        )
         try:
-            res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
+            if is_skill_archive:
+                res = await self.client.skills_upload(token, filename, bytes(content))
+            else:
+                res = await self.client.documents_upload(token, filename, bytes(content))
         except httpx.TimeoutException:
-            await update.effective_message.reply_text(
-                "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+            timeout_message = (
+                "Регистрация Dynamic Skill заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+                if is_skill_archive
+                else "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
             )
+            await update.effective_message.reply_text(timeout_message)
             return
         except Exception:
             logger.exception("telegram document upload failed")
-            await update.effective_message.reply_text(
-                "Внутренняя ошибка при загрузке документа. Попробуйте позже."
+            fail_message = (
+                "Внутренняя ошибка при регистрации Dynamic Skill. Попробуйте позже."
+                if is_skill_archive
+                else "Внутренняя ошибка при загрузке документа. Попробуйте позже."
             )
+            await update.effective_message.reply_text(fail_message)
             return
         if res.get("status") != 200:
             await self._reply_api_result(update, res)
+            return
+
+        if is_skill_archive:
+            payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+            tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
+            tool_name = str(tool.get("name") or "skill")
+            await update.effective_message.reply_text(f"Dynamic Skill зарегистрирован ✅ Имя: {tool_name}")
             return
 
         payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}

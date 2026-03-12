@@ -35,6 +35,7 @@ from scripts.smoke_router_tool_export_salvage import run as run_router_tool_expo
 from scripts.smoke_memory_context_priority import run as run_memory_context_priority
 from scripts.smoke_pdf_content_sanitize import run as run_pdf_content_sanitize
 from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
+from scripts.smoke_dynamic_skill_package import run as run_dynamic_skill_package
 
 
 def reset_scheduler() -> None:
@@ -155,6 +156,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_DESTRUCTIVE_PLANNER_GUARD")
         run_destructive_planner_guard()
+
+        print("RUN_SMOKE_DYNAMIC_SKILL_PACKAGE")
+        await run_dynamic_skill_package()
 
         print("RUN_SMOKE_MEMORY_CONTEXT_PRIORITY")
         await run_memory_context_priority()
