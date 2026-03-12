@@ -67,14 +67,12 @@ def sanitize_false_attachment_claims(answer: str, tool_calls: list[dict], artifa
 
     if _has_queued_export(tool_calls):
         return (
-            "Файл поставлен в очередь и будет отправлен отдельным сообщением после обработки. "
-            "Текущий ответ не содержит вложения."
+            "Файл поставлен в очередь и будет отправлен после обработки. "
         )
 
     if _has_any_export_success(tool_calls):
         return (
             f"{_delivery_subject(tool_calls)} сформирован и будет отправлен отдельным сообщением. "
-            "Текущий ответ не содержит вложения."
         )
 
     return text
