@@ -1,0 +1,38 @@
+# Override for using Ollama on host machine (GPU) while all SmartAI services run in containers.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+services:
+  api:
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - redis
+
+  scheduler-leader:
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - redis
+
+  worker:
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - redis
+
+  # Disable local Ollama container in this mode.
+  ollama:
+    profiles: ["local-ollama-disabled"]
