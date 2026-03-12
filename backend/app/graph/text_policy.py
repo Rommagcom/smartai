@@ -14,6 +14,13 @@ _SMALL_TALK_RE = re.compile(
 )
 
 _COMPLETENESS_RE = re.compile(r"COMPLETENESS:\s*(COMPLETE|INCOMPLETE)", re.IGNORECASE)
+_TOOL_BLOCK_RE = re.compile(
+    r"<(?:cron_add|pdf_create|excel_create|doc_ask|web_search|function_calls|invoke)[\s\S]*?>"
+    r"[\s\S]*?"
+    r"</(?:cron_add|pdf_create|excel_create|doc_ask|web_search|function_calls|invoke)>",
+    re.IGNORECASE,
+)
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.IGNORECASE)
 
 
 def looks_like_small_talk(text: str) -> bool:
@@ -35,14 +42,21 @@ def sanitize_llm_answer(text: str) -> str:
         return "Не удалось сформировать ответ. Попробуйте уточнить запрос."
 
     original = cleaned
+    # Remove explicit tool command payloads that must never be shown to users.
+    cleaned = _TOOL_BLOCK_RE.sub("", cleaned)
     cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
+    # Strip fenced blocks too: fallback paths may return raw command snippets in markdown.
+    cleaned = _CODE_FENCE_RE.sub("", cleaned)
     cleaned = cleaned.strip()
     if cleaned:
         return cleaned
 
     logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
-    fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
+    fallback = _TOOL_BLOCK_RE.sub("", original)
+    fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", fallback, flags=re.IGNORECASE)
+    fallback = _CODE_FENCE_RE.sub("", fallback)
+    fallback = fallback.strip()
     return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
 
 
