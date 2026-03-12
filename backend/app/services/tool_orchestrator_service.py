@@ -193,6 +193,38 @@ class ToolOrchestratorService:
     _DOC_VALUE_MAX_LEN = 2000
     _DOC_LIST_MAX_ITEMS = 12
     _DOC_DICT_MAX_KEYS = 20
+    _DOC_LINK_LINE_RE = re.compile(r"^\s*\[.*?\]\(\s*data:application/(?:pdf|octet-stream);base64,[^\)]*\)\s*$", re.IGNORECASE)
+    _DOC_BASE64_INLINE_RE = re.compile(r"data:application/(?:pdf|octet-stream);base64,[A-Za-z0-9+/=]+", re.IGNORECASE)
+    _DOC_TECH_NOTICE_RE = re.compile(
+        r"(?:pdf[-\s]?версия|pdf\s+version|скачать\s+pdf|download\s+pdf|"
+        r"доступн\w*\s+по\s+ссылк\w*|contains\s+.*base64|содержит\s+.*base64|"
+        r"закодир\w*\s+в\s+base64|кодир\w*\s+в\s+base64|при\s+нажатии\s+браузер)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _sanitize_document_text(cls, text: str) -> str:
+        """Strip transport/download instructions so exported files contain only content."""
+        raw = str(text or "")
+        if not raw.strip():
+            return ""
+
+        cleaned = cls._DOC_BASE64_INLINE_RE.sub("", raw)
+        lines: list[str] = []
+        for line in cleaned.splitlines():
+            current = str(line or "").strip()
+            if not current:
+                lines.append("")
+                continue
+            if cls._DOC_LINK_LINE_RE.search(current):
+                continue
+            if cls._DOC_TECH_NOTICE_RE.search(current):
+                continue
+            lines.append(line.rstrip())
+
+        merged = "\n".join(lines)
+        merged = re.sub(r"\n{3,}", "\n\n", merged)
+        return merged.strip()
 
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
@@ -263,7 +295,7 @@ class ToolOrchestratorService:
             "Ты роутер инструментов AI-ассистента. Верни строго JSON без markdown. "
             "Формат: {\"use_tools\": bool, \"steps\": [{\"tool\": \"...\", \"arguments\": {...}}], \"response_hint\": \"...\"}. "
             "Если инструменты не нужны: use_tools=false и steps=[]. "
-            "Если нужны: 1..3 шага в порядке выполнения. "
+            "Если нужны: 1..5 шага в порядке выполнения. "
             "Доступные инструменты: "
             f"{skills_registry_service.planner_signatures()}. "
             f"{dynamic_tools_block}"
@@ -982,6 +1014,7 @@ class ToolOrchestratorService:
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
         else:
             content_str = str(raw_content or "")
+        content_str = self._sanitize_document_text(content_str)
         if not content_str.strip():
             raise ValueError(
                 "pdf_create requires non-empty content. "
@@ -1039,7 +1072,7 @@ class ToolOrchestratorService:
             ),
             timeout=60,
         )
-        return str(result or "").strip()
+        return ToolOrchestratorService._sanitize_document_text(str(result or "").strip())
 
     @staticmethod
     async def _maybe_summarize_content(raw_content: object, title_hint: str = "") -> str:
@@ -1057,19 +1090,20 @@ class ToolOrchestratorService:
                     pass
             # Heuristic: if short text looks like a prompt/instruction, expand with LLM
             elif len(text) < 200 and not any(ch in text for ch in "\n|;") and _looks_like_prompt(text):
-                return await _expand_prompt_to_content(text, title_hint)
+                expanded = await _expand_prompt_to_content(text, title_hint)
+                return ToolOrchestratorService._sanitize_document_text(expanded)
             else:
                 if _looks_like_structured_payload(text):
                     try:
                         summary = await ToolOrchestratorService._summarize_for_document(text, title_hint)
                         if summary:
-                            return summary
+                            return ToolOrchestratorService._sanitize_document_text(summary)
                     except Exception:
                         logger.warning("LLM summarize for structured string payload failed", exc_info=True)
-                return text
+                return ToolOrchestratorService._sanitize_document_text(text)
 
         if not isinstance(raw_content, dict):
-            return str(raw_content or "").strip()
+            return ToolOrchestratorService._sanitize_document_text(str(raw_content or "").strip())
 
         # Extract the meaningful payload from API response dicts
         body = raw_content.get("body") or raw_content.get("result") or raw_content
@@ -1081,12 +1115,12 @@ class ToolOrchestratorService:
         try:
             summary = await ToolOrchestratorService._summarize_for_document(body_text, title_hint)
             if summary:
-                return summary
+                return ToolOrchestratorService._sanitize_document_text(summary)
         except Exception:
             logger.warning("LLM summarize for document creation failed", exc_info=True)
 
         # Fallback: use raw text
-        return body_text[:8000]
+        return ToolOrchestratorService._sanitize_document_text(body_text[:8000])
 
     async def _excel_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """Delegate Excel creation to background worker to avoid chat timeout."""
@@ -1106,6 +1140,7 @@ class ToolOrchestratorService:
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
         else:
             content_str = str(raw_content or "")
+        content_str = self._sanitize_document_text(content_str)
         if not content_str.strip() and not (isinstance(rows, list) and rows):
             raise ValueError(
                 "excel_create requires non-empty content or rows. "
