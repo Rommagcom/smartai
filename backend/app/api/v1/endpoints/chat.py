@@ -1,10 +1,11 @@
 import logging
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from sqlalchemy import select
 
-from app.api.types import CurrentUser, CurrentUserId, DBSession
+from app.api.types import AdminUser, CurrentUser, CurrentUserId, DBSession
 from app.core.config import settings
 from app.models.message import Message
 from app.models.user import User
@@ -21,6 +22,7 @@ from app.schemas.chat import (
 )
 from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
+from app.services.dynamic_tool_service import dynamic_tool_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
 from app.services.skills_registry_service import skills_registry_service
@@ -170,6 +172,88 @@ async def skills_registry(
         registry_version=skills_registry_service.REGISTRY_VERSION,
         skills=skills_registry_service.list_contracts(),
     )
+
+
+@router.post(
+    "/tools/skill-upload",
+    responses={
+        400: {"description": "Invalid skill package"},
+        403: {"description": "Only administrators can upload Dynamic Skills"},
+    },
+)
+async def upload_dynamic_skill(
+    file: Annotated[UploadFile, File(...)],
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    if not bool(current_user.is_admin):
+        raise HTTPException(status_code=403, detail="Only administrators can upload Dynamic Skills")
+
+    filename = str(file.filename or "add_skill.zip").strip() or "add_skill.zip"
+    content = await file.read()
+    result = await dynamic_tool_service.register_skill_package(
+        db=db,
+        user_id=current_user.id,
+        filename=filename,
+        content=content,
+    )
+    if str(result.get("status") or "") == "failed":
+        raise HTTPException(status_code=400, detail=str(result.get("message") or "invalid skill package"))
+    return result
+
+
+@router.get("/tools/skills")
+async def list_dynamic_skills(
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    tools = await dynamic_tool_service.list_tools(db=db, user_id=current_user.id, active_only=True)
+    items = [
+        {
+            "id": str(t.id),
+            "name": t.name,
+            "description": t.description,
+            "method": t.method,
+            "endpoint": t.endpoint,
+            "updated_at": t.updated_at,
+        }
+        for t in tools
+    ]
+    return {"items": items, "count": len(items)}
+
+
+@router.delete(
+    "/tools/skill/{skill_name}",
+    responses={
+        403: {"description": "Only administrators can delete Dynamic Skills"},
+        404: {"description": "Skill not found"},
+    },
+)
+async def delete_dynamic_skill(
+    skill_name: str,
+    db: DBSession,
+    current_user: AdminUser,
+) -> dict:
+    deleted = await dynamic_tool_service.delete_tool_by_name(
+        db=db,
+        user_id=current_user.id,
+        tool_name=skill_name,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Dynamic Skill '{skill_name}' not found")
+    return {"status": "ok", "deleted": 1, "tool_name": str(skill_name)}
+
+
+@router.delete(
+    "/tools/skills/all",
+    responses={403: {"description": "Only administrators can delete Dynamic Skills"}},
+)
+async def delete_all_dynamic_skills(
+    db: DBSession,
+    current_user: AdminUser,
+) -> dict:
+    deleted_count = await dynamic_tool_service.delete_all_tools(db=db, user_id=current_user.id)
+    return {"status": "ok", "deleted_count": int(deleted_count)}
 
 
 @router.get("/history/{session_id}", response_model=list[MessageOut])

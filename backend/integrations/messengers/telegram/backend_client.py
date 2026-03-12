@@ -178,6 +178,25 @@ class BackendApiClient:
             timeout=get_telegram_settings().TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS,
         )
 
+    async def skills_upload(self, token: str, filename: str, content: bytes) -> dict[str, Any]:
+        files = {"file": (filename, content)}
+        return await self._request(
+            "POST",
+            "/chat/tools/skill-upload",
+            token=token,
+            files=files,
+            timeout=get_telegram_settings().TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS,
+        )
+
+    async def skills_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/chat/tools/skills", token=token)
+
+    async def skills_delete(self, token: str, skill_name: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/chat/tools/skill/{skill_name}", token=token)
+
+    async def skills_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/chat/tools/skills/all", token=token)
+
     async def documents_search(self, token: str, query: str, top_k: int = 5) -> dict[str, Any]:
         return await self._request("GET", "/documents/search", token=token, params={"query": query, "top_k": top_k})
 

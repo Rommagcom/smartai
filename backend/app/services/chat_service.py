@@ -262,6 +262,16 @@ class ChatService:
         )
         return result
 
+    @staticmethod
+    def _should_allow_inline_cron_execution(user_message: str) -> bool:
+        text = str(user_message or "")
+        lowered = text.lower()
+        if "cron_add" not in lowered:
+            return True
+        # Respect explicit user payload contract: if a cron_add block was
+        # provided but rejected by strict parser, do not execute LLM inline XML.
+        return ChatService._extract_cron_add_structured_args(text) is not None
+
     def _try_fast_shortcuts(
         self,
         user: User,
@@ -357,6 +367,13 @@ class ChatService:
         )
 
     @staticmethod
+    def _graph_unavailable_fallback() -> str:
+        return (
+            "Граф обработки запроса сейчас временно недоступен. "
+            "Повторите запрос через 10–30 секунд."
+        )
+
+    @staticmethod
     def _direct_route_from_message(user_message: str) -> list[dict] | None:
         """Infer tool steps directly from user text when the planner LLM fails.
 
@@ -401,8 +418,8 @@ class ChatService:
 
         wants_pdf_artifact = bool(
             re.search(
-                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|сгенерируй|генерируй|выгрузи|экспорт|сохрани|оформи|отправ|пришли|generate|create|export|attach)"
-                r"|\b(?:сделай|создай|сформируй|сгенерируй|генерируй|выгрузи|экспорт|сохрани|оформи|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b"
+                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|сгенер\w*|генер\w*|выгрузи|экспорт\w*|сохрани|оформи|отправ|пришли|generate|create|export|attach)"
+                r"|\b(?:сделай|создай|сформируй|сгенер\w*|генер\w*|выгрузи|экспорт\w*|сохрани|оформи|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b"
                 r"|\bв\s+pdf\b",
                 lowered,
             )
@@ -552,7 +569,7 @@ class ChatService:
         ):
             return [{"tool": "doc_list", "arguments": {}}]
 
-        if wants_pdf_artifact:
+        if wants_pdf_artifact and not ChatService._is_live_data_intent(user_message):
             return [
                 {
                     "tool": "pdf_create",
@@ -817,6 +834,15 @@ class ChatService:
             result["schedule"] = (schedule_match.group(1) or schedule_match.group(2) or "").strip()
 
         return result
+
+    @staticmethod
+    def _should_allow_inline_integration_execution(user_message: str) -> bool:
+        text = str(user_message or "")
+        lowered = text.lower()
+        if "integration_add" not in lowered:
+            return True
+        # Respect explicit user payload contract for integration_add as well.
+        return ChatService._extract_integration_add_args(text) is not None
 
     @staticmethod
     def _live_data_unavailable_fallback() -> str:
@@ -1391,7 +1417,7 @@ class ChatService:
                 db=db,
                 user=user,
                 steps=planned_steps,
-                max_steps=3,
+                max_steps=5,
             )
             response_hint = str(planner.get("response_hint") or "")
             return tool_calls, response_hint
@@ -1744,7 +1770,7 @@ class ChatService:
                 status = str(result.get("status") or "").strip().lower()
                 message = str(result.get("message") or "").strip()
                 if status in {"queued", "deduplicated"}:
-                    return message or "PDF поставлен в очередь и будет отправлен отдельным сообщением."
+                    return message or "Задача поставлена в очередь."
                 fname = str(result.get("file_name") or "document.pdf")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -1754,7 +1780,7 @@ class ChatService:
                 status = str(result.get("status") or "").strip().lower()
                 message = str(result.get("message") or "").strip()
                 if status in {"queued", "deduplicated"}:
-                    return message or "Excel поставлен в очередь и будет отправлен отдельным сообщением."
+                    return message or "Задача поставлена в очередь."
                 fname = str(result.get("file_name") or "document.xlsx")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -1924,6 +1950,47 @@ class ChatService:
             return answer, tool_calls, artifacts
         return None
 
+    async def _maybe_graph_contract_fallback_answer(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        """Execute only explicit structured/direct commands when graph degrades.
+
+        This keeps fallback behavior aligned with the graph-only contract:
+        no broad intent heuristics, only unambiguous command payloads.
+        """
+        steps = self._direct_route_from_message(user_message)
+        if not steps:
+            return None
+
+        self._dev_verbose_log(
+            "graph_contract_fallback_start",
+            user_id=str(user.id),
+            tools=[str(step.get("tool") or "") for step in steps],
+            message_preview=str(user_message or "")[:180],
+        )
+
+        try:
+            planned_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=steps,
+                max_steps=max(1, len(steps)),
+            )
+        except Exception:
+            logger.warning("graph contract fallback route failed", exc_info=True)
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls)
+        if answer:
+            return answer, tool_calls, artifacts
+        return None
+
     @staticmethod
     def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
         artifacts: list[dict] = []
@@ -1950,40 +2017,58 @@ class ChatService:
         if not text:
             return text
 
-        has_artifact = bool(artifacts)
-        if has_artifact:
+        if artifacts:
             return text
 
-        has_pdf_queue = False
+        has_export_success = False
+        has_export_queue = False
         for call in tool_calls:
             if not bool(call.get("success")):
                 continue
-            if str(call.get("tool") or "").strip().lower() != "pdf_create":
+            tool_name = str(call.get("tool") or "").strip().lower()
+            if tool_name not in {"pdf_create", "excel_create"}:
                 continue
+            has_export_success = True
             result = call.get("result") if isinstance(call.get("result"), dict) else {}
             status = str(result.get("status") or "").strip().lower()
             if status in {"queued", "deduplicated"}:
-                has_pdf_queue = True
+                has_export_queue = True
                 break
+
+        queue_note = "Задача поставлена в очередь."
+        if has_export_queue:
+            # Queue state is authoritative: avoid contradictory long text
+            # like "я не могу сгенерировать PDF" in the same response.
+            return queue_note
+
+        if not has_export_success:
+            return text
 
         claim_re = re.compile(
             r"(?:pdf|пдф|файл).{0,40}(?:приложен|вложен|прикрепл(?:ен|ён)|attached|uploaded|готов\s+к\s+выгрузке)",
             re.IGNORECASE | re.DOTALL,
         )
-        if not claim_re.search(text):
+        cannot_export_re = re.compile(
+            r"(?:не\s+могу|не\s+получается|cannot)\b.{0,60}(?:pdf|пдф|файл)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        if cannot_export_re.search(text):
+            return (
+                "PDF-задача принята. Документ будет отправлен отдельным сообщением, "
+                "как только обработка завершится."
+            )
+
+        note_text = "Примечание: PDF-файл не был создан этим ответом. Сформировать PDF можно отдельной командой или запросом."
+        if note_text in text:
             return text
 
-        if has_pdf_queue:
-            return (
-                text
-                + "\n\n"
-                + "Примечание: файл ещё не приложен. PDF поставлен в очередь и будет отправлен отдельным сообщением после обработки."
-            )
+        if not claim_re.search(text):
+            return text
 
         return (
             text
             + "\n\n"
-            + "Примечание: PDF-файл не был создан этим ответом. Сформировать PDF можно отдельной командой или запросом."
+            + note_text
         )
 
     @staticmethod
@@ -2633,7 +2718,7 @@ class ChatService:
 
         Returns the same tuple as respond() for backward compatibility.
         """
-        from app.graph import agent_graph
+        from app.graph.runner import invoke_agent_graph_with_recovery
 
         initial_state = {
             "messages": [user_message],
@@ -2672,11 +2757,35 @@ class ChatService:
             session_id=str(session_id),
         )
 
-        try:
-            result = await agent_graph.ainvoke(initial_state)
-        except Exception:
-            logger.exception("LangGraph agent failed, falling back to legacy respond")
-            return await self.respond(db, user, session_id, user_message)
+        async def _on_graph_failure(_exc: Exception) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
+            manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
+            graph_contract_fallback = await self._maybe_graph_contract_fallback_answer(
+                db=db,
+                user=user,
+                user_message=user_message,
+                manual_tool_calls=manual_tool_calls,
+            )
+            if graph_contract_fallback:
+                answer, ft_tool_calls, ft_artifacts = graph_contract_fallback
+                return answer, [], [], ft_tool_calls, ft_artifacts
+
+            # If only manual memory preferences were processed, return their
+            # deterministic acknowledgement without entering legacy flow.
+            if manual_tool_calls:
+                manual_answer = self._format_deterministic_tool_answer(manual_tool_calls)
+                return manual_answer or self._graph_unavailable_fallback(), [], [], manual_tool_calls, []
+
+            logger.exception("Structured fallback unavailable in graph-only mode")
+            return self._graph_unavailable_fallback(), [], [], [], []
+
+        result, short_circuit = await invoke_agent_graph_with_recovery(
+            initial_state=initial_state,
+            on_graph_failure=_on_graph_failure,
+        )
+        if short_circuit is not None:
+            return short_circuit
+        if result is None:
+            return self._graph_unavailable_fallback(), [], [], [], []
 
         # Extract results in the legacy format
         final_answer = str(result.get("final_answer") or "")
@@ -2687,12 +2796,6 @@ class ChatService:
         # LangGraph state propagation (e.g. reducer replaced list with []).
         if not artifacts and tool_calls_log:
             artifacts = self._extract_artifacts(tool_calls_log)
-
-        final_answer = self._sanitize_false_attachment_claims(
-            answer=final_answer,
-            tool_calls=tool_calls_log,
-            artifacts=artifacts,
-        )
 
         # Memory IDs from LTM context (for tracking)
         used_memory_ids: list[str] = []
