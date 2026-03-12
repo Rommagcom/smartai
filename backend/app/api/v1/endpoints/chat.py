@@ -1,7 +1,8 @@
 import logging
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from sqlalchemy import select
 
 from app.api.types import CurrentUser, CurrentUserId, DBSession
@@ -21,6 +22,7 @@ from app.schemas.chat import (
 )
 from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
+from app.services.dynamic_tool_service import dynamic_tool_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
 from app.services.skills_registry_service import skills_registry_service
@@ -170,6 +172,25 @@ async def skills_registry(
         registry_version=skills_registry_service.REGISTRY_VERSION,
         skills=skills_registry_service.list_contracts(),
     )
+
+
+@router.post("/tools/skill-upload", responses={400: {"description": "Invalid skill package"}})
+async def upload_dynamic_skill(
+    file: Annotated[UploadFile, File(...)],
+    db: DBSession,
+    current_user: CurrentUser,
+) -> dict:
+    filename = str(file.filename or "add_skill.zip").strip() or "add_skill.zip"
+    content = await file.read()
+    result = await dynamic_tool_service.register_skill_package(
+        db=db,
+        user_id=current_user.id,
+        filename=filename,
+        content=content,
+    )
+    if str(result.get("status") or "") == "failed":
+        raise HTTPException(status_code=400, detail=str(result.get("message") or "invalid skill package"))
+    return result
 
 
 @router.get("/history/{session_id}", response_model=list[MessageOut])
