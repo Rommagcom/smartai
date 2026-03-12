@@ -72,6 +72,9 @@ def extract_router_output_from_exception(
     decision_raw = decision_match.group(1).lower()
 
     if decision_raw == RouterDecision.TOOL.value:
+        salvaged_tool = _salvage_safe_export_tool_step(candidate=candidate, user_message=user_message)
+        if salvaged_tool is not None:
+            return salvaged_tool
         # Unsafe to execute arbitrary half-parsed tool calls with missing arguments.
         return None
 
@@ -107,5 +110,55 @@ def _build_web_search_output(
         decision=RouterDecision.WEB_SEARCH,
         steps=[ToolStep(tool="web_search", arguments={"query": query})],
         response_hint=web_search_hint,
+        confidence=0.45,
+    )
+
+
+def _salvage_safe_export_tool_step(candidate: str, user_message: str) -> RouterOutput | None:
+    """Recover only safe export tool calls from malformed router JSON.
+
+    We intentionally salvage only pdf_create/excel_create and build conservative
+    arguments to avoid executing arbitrary truncated tool payloads.
+    """
+    lowered = str(candidate or "").lower()
+    if "\"tool\"" not in lowered:
+        return None
+
+    tool_name: str | None = None
+    if re.search(r'"tool"\s*:\s*"pdf_create"', lowered):
+        tool_name = "pdf_create"
+    elif re.search(r'"tool"\s*:\s*"excel_create"', lowered):
+        tool_name = "excel_create"
+    if not tool_name:
+        return None
+
+    title_match = re.search(r'"title"\s*:\s*"([\s\S]*?)"', candidate, re.IGNORECASE)
+    title = (title_match.group(1) if title_match else "").replace('\\"', '"').strip()
+    if not title:
+        title = "Документ" if tool_name == "pdf_create" else "Таблица"
+
+    # If content is truncated or missing, safely fall back to original user request;
+    # downstream document pipeline expands prompt-like text via LLM.
+    content_match = re.search(r'"content"\s*:\s*"([\s\S]*?)"', candidate, re.IGNORECASE)
+    content = (content_match.group(1) if content_match else "").replace('\\"', '"').strip()
+    if not content:
+        content = str(user_message or "").strip()
+    if not content:
+        content = "Сформируй содержимое документа по запросу пользователя."
+
+    filename = "generated-document.pdf" if tool_name == "pdf_create" else "generated-document.xlsx"
+    return RouterOutput(
+        decision=RouterDecision.TOOL,
+        steps=[
+            ToolStep(
+                tool=tool_name,
+                arguments={
+                    "title": title,
+                    "filename": filename,
+                    "content": content,
+                },
+            )
+        ],
+        response_hint="Выполняю экспорт документа по восстановленному маршруту",
         confidence=0.45,
     )
