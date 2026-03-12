@@ -9,9 +9,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - postgres
-      - milvus-standalone
-      - redis
+      postgres:
+        condition: service_started
+      milvus-standalone:
+        condition: service_started
+      redis:
+        condition: service_started
 
   scheduler-leader:
     environment:
@@ -19,9 +22,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - postgres
-      - milvus-standalone
-      - redis
+      postgres:
+        condition: service_started
+      milvus-standalone:
+        condition: service_started
+      redis:
+        condition: service_started
 
   worker:
     environment:
@@ -29,9 +35,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - postgres
-      - milvus-standalone
-      - redis
+      postgres:
+        condition: service_started
+      milvus-standalone:
+        condition: service_started
+      redis:
+        condition: service_started
 
   # Disable local Ollama container in this mode.
   ollama:
