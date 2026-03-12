@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.dynamic_tool import DynamicTool
+from app.models.user import User
 from app.services.api_executor import api_executor, resolve_url_template
 from app.services.auth_data_security_service import auth_data_security_service
 from app.services.egress_policy_service import egress_policy_service
@@ -207,6 +208,12 @@ class DynamicToolService:
         content: bytes,
     ) -> dict:
         """Register a Python Dynamic Skill from add_skill.zip payload."""
+        user_row = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if not user_row or not bool(getattr(user_row, "is_admin", False)):
+            return {"status": "failed", "message": "Only administrators can upload Dynamic Skills"}
+
         safe_filename = str(filename or "add_skill.zip").strip() or "add_skill.zip"
         if not safe_filename.lower().endswith(".zip"):
             return {"status": "failed", "message": "Skill package must be a .zip archive."}
@@ -400,6 +407,12 @@ class DynamicToolService:
         user_id: UUID,
         tool_id: UUID,
     ) -> bool:
+        user_row = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if not user_row or not bool(getattr(user_row, "is_admin", False)):
+            return False
+
         result = await db.execute(
             select(DynamicTool).where(
                 DynamicTool.id == tool_id,
@@ -421,11 +434,32 @@ class DynamicToolService:
             logger.debug("failed to delete tool vector: %s", exc)
         return True
 
+    async def delete_tool_by_name(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        tool_name: str,
+    ) -> bool:
+        clean_name = str(tool_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if not clean_name:
+            return False
+
+        tool = await self._get_by_name(db, user_id, clean_name)
+        if not tool:
+            return False
+        return await self.delete_tool(db=db, user_id=user_id, tool_id=tool.id)
+
     async def delete_all_tools(
         self,
         db: AsyncSession,
         user_id: UUID,
     ) -> int:
+        user_row = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if not user_row or not bool(getattr(user_row, "is_admin", False)):
+            return 0
+
         result = await db.execute(
             select(DynamicTool).where(DynamicTool.user_id == user_id)
         )

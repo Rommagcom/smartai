@@ -1575,6 +1575,9 @@ class ToolOrchestratorService:
 
     async def _integrations_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del arguments
+        if not bool(getattr(user, "is_admin", False)):
+            return {"status": "forbidden", "error": "Only administrators can delete integrations"}
+
         result = await db.execute(
             select(ApiIntegration).where(ApiIntegration.user_id == user.id)
         )
@@ -2002,6 +2005,9 @@ class ToolOrchestratorService:
 
     async def _dynamic_tool_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """Delete a specific dynamic tool by id."""
+        if not bool(getattr(user, "is_admin", False)):
+            return {"status": "forbidden", "error": "Only administrators can delete Dynamic Skills"}
+
         tool_id_raw = str(arguments.get("tool_id") or "").strip()
         if not tool_id_raw:
             raise ValueError("dynamic_tool_delete requires tool_id")
@@ -2013,6 +2019,9 @@ class ToolOrchestratorService:
     async def _dynamic_tool_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """Delete all dynamic tools for the user."""
         del arguments
+        if not bool(getattr(user, "is_admin", False)):
+            return {"status": "forbidden", "error": "Only administrators can delete Dynamic Skills"}
+
         count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id)
         return {"deleted_count": count}
 

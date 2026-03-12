@@ -95,7 +95,7 @@ async def run() -> None:
                 username="skill_user",
                 hashed_password=get_password_hash("SmokePass123"),
                 preferences={},
-                is_admin=False,
+                is_admin=True,
             )
             session.add(user)
             await session.commit()
