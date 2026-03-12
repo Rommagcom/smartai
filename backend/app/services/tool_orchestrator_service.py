@@ -189,6 +189,10 @@ def _resolve_placeholders(arguments: dict, *, prev: dict | None, steps: list[dic
 class ToolOrchestratorService:
     _CRON_DEDUPE_WINDOW_SECONDS = 180
     _DOC_ALL_SOURCES_TOKENS = {"$all_sources", "{{all_sources}}", "all_sources"}
+    _DOC_SOURCES_MAX_ITEMS = 10
+    _DOC_VALUE_MAX_LEN = 2000
+    _DOC_LIST_MAX_ITEMS = 12
+    _DOC_DICT_MAX_KEYS = 20
 
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
@@ -295,6 +299,8 @@ class ToolOrchestratorService:
             "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
             "22) Чтобы сгенерировать документ ИЗ ВСЕХ предыдущих результатов цепочки через LLM, "
             "используй content='$all_sources' в pdf_create/excel_create."
+            "23) Если пользователь просит экспорт после нескольких шагов, можно не указывать content: "
+            "система автоматически соберёт результаты всей цепочки и сформирует документ через LLM."
         )
 
         try:
@@ -495,13 +501,20 @@ class ToolOrchestratorService:
             result = item.get("result")
             if result is None:
                 continue
+
+            compact_result = ToolOrchestratorService._compact_for_document(result)
+            if compact_result in (None, "", [], {}):
+                continue
+
             sources.append(
                 {
                     "step_index": idx,
                     "tool": tool_name,
-                    "result": result,
+                    "result": compact_result,
                 }
             )
+            if len(sources) >= ToolOrchestratorService._DOC_SOURCES_MAX_ITEMS:
+                break
 
         if not sources:
             return None
@@ -510,6 +523,53 @@ class ToolOrchestratorService:
             "summary": "Собранные данные из предыдущих шагов цепочки инструментов",
             "sources": sources,
         }
+
+    @staticmethod
+    def _compact_for_document(value: Any, *, depth: int = 0) -> Any:
+        if depth > 3:
+            return "..."
+
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            text = value.strip()
+            if len(text) <= ToolOrchestratorService._DOC_VALUE_MAX_LEN:
+                return text
+            return f"{text[:ToolOrchestratorService._DOC_VALUE_MAX_LEN]}... [truncated]"
+
+        if isinstance(value, (int, float, bool)):
+            return value
+
+        if isinstance(value, list):
+            return [
+                ToolOrchestratorService._compact_for_document(item, depth=depth + 1)
+                for item in value[: ToolOrchestratorService._DOC_LIST_MAX_ITEMS]
+            ]
+
+        if isinstance(value, dict):
+            skip_keys = {
+                "file_base64",
+                "content_base64",
+                "bytes",
+                "binary",
+                "raw_html",
+                "raw",
+            }
+            compact: dict[str, Any] = {}
+            for idx, (k, v) in enumerate(value.items()):
+                if idx >= ToolOrchestratorService._DOC_DICT_MAX_KEYS:
+                    compact["_truncated_keys"] = True
+                    break
+                key = str(k)
+                if key.lower() in skip_keys:
+                    compact[key] = "[omitted]"
+                    continue
+                compact[key] = ToolOrchestratorService._compact_for_document(v, depth=depth + 1)
+            return compact
+
+        # Fallback for UUID/datetime/other objects
+        return ToolOrchestratorService._compact_for_document(str(value), depth=depth + 1)
 
     @staticmethod
     def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, Any]) -> dict:

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
@@ -18,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryService:
+    @staticmethod
+    def _is_expected_llm_call_shutdown_error(exc: Exception) -> bool:
+        if isinstance(exc, asyncio.CancelledError):
+            return True
+        text = str(exc or "").strip().lower()
+        return "event loop is closed" in text
+
     @staticmethod
     def _zero_embedding() -> list[float]:
         dim = max(1, int(settings.EMBEDDING_DIM))
@@ -435,8 +443,11 @@ class MemoryService:
                 ],
                 stream=False,
             )
-        except Exception:
-            logger.warning("LLM fact extraction call failed", exc_info=True)
+        except Exception as exc:
+            if self._is_expected_llm_call_shutdown_error(exc):
+                logger.info("LLM fact extraction skipped during shutdown/cancellation")
+            else:
+                logger.warning("LLM fact extraction call failed", exc_info=True)
             return
 
         if not response or not response.strip():
