@@ -1,7 +1,7 @@
 import asyncio
-from contextlib import suppress
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.security import get_password_hash
@@ -14,7 +14,7 @@ from app.services.chat_service import chat_service
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "smoke_graph_structured_fallback.db"
+DB_PATH = BASE_DIR / "smoke_graph_inline_cron_guard.db"
 
 
 def ensure(condition: bool, message: str) -> None:
@@ -37,14 +37,26 @@ async def init_db() -> tuple[async_sessionmaker[AsyncSession], object]:
     return async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False), engine
 
 
+class _FakeGraph:
+    async def ainvoke(self, _state):
+        await asyncio.sleep(0)
+        # Simulate degraded graph output where LLM text contains inline cron XML
+        # but graph itself produced no tool calls.
+        return {
+            "final_answer": "<cron_add><cron_expression>0 0 * * *</cron_expression><message>Встреча</message></cron_add>",
+            "tool_calls_log": [],
+            "artifacts": [],
+        }
+
+
 async def run() -> None:
     session_factory, engine = await init_db()
 
     try:
         async with session_factory() as db:
             user = User(
-                username="graph_fallback_user",
-                hashed_password=get_password_hash("smoke-graph-fallback"),
+                username="graph_inline_guard_user",
+                hashed_password=get_password_hash("smoke-graph-inline-guard"),
                 soul_configured=True,
             )
             db.add(user)
@@ -57,46 +69,37 @@ async def run() -> None:
             import app.graph as graph_module
 
             original_graph = graph_module.agent_graph
-            original_legacy_respond = chat_service.respond
-
-            class _FailGraph:
-                async def ainvoke(self, _state):
-                    raise RuntimeError("forced graph failure")
-
-            async def _legacy_respond_should_not_be_called(*_args, **_kwargs):
-                raise RuntimeError("legacy respond path must not be called in graph-only contract smoke")
-
-            graph_module.agent_graph = _FailGraph()
-            chat_service.respond = _legacy_respond_should_not_be_called
+            graph_module.agent_graph = _FakeGraph()
             try:
-                message = (
-                    "Запланируй напоминание через 5 минут что мне нужно идти домой\n"
+                invalid_message = (
+                    "Запланируй напоминание\n"
                     "```cron_add\n"
-                    "time: in 5 minutes\n"
-                    "message: Пора идти домой\n"
+                    "time: sometime later\n"
                     "```"
                 )
-                answer, _memory_ids, _rag, tool_calls, artifacts = await chat_service.respond_via_graph(
+                answer, _memory_ids, _rag, tool_calls, _artifacts = await chat_service.respond_via_graph(
                     db=db,
                     user=user,
                     session_id=sess.id,
-                    user_message=message,
+                    user_message=invalid_message,
                 )
             finally:
                 graph_module.agent_graph = original_graph
-                chat_service.respond = original_legacy_respond
 
-            ensure(any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in tool_calls), f"cron_add not executed: {tool_calls}")
-            ensure("напоминание" in answer.lower() or "готово" in answer.lower(), f"unexpected answer: {answer}")
-            ensure(isinstance(artifacts, list), "artifacts should be a list")
+            ensure(
+                not any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in tool_calls),
+                f"invalid cron_add unexpectedly succeeded via inline bridge: {tool_calls}",
+            )
+            ensure("<cron_add>" in answer, f"unexpected answer normalization: {answer}")
 
-            await db.commit()
+            result = await db.execute(select(CronJob))
+            rows = result.scalars().all()
+            ensure(len(rows) == 0, f"cron jobs should not be created for invalid structured block, got {len(rows)}")
 
-        print("SMOKE_GRAPH_STRUCTURED_FALLBACK_OK")
+        print("SMOKE_GRAPH_INLINE_CRON_GUARD_OK")
     finally:
         try:
-            with suppress(asyncio.CancelledError):
-                await engine.dispose()
+            await engine.dispose()
         except Exception as exc:
             print(f"engine dispose failed: {exc}")
         if DB_PATH.exists():

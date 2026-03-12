@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -121,9 +122,10 @@ async def run() -> None:
         ensure(revoke_last_remaining.status_code == 400, f"should protect last remaining admin: {revoke_last_remaining.text}")
 
     try:
-        await engine.dispose()
-    except BaseException:
-        pass
+            with suppress(asyncio.CancelledError):
+                await engine.dispose()
+        except Exception as exc:
+            print(f"engine dispose failed: {exc}")
     if DB_PATH.exists():
         DB_PATH.unlink()
 

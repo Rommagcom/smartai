@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -152,9 +153,10 @@ async def run() -> None:
         ensure(len(rows) >= 1, f"DB check failed: expected >=1 cron row, got {len(rows)}")
 
     try:
-        await engine.dispose()
-    except BaseException:
-        pass
+        with suppress(asyncio.CancelledError):
+            await engine.dispose()
+    except Exception as exc:
+        print(f"engine dispose failed: {exc}")
 
     if DB_PATH.exists():
         DB_PATH.unlink()

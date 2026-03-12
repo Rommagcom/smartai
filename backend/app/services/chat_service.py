@@ -262,6 +262,16 @@ class ChatService:
         )
         return result
 
+    @staticmethod
+    def _should_allow_inline_cron_execution(user_message: str) -> bool:
+        text = str(user_message or "")
+        lowered = text.lower()
+        if "cron_add" not in lowered:
+            return True
+        # Respect explicit user payload contract: if a cron_add block was
+        # provided but rejected by strict parser, do not execute LLM inline XML.
+        return ChatService._extract_cron_add_structured_args(text) is not None
+
     def _try_fast_shortcuts(
         self,
         user: User,
@@ -824,6 +834,15 @@ class ChatService:
             result["schedule"] = (schedule_match.group(1) or schedule_match.group(2) or "").strip()
 
         return result
+
+    @staticmethod
+    def _should_allow_inline_integration_execution(user_message: str) -> bool:
+        text = str(user_message or "")
+        lowered = text.lower()
+        if "integration_add" not in lowered:
+            return True
+        # Respect explicit user payload contract for integration_add as well.
+        return ChatService._extract_integration_add_args(text) is not None
 
     @staticmethod
     def _live_data_unavailable_fallback() -> str:
@@ -2787,7 +2806,7 @@ class ChatService:
 
         # Graph-first safety bridge: if final text still contains explicit
         # inline directives, execute them and normalize the user-facing answer.
-        if not tool_calls_log and final_answer:
+        if not tool_calls_log and final_answer and self._should_allow_inline_cron_execution(user_message):
             inline_cron = await self._maybe_execute_llm_inline_cron(
                 db=db,
                 user=user,
@@ -2797,7 +2816,7 @@ class ChatService:
             if inline_cron:
                 final_answer, tool_calls_log, artifacts = inline_cron
 
-        if not tool_calls_log and final_answer:
+        if not tool_calls_log and final_answer and self._should_allow_inline_integration_execution(user_message):
             inline_integration = await self._maybe_execute_llm_inline_integration(
                 db=db,
                 user=user,

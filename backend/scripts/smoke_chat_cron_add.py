@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -151,8 +152,9 @@ async def run() -> None:
         print("SMOKE_CHAT_CRON_ADD_OK")
     finally:
         try:
-            await engine.dispose()
-        except BaseException as exc:
+            with suppress(asyncio.CancelledError):
+                await engine.dispose()
+        except Exception as exc:
             print(f"engine dispose failed: {exc}")
 
         app.dependency_overrides.pop(get_db, None)
