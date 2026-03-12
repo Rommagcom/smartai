@@ -106,13 +106,12 @@ async def run() -> None:
                 max_steps=3,
             )
             ensure(len(calls) == 3, f"unexpected calls count: {calls}")
-            ensure(all(bool(item.get("success")) for item in calls), f"chain contains failed call: {calls}")
+            ensure(bool(calls[0].get("success")) and bool(calls[1].get("success")), f"unexpected cron step failures: {calls}")
+            ensure(not bool(calls[2].get("success")), f"pdf_create must fail for control-only sources: {calls}")
+            error_text = str(calls[2].get("error") or "")
+            ensure("requires non-empty content" in error_text, f"unexpected export error: {error_text}")
 
-            ensure(len(captured_payloads) == 1, f"expected one queued document payload, got {captured_payloads}")
-            payload = captured_payloads[0]["payload"]
-            content = str(payload.get("content") or "")
-            ensure(content.startswith("SUMMARY::"), f"expected summarized content, got: {content}")
-            ensure("Сводка из всех источников" in content, f"title hint not propagated to summarizer: {content}")
+            ensure(len(captured_payloads) == 0, f"pdf must not be queued for control-only sources: {captured_payloads}")
 
         print("SMOKE_DOCUMENT_ALL_SOURCES_OK")
     finally:

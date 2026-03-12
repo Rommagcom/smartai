@@ -741,6 +741,10 @@ class TelegramAdapter(MessengerAdapter):
         if job_type in {"cron_reminder", "cron_chat"} and human_message:
             return human_message
 
+        # For background export jobs keep the user-facing message minimal.
+        if job_type in {"pdf_create", "excel_create"}:
+            return "Задача поставлена в очередь."
+
         preview = item.get("result_preview")
         if preview is None:
             preview = item.get("result", {})
