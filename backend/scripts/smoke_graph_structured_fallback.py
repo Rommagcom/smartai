@@ -49,19 +49,24 @@ async def run() -> None:
             db.add(user)
             await db.flush()
 
-            sess = Session(user_id=user.id, title="smoke")
+            sess = Session(user_id=user.id)
             db.add(sess)
             await db.flush()
 
             import app.graph as graph_module
 
             original_graph = graph_module.agent_graph
+            original_legacy_respond = chat_service.respond
 
             class _FailGraph:
                 async def ainvoke(self, _state):
                     raise RuntimeError("forced graph failure")
 
+            async def _legacy_respond_should_not_be_called(*_args, **_kwargs):
+                raise RuntimeError("legacy respond path must not be called in graph-only contract smoke")
+
             graph_module.agent_graph = _FailGraph()
+            chat_service.respond = _legacy_respond_should_not_be_called
             try:
                 message = (
                     "Запланируй напоминание через 5 минут что мне нужно идти домой\n"
@@ -78,6 +83,7 @@ async def run() -> None:
                 )
             finally:
                 graph_module.agent_graph = original_graph
+                chat_service.respond = original_legacy_respond
 
             ensure(any(str(c.get("tool") or "") == "cron_add" and bool(c.get("success")) for c in tool_calls), f"cron_add not executed: {tool_calls}")
             ensure("напоминание" in answer.lower() or "готово" in answer.lower(), f"unexpected answer: {answer}")
@@ -89,7 +95,7 @@ async def run() -> None:
     finally:
         try:
             await engine.dispose()
-        except Exception as exc:
+        except BaseException as exc:
             print(f"engine dispose failed: {exc}")
         if DB_PATH.exists():
             DB_PATH.unlink()
