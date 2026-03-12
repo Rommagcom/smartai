@@ -79,7 +79,13 @@ async def run() -> None:
                 "message: Нужно домой 🏠\n"
                 "```"
             )
-            message_three = "Напомни через 5 минут выключить плиту"
+            message_three = (
+                "Создай напоминание через 5 минут выключить плиту\n"
+                "```cron_add\n"
+                "time: in 5 minutes\n"
+                "message: Выключить плиту\n"
+                "```"
+            )
             message_invalid = (
                 "Запланируй напоминание\n"
                 "```cron_add\n"
@@ -117,7 +123,7 @@ async def run() -> None:
             ]
             ensure(any("Пора идти домой" in text for text in payload_messages), f"first reminder not found in payloads: {payload_messages}")
             ensure(any("Нужно домой" in text for text in payload_messages), f"second reminder not found in payloads: {payload_messages}")
-            ensure(any("выключить плиту" in text for text in payload_messages), f"third reminder not found in payloads: {payload_messages}")
+            ensure(any("Выключить плиту" in text for text in payload_messages), f"third reminder not found in payloads: {payload_messages}")
 
             before_invalid_count = len(jobs)
             invalid_response = client.post("/api/v1/chat", json={"message": message_invalid}, headers=headers)
@@ -146,7 +152,7 @@ async def run() -> None:
     finally:
         try:
             await engine.dispose()
-        except Exception as exc:
+        except BaseException as exc:
             print(f"engine dispose failed: {exc}")
 
         app.dependency_overrides.pop(get_db, None)

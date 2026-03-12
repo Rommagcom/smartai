@@ -357,6 +357,13 @@ class ChatService:
         )
 
     @staticmethod
+    def _graph_unavailable_fallback() -> str:
+        return (
+            "Граф обработки запроса сейчас временно недоступен. "
+            "Повторите запрос через 10–30 секунд."
+        )
+
+    @staticmethod
     def _direct_route_from_message(user_message: str) -> list[dict] | None:
         """Infer tool steps directly from user text when the planner LLM fails.
 
@@ -1924,6 +1931,47 @@ class ChatService:
             return answer, tool_calls, artifacts
         return None
 
+    async def _maybe_graph_contract_fallback_answer(
+        self,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        """Execute only explicit structured/direct commands when graph degrades.
+
+        This keeps fallback behavior aligned with the graph-only contract:
+        no broad intent heuristics, only unambiguous command payloads.
+        """
+        steps = self._direct_route_from_message(user_message)
+        if not steps:
+            return None
+
+        self._dev_verbose_log(
+            "graph_contract_fallback_start",
+            user_id=str(user.id),
+            tools=[str(step.get("tool") or "") for step in steps],
+            message_preview=str(user_message or "")[:180],
+        )
+
+        try:
+            planned_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=steps,
+                max_steps=max(1, len(steps)),
+            )
+        except Exception:
+            logger.warning("graph contract fallback route failed", exc_info=True)
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls)
+        if answer:
+            return answer, tool_calls, artifacts
+        return None
+
     @staticmethod
     def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
         artifacts: list[dict] = []
@@ -2699,18 +2747,24 @@ class ChatService:
             logger.exception("LangGraph agent failed, attempting structured fallback")
 
             manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
-            fast_tool = await self._maybe_fast_tool_answer(
+            graph_contract_fallback = await self._maybe_graph_contract_fallback_answer(
                 db=db,
                 user=user,
                 user_message=user_message,
                 manual_tool_calls=manual_tool_calls,
             )
-            if fast_tool:
-                answer, ft_tool_calls, ft_artifacts = fast_tool
+            if graph_contract_fallback:
+                answer, ft_tool_calls, ft_artifacts = graph_contract_fallback
                 return answer, [], [], ft_tool_calls, ft_artifacts
 
-            logger.exception("Structured fallback unavailable, falling back to legacy respond")
-            return await self.respond(db, user, session_id, user_message)
+            # If only manual memory preferences were processed, return their
+            # deterministic acknowledgement without entering legacy flow.
+            if manual_tool_calls:
+                manual_answer = self._format_deterministic_tool_answer(manual_tool_calls)
+                return manual_answer or self._graph_unavailable_fallback(), [], [], manual_tool_calls, []
+
+            logger.exception("Structured fallback unavailable in graph-only mode")
+            return self._graph_unavailable_fallback(), [], [], [], []
 
         # Extract results in the legacy format
         final_answer = str(result.get("final_answer") or "")
@@ -2721,14 +2775,14 @@ class ChatService:
         # explicit structured directives via the current request DB session.
         if not tool_calls_log:
             manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
-            fast_tool = await self._maybe_fast_tool_answer(
+            graph_contract_fallback = await self._maybe_graph_contract_fallback_answer(
                 db=db,
                 user=user,
                 user_message=user_message,
                 manual_tool_calls=manual_tool_calls,
             )
-            if fast_tool:
-                fast_answer, fast_calls, fast_artifacts = fast_tool
+            if graph_contract_fallback:
+                fast_answer, fast_calls, fast_artifacts = graph_contract_fallback
                 return fast_answer, [], [], fast_calls, fast_artifacts
 
         # Graph-first safety bridge: if final text still contains explicit

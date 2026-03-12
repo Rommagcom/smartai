@@ -120,7 +120,10 @@ async def run() -> None:
         )
         ensure(revoke_last_remaining.status_code == 400, f"should protect last remaining admin: {revoke_last_remaining.text}")
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except BaseException:
+        pass
     if DB_PATH.exists():
         DB_PATH.unlink()
 

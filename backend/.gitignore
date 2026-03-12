@@ -6,3 +6,4 @@ __pycache__/
 .mypy_cache/
 postgres_data/
 milvus_data/
+smoke*.db
