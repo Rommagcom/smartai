@@ -940,8 +940,11 @@ class TelegramAdapter(MessengerAdapter):
             result.get("status"),
             _safe_json(payload, max_len=4000),
         )
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        detail_text = _safe_json(detail, max_len=1200) if isinstance(detail, (dict, list)) else str(detail or "")
+        suffix = f"\n{detail_text}" if detail_text else ""
         await update.effective_message.reply_text(
-            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз."
+            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз.{suffix}"
         )
 
     async def _ensure_soul_ready_for_chat(
