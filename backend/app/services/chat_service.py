@@ -2721,7 +2721,7 @@ class ChatService:
 
         Returns the same tuple as respond() for backward compatibility.
         """
-        from app.graph import agent_graph
+        from app.graph.runner import invoke_agent_graph_with_recovery
 
         initial_state = {
             "messages": [user_message],
@@ -2760,11 +2760,7 @@ class ChatService:
             session_id=str(session_id),
         )
 
-        try:
-            result = await agent_graph.ainvoke(initial_state)
-        except Exception:
-            logger.exception("LangGraph agent failed, attempting structured fallback")
-
+        async def _on_graph_failure(_exc: Exception) -> tuple[str, list[str], list[str], list[dict], list[dict]]:
             manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
             graph_contract_fallback = await self._maybe_graph_contract_fallback_answer(
                 db=db,
@@ -2785,57 +2781,24 @@ class ChatService:
             logger.exception("Structured fallback unavailable in graph-only mode")
             return self._graph_unavailable_fallback(), [], [], [], []
 
+        result, short_circuit = await invoke_agent_graph_with_recovery(
+            initial_state=initial_state,
+            on_graph_failure=_on_graph_failure,
+        )
+        if short_circuit is not None:
+            return short_circuit
+        if result is None:
+            return self._graph_unavailable_fallback(), [], [], [], []
+
         # Extract results in the legacy format
         final_answer = str(result.get("final_answer") or "")
         tool_calls_log = result.get("tool_calls_log") or []
         artifacts = result.get("artifacts") or []
 
-        # If graph path degraded and produced no tool calls, try executing
-        # explicit structured directives via the current request DB session.
-        if not tool_calls_log:
-            manual_tool_calls = await self._collect_manual_memory_calls(db, user, user_message)
-            graph_contract_fallback = await self._maybe_graph_contract_fallback_answer(
-                db=db,
-                user=user,
-                user_message=user_message,
-                manual_tool_calls=manual_tool_calls,
-            )
-            if graph_contract_fallback:
-                fast_answer, fast_calls, fast_artifacts = graph_contract_fallback
-                return fast_answer, [], [], fast_calls, fast_artifacts
-
-        # Graph-first safety bridge: if final text still contains explicit
-        # inline directives, execute them and normalize the user-facing answer.
-        if not tool_calls_log and final_answer and self._should_allow_inline_cron_execution(user_message):
-            inline_cron = await self._maybe_execute_llm_inline_cron(
-                db=db,
-                user=user,
-                llm_answer=final_answer,
-                manual_tool_calls=[],
-            )
-            if inline_cron:
-                final_answer, tool_calls_log, artifacts = inline_cron
-
-        if not tool_calls_log and final_answer and self._should_allow_inline_integration_execution(user_message):
-            inline_integration = await self._maybe_execute_llm_inline_integration(
-                db=db,
-                user=user,
-                llm_answer=final_answer,
-                manual_tool_calls=[],
-            )
-            if inline_integration:
-                final_answer, tool_calls_log, artifacts = inline_integration
-
         # Safety net: re-extract artifacts from tool_calls_log if lost during
         # LangGraph state propagation (e.g. reducer replaced list with []).
         if not artifacts and tool_calls_log:
             artifacts = self._extract_artifacts(tool_calls_log)
-
-        final_answer = self._sanitize_false_attachment_claims(
-            answer=final_answer,
-            tool_calls=tool_calls_log,
-            artifacts=artifacts,
-        )
 
         # Memory IDs from LTM context (for tracking)
         used_memory_ids: list[str] = []
