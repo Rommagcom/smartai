@@ -828,8 +828,31 @@ class DynamicToolService:
             if first_model and first_model != "default":
                 selected_model = first_model
 
-        def llm_chat(system: str, user: str, options: dict | None = None) -> dict:
-            payload_options = options if isinstance(options, dict) else {}
+        def llm_chat(*args: Any, **kwargs: Any) -> dict | str:
+            # Support both styles used by skills:
+            # 1) llm.chat(system="...", user="...", options={}) -> {"text": "..."}
+            # 2) llm.chat("...") -> "..."
+            payload_options = kwargs.get("options") if isinstance(kwargs.get("options"), dict) else {}
+            simple_prompt_mode = False
+
+            if "system" in kwargs or "user" in kwargs:
+                system = str(kwargs.get("system") or "")
+                user = str(kwargs.get("user") or "")
+                if not user and args:
+                    user = str(args[0] or "")
+            else:
+                if len(args) == 1:
+                    system = ""
+                    user = str(args[0] or "")
+                    simple_prompt_mode = True
+                elif len(args) >= 2:
+                    system = str(args[0] or "")
+                    user = str(args[1] or "")
+                    if len(args) >= 3 and isinstance(args[2], dict):
+                        payload_options = args[2]
+                else:
+                    raise TypeError("llm.chat expects either (prompt) or (system, user, options)")
+
             requested_tokens = payload_options.get("max_tokens")
             requested_temperature = payload_options.get("temperature")
             max_t = requested_tokens if isinstance(requested_tokens, int) and 16 <= requested_tokens <= 4096 else max_tokens_int
@@ -853,7 +876,9 @@ class DynamicToolService:
                 )
                 return {"text": str(text or "")}
 
-            return asyncio.run(_run())
+            out = asyncio.run(_run())
+            text = str(out.get("text") or "")
+            return text if simple_prompt_mode else {"text": text}
 
         context["llm"] = {"chat": llm_chat}
         return context
