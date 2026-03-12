@@ -29,10 +29,12 @@ from scripts.smoke_graph_structured_fallback import run as run_graph_structured_
 from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
 from scripts.smoke_document_all_sources import run as run_document_all_sources
 from scripts.smoke_document_raw_passthrough import run as run_document_raw_passthrough
+from scripts.smoke_document_context_filter import run as run_document_context_filter
 from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
 from scripts.smoke_router_tool_export_salvage import run as run_router_tool_export_salvage
 from scripts.smoke_memory_context_priority import run as run_memory_context_priority
 from scripts.smoke_pdf_content_sanitize import run as run_pdf_content_sanitize
+from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
 
 
 def reset_scheduler() -> None:
@@ -142,11 +144,17 @@ async def run() -> None:
         print("RUN_SMOKE_DOCUMENT_RAW_PASSTHROUGH")
         run_document_raw_passthrough()
 
+        print("RUN_SMOKE_DOCUMENT_CONTEXT_FILTER")
+        run_document_context_filter()
+
         print("RUN_SMOKE_WEB_EXPORT_LLM_PDF")
         await run_web_export_llm_pdf()
 
         print("RUN_SMOKE_ROUTER_TOOL_EXPORT_SALVAGE")
         await run_router_tool_export_salvage()
+
+        print("RUN_SMOKE_DESTRUCTIVE_PLANNER_GUARD")
+        run_destructive_planner_guard()
 
         print("RUN_SMOKE_MEMORY_CONTEXT_PRIORITY")
         await run_memory_context_priority()

@@ -20,7 +20,7 @@ def format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | No
             status = str(tr.result.get("status") or "").strip().lower()
             message = str(tr.result.get("message") or "").strip()
             if status in {"queued", "deduplicated"}:
-                return message or "PDF поставлен в очередь и будет отправлен отдельным сообщением."
+                return message or "Задача поставлена в очередь."
             fname = tr.result.get("file_name") or "document.pdf"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -29,7 +29,7 @@ def format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | No
             status = str(tr.result.get("status") or "").strip().lower()
             message = str(tr.result.get("message") or "").strip()
             if status in {"queued", "deduplicated"}:
-                return message or "Excel поставлен в очередь и будет отправлен отдельным сообщением."
+                return message or "Задача поставлена в очередь."
             fname = tr.result.get("file_name") or "document.xlsx"
             size = tr.result.get("size_bytes") or 0
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""

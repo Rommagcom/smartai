@@ -1770,7 +1770,7 @@ class ChatService:
                 status = str(result.get("status") or "").strip().lower()
                 message = str(result.get("message") or "").strip()
                 if status in {"queued", "deduplicated"}:
-                    return message or "PDF поставлен в очередь и будет отправлен отдельным сообщением."
+                    return message or "Задача поставлена в очередь."
                 fname = str(result.get("file_name") or "document.pdf")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -1780,7 +1780,7 @@ class ChatService:
                 status = str(result.get("status") or "").strip().lower()
                 message = str(result.get("message") or "").strip()
                 if status in {"queued", "deduplicated"}:
-                    return message or "Excel поставлен в очередь и будет отправлен отдельным сообщением."
+                    return message or "Задача поставлена в очередь."
                 fname = str(result.get("file_name") or "document.xlsx")
                 size = int(result.get("size_bytes") or 0)
                 size_kb = f" ({size / 1024:.1f} KB)" if size else ""
@@ -2035,10 +2035,7 @@ class ChatService:
                 has_export_queue = True
                 break
 
-        queue_note = (
-            "Файл поставлен в очередь и будет отправлен отдельным сообщением после обработки. "
-            "Текущий ответ не содержит вложения."
-        )
+        queue_note = "Задача поставлена в очередь."
         if has_export_queue:
             # Queue state is authoritative: avoid contradictory long text
             # like "я не могу сгенерировать PDF" in the same response.

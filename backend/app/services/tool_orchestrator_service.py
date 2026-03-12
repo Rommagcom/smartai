@@ -193,6 +193,38 @@ class ToolOrchestratorService:
     _DOC_VALUE_MAX_LEN = 2000
     _DOC_LIST_MAX_ITEMS = 12
     _DOC_DICT_MAX_KEYS = 20
+    _DOC_EXCLUDED_SOURCE_TOOLS = {
+        "cron_add",
+        "cron_list",
+        "cron_delete",
+        "cron_delete_all",
+        "memory_add",
+        "memory_list",
+        "memory_search",
+        "memory_delete",
+        "memory_delete_all",
+        "doc_list",
+        "doc_delete",
+        "doc_delete_all",
+        "dynamic_tool_register",
+        "dynamic_tool_list",
+        "dynamic_tool_delete",
+        "dynamic_tool_delete_all",
+        "register_api_tool",
+        "integration_onboarding_connect",
+        "integration_onboarding_test",
+        "integration_onboarding_save",
+        "integration_health",
+        "integrations_delete_all",
+    }
+    _DOC_EXCLUDED_SOURCE_STATUSES = {
+        "queued",
+        "deduplicated",
+        "deleted",
+        "deleted_all",
+        "not_found",
+        "scheduled",
+    }
     _DOC_LINK_LINE_RE = re.compile(r"^\s*\[.*?\]\(\s*data:application/(?:pdf|octet-stream);base64,[^\)]*\)\s*$", re.IGNORECASE)
     _DOC_BASE64_INLINE_RE = re.compile(r"data:application/(?:pdf|octet-stream);base64,[A-Za-z0-9+/=]+", re.IGNORECASE)
     _DOC_TECH_NOTICE_RE = re.compile(
@@ -350,6 +382,7 @@ class ToolOrchestratorService:
                 max_tokens=settings.OLLAMA_NUM_PREDICT_PLANNER,
             )
             plan = self._normalize_plan(self._parse_json(planner_raw))
+            plan = self._filter_destructive_steps_by_intent(plan=plan, user_message=user_message)
             if not plan.get("use_tools"):
                 logger.debug(
                     "planner decided no tools for message: %.120s | raw: %.200s",
@@ -506,6 +539,11 @@ class ToolOrchestratorService:
             bundle = self._build_document_context_bundle(context)
             if bundle is not None:
                 raw_content = bundle
+            elif token_requested:
+                # If planner explicitly requested "$all_sources" but no data sources
+                # were collected, force validation error downstream instead of
+                # producing a document from unrelated control/tool metadata.
+                raw_content = ""
 
         if raw_content is not None:
             try:
@@ -533,6 +571,8 @@ class ToolOrchestratorService:
             result = item.get("result")
             if result is None:
                 continue
+            if not ToolOrchestratorService._is_document_source_candidate(tool_name=tool_name, result=result):
+                continue
 
             compact_result = ToolOrchestratorService._compact_for_document(result)
             if compact_result in (None, "", [], {}):
@@ -555,6 +595,20 @@ class ToolOrchestratorService:
             "summary": "Собранные данные из предыдущих шагов цепочки инструментов",
             "sources": sources,
         }
+
+    @classmethod
+    def _is_document_source_candidate(cls, *, tool_name: str, result: Any) -> bool:
+        if tool_name in cls._DOC_EXCLUDED_SOURCE_TOOLS:
+            return False
+        if tool_name.startswith("cron_"):
+            return False
+
+        if isinstance(result, dict):
+            status = str(result.get("status") or "").strip().lower()
+            if status in cls._DOC_EXCLUDED_SOURCE_STATUSES:
+                return False
+
+        return True
 
     @staticmethod
     def _compact_for_document(value: Any, *, depth: int = 0) -> Any:
@@ -991,11 +1045,7 @@ class ToolOrchestratorService:
         return {
             "status": "queued" if not deduplicated else "deduplicated",
             "priority": priority,
-            "message": (
-                "Похожая задача уже в обработке. Использую существующую очередь выполнения."
-                if deduplicated
-                else "Задача поставлена в очередь. Отправлю результат отдельным сообщением после обработки."
-            ),
+            "message": "Задача поставлена в очередь.",
         }
 
     async def _pdf_create(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1036,11 +1086,7 @@ class ToolOrchestratorService:
         deduplicated = bool(enqueue_result.get("deduplicated"))
         return {
             "status": "queued" if not deduplicated else "deduplicated",
-            "message": (
-                "📄 Документ готовится в фоновом режиме. Отправлю PDF как только будет готов."
-                if not deduplicated
-                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
-            ),
+            "message": "Задача поставлена в очередь.",
         }
 
     @staticmethod
@@ -1168,11 +1214,7 @@ class ToolOrchestratorService:
         deduplicated = bool(enqueue_result.get("deduplicated"))
         return {
             "status": "queued" if not deduplicated else "deduplicated",
-            "message": (
-                "📊 Документ готовится в фоновом режиме. Отправлю Excel как только будет готов."
-                if not deduplicated
-                else "Похожий документ уже готовится. Результат будет отправлен после обработки."
-            ),
+            "message": "Задача поставлена в очередь.",
         }
 
     async def _memory_add(self, db: AsyncSession, user: User, arguments: dict) -> dict:
@@ -1762,6 +1804,78 @@ class ToolOrchestratorService:
             "steps": normalized_steps[:3],
             "response_hint": response_hint,
         }
+
+    @classmethod
+    def _filter_destructive_steps_by_intent(cls, *, plan: dict, user_message: str) -> dict:
+        if not isinstance(plan, dict):
+            return {"use_tools": False, "steps": [], "response_hint": ""}
+
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+        if not steps:
+            return plan
+
+        lowered = str(user_message or "").strip().lower()
+        filtered: list[dict] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            tool_name = str(step.get("tool") or "").strip().lower()
+            if cls._is_destructive_tool(tool_name) and not cls._has_explicit_destructive_intent(
+                tool_name=tool_name,
+                lowered_message=lowered,
+            ):
+                logger.warning(
+                    "planner destructive step dropped by intent guard",
+                    extra={
+                        "context": {
+                            "component": "tool_orchestrator",
+                            "event": "planner_step_guarded",
+                            "tool": tool_name,
+                            "message_preview": lowered[:160],
+                        }
+                    },
+                )
+                continue
+            filtered.append(step)
+
+        out = dict(plan)
+        out["steps"] = filtered
+        out["use_tools"] = bool(filtered)
+        return out
+
+    @staticmethod
+    def _is_destructive_tool(tool_name: str) -> bool:
+        return tool_name in {
+            "cron_delete_all",
+            "memory_delete_all",
+            "doc_delete_all",
+            "integrations_delete_all",
+            "dynamic_tool_delete_all",
+        }
+
+    @staticmethod
+    def _has_explicit_destructive_intent(*, tool_name: str, lowered_message: str) -> bool:
+        if tool_name == "cron_delete_all":
+            return bool(re.search(r"\bудал[иь].*вс[её].*напомин|очист[иь].*(напомин|задач)|delete\s+all\s+reminder", lowered_message))
+        if tool_name == "memory_delete_all":
+            return bool(
+                re.search(
+                    r"\b(?:очисти|очистить|сотри|стереть)\b.*\bпамят|\bудал[иь].*\bвсю\b.*\bпамят|\bforget\s+(?:all|everything)\b.*\bmemory\b",
+                    lowered_message,
+                )
+            )
+        if tool_name == "doc_delete_all":
+            return bool(re.search(r"\bудал[иь].*вс[её].*документ|очист[иь].*документ|delete\s+all\s+documents?", lowered_message))
+        if tool_name == "integrations_delete_all":
+            return bool(
+                re.search(
+                    r"\bудал[иь].*вс[её].*интеграц|очист[иь].*интеграц|отключ[иь].*вс[её].*интеграц|delete\s+all\s+(?:my\s+)?integrations?|remove\s+all\s+(?:my\s+)?integrations?",
+                    lowered_message,
+                )
+            )
+        if tool_name == "dynamic_tool_delete_all":
+            return bool(re.search(r"\bудал[иь].*вс[её].*(?:api|инструмент|tool)|delete\s+all\s+tools?", lowered_message))
+        return False
 
     @staticmethod
     def _normalize_steps(steps_raw: object) -> list[dict]:
