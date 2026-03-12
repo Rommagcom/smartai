@@ -4,6 +4,9 @@ from app.core.config import settings
 from app.graph.nodes import router_node
 from app.schemas.graph import RouterDecision, RouterOutput
 from app.llm import llm_provider
+from scripts.smoke_env import apply_smoke_env_defaults, smoke_user_uuid
+
+apply_smoke_env_defaults()
 
 
 class _FakeClarifyResponse:
@@ -43,7 +46,7 @@ async def _run_case(fake_response_obj) -> None:
     try:
         state = {
             "user_message": "Получи актуальный прогноз погоды и создай pdf документ",
-            "user_id": None,
+            "user_id": smoke_user_uuid(),
             "feedback_plan": "",
             "retrieved_tools": [],
             "history_messages": [],

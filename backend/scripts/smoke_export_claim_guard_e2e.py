@@ -1,6 +1,9 @@
 import asyncio
 
 from app.graph.nodes import output_node
+from scripts.smoke_env import apply_smoke_env_defaults, smoke_user_uuid
+
+apply_smoke_env_defaults()
 
 
 def ensure(condition: bool, message: str) -> None:
@@ -12,7 +15,7 @@ async def run() -> None:
     state = {
         "final_answer": "PDF-документ Almaty_Weather_Today.pdf успешно создан и готов к скачиванию.",
         "user_message": "Создай PDF документ с результатами прогноза погоды на сегодня в Алматы",
-        "user_id": None,
+        "user_id": smoke_user_uuid(),
         "web_fetch_content": "",
         "web_search_results": [],
         "tool_calls_log": [

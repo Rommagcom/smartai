@@ -16,11 +16,11 @@ def run() -> None:
             "result": {"status": "queued"},
         }
     ]
-    out_queued = nodes._sanitize_false_attachment_claims(queued_text, queued_calls, [])
+    out_queued = nodes.sanitize_false_attachment_claims(queued_text, queued_calls, [])
     ensure("поставлен в очередь" in out_queued.lower(), f"queued guard mismatch: {out_queued}")
     ensure("не содержит вложения" in out_queued.lower(), f"queued attachment note missing: {out_queued}")
 
-    # Case 2: claim without queued status should be downgraded with explicit note.
+    # Case 2: claim without artifact should be rewritten to delivery-pending note.
     plain_claim = "Файл PDF успешно создан."
     plain_calls = [
         {
@@ -29,11 +29,12 @@ def run() -> None:
             "result": {"status": "ok"},
         }
     ]
-    out_plain = nodes._sanitize_false_attachment_claims(plain_claim, plain_calls, [])
-    ensure("не был приложен" in out_plain.lower(), f"plain claim note missing: {out_plain}")
+    out_plain = nodes.sanitize_false_attachment_claims(plain_claim, plain_calls, [])
+    ensure("будет отправлен отдельным сообщением" in out_plain.lower(), f"plain claim not rewritten: {out_plain}")
+    ensure("не содержит вложения" in out_plain.lower(), f"missing attachment note for plain claim: {out_plain}")
 
     # Case 3: if artifact is present, answer must stay untouched.
-    with_artifact = nodes._sanitize_false_attachment_claims(
+    with_artifact = nodes.sanitize_false_attachment_claims(
         queued_text,
         queued_calls,
         [{"file_name": "a.pdf", "mime_type": "application/pdf", "file_base64": "Zm9v"}],
