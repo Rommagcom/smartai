@@ -27,6 +27,7 @@ from scripts.smoke_export_reenqueue_guard import run as run_export_reenqueue_gua
 from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
 from scripts.smoke_graph_structured_fallback import run as run_graph_structured_fallback
 from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
+from scripts.smoke_document_all_sources import run as run_document_all_sources
 
 
 def reset_scheduler() -> None:
@@ -129,6 +130,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_GRAPH_INLINE_CRON_GUARD")
         await run_graph_inline_cron_guard()
+
+        print("RUN_SMOKE_DOCUMENT_ALL_SOURCES")
+        await run_document_all_sources()
 
         print("SMOKE_ALL_OK")
     finally:
