@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 from uuid import UUID
@@ -187,6 +187,8 @@ def _resolve_placeholders(arguments: dict, *, prev: dict | None, steps: list[dic
 
 
 class ToolOrchestratorService:
+    _CRON_DEDUPE_WINDOW_SECONDS = 180
+
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
         normalized = str(action_type or "send_message").strip().lower()
@@ -195,6 +197,17 @@ class ToolOrchestratorService:
         if normalized in {"chat", "tool_call", "api_call", "integration", "integration_call", "execute", "display"}:
             return "chat"
         return normalized
+
+    @staticmethod
+    def _normalize_dedupe_text(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+    @classmethod
+    def _is_recent_for_dedupe(cls, value: datetime | None) -> bool:
+        if not isinstance(value, datetime):
+            return False
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return normalized >= (datetime.now(timezone.utc) - timedelta(seconds=cls._CRON_DEDUPE_WINDOW_SECONDS))
 
     async def plan_tool_calls(
         self,
@@ -1199,6 +1212,40 @@ class ToolOrchestratorService:
                 payload["run_at"] = parsed.run_at_iso
                 payload["is_one_time"] = True
 
+        dedupe_message = self._normalize_dedupe_text(task_text)
+        candidates_result = await db.execute(
+            select(CronJob)
+            .where(
+                CronJob.user_id == user.id,
+                CronJob.is_active.is_(True),
+                CronJob.action_type == action_type,
+                CronJob.cron_expression == cron_expression,
+            )
+            .order_by(CronJob.created_at.desc())
+            .limit(50)
+        )
+        for existing_job in candidates_result.scalars().all():
+            existing_message = self._normalize_dedupe_text(str((existing_job.payload or {}).get("message") or ""))
+            if existing_message != dedupe_message:
+                continue
+            if not self._is_recent_for_dedupe(existing_job.created_at):
+                continue
+            _dev_verbose_log(
+                "cron_add_deduplicated",
+                user_id=str(user.id),
+                cron_id=str(existing_job.id),
+                cron_expression=existing_job.cron_expression,
+            )
+            return {
+                "id": str(existing_job.id),
+                "name": existing_job.name,
+                "cron_expression": existing_job.cron_expression,
+                "action_type": existing_job.action_type,
+                "payload": existing_job.payload,
+                "deduplicated": True,
+                "status": "deduplicated",
+            }
+
         cron = CronJob(
             user_id=user.id,
             name=cron_name,
@@ -1249,6 +1296,8 @@ class ToolOrchestratorService:
             "cron_expression": cron.cron_expression,
             "action_type": cron.action_type,
             "payload": cron.payload,
+            "deduplicated": False,
+            "status": "created",
         }
 
     async def _cron_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:

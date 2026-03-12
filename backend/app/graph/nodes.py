@@ -1100,6 +1100,15 @@ async def output_node(state: dict) -> dict:
         artifacts=all_artifacts,
     )
 
+    sanitized_final = _sanitize_llm_answer(final_answer)
+    if sanitized_final != final_answer:
+        _dev_log(
+            "output_final_answer_sanitized",
+            before_len=len(str(final_answer or "")),
+            after_len=len(str(sanitized_final or "")),
+        )
+    final_answer = sanitized_final
+
     # Append to STM + extract facts to LTM
     if user_id and final_answer:
         try:

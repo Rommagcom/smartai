@@ -60,6 +60,18 @@ async def run() -> None:
         ensure("Не удалось получить данные" not in answer2, f"unexpected generic fallback #2: {answer2}")
         ensure("Алматы" in answer2 or "+9" in answer2, f"chat fallback answer mismatch: {answer2}")
 
+        # Case 3: fallback returns raw tool markup -> must be sanitized.
+        async def fallback_chat_with_tool_markup(*args, **kwargs):
+            del args, kwargs
+            return "```cron_add\n<cron_add><cron_expression>0 9 * * *</cron_expression></cron_add>\n```"
+
+        llm_provider.chat = fallback_chat_with_tool_markup
+
+        out3 = await nodes.compose_node(state)
+        answer3 = str(out3.get("final_answer") or "")
+        ensure("cron_add" not in answer3.lower(), f"tool markup leaked to user: {answer3}")
+        ensure("```" not in answer3, f"markdown fence leaked to user: {answer3}")
+
         print("SMOKE_WEB_COMPOSE_FALLBACK_OK")
     finally:
         llm_provider.chat_structured = original_chat_structured
