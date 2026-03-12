@@ -31,6 +31,7 @@ from scripts.smoke_document_all_sources import run as run_document_all_sources
 from scripts.smoke_document_raw_passthrough import run as run_document_raw_passthrough
 from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
 from scripts.smoke_router_tool_export_salvage import run as run_router_tool_export_salvage
+from scripts.smoke_memory_context_priority import run as run_memory_context_priority
 
 
 def reset_scheduler() -> None:
@@ -145,6 +146,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_ROUTER_TOOL_EXPORT_SALVAGE")
         await run_router_tool_export_salvage()
+
+        print("RUN_SMOKE_MEMORY_CONTEXT_PRIORITY")
+        await run_memory_context_priority()
 
         print("SMOKE_ALL_OK")
     finally:
