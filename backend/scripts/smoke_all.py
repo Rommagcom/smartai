@@ -29,6 +29,7 @@ from scripts.smoke_graph_structured_fallback import run as run_graph_structured_
 from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
 from scripts.smoke_document_all_sources import run as run_document_all_sources
 from scripts.smoke_document_raw_passthrough import run as run_document_raw_passthrough
+from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
 
 
 def reset_scheduler() -> None:
@@ -137,6 +138,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_DOCUMENT_RAW_PASSTHROUGH")
         run_document_raw_passthrough()
+
+        print("RUN_SMOKE_WEB_EXPORT_LLM_PDF")
+        await run_web_export_llm_pdf()
 
         print("SMOKE_ALL_OK")
     finally:
