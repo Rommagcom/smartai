@@ -248,7 +248,18 @@ class MemoryManager:
 
         try:
             items = await short_term_memory_service.get_recent(user_id, limit=limit)
-            return [str(item.get("text") or "") for item in items if item.get("text")]
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                key = re.sub(r"\s+", " ", text.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(text)
+            return deduped
         except Exception:
             logger.debug("STM fetch failed", exc_info=True)
             return []
@@ -259,7 +270,7 @@ class MemoryManager:
         from app.services.memory_service import memory_service
 
         try:
-            memories = await memory_service.retrieve_relevant_memories(
+            memories = await memory_service.retrieve_chat_context_memories(
                 db, user_id, query=query, top_k=limit
             )
             return [str(m.content or "") for m in memories if str(m.content or "").strip()]

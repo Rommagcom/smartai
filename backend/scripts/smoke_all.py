@@ -1,5 +1,9 @@
 import asyncio
 
+from scripts.smoke_env import apply_smoke_env_defaults
+
+apply_smoke_env_defaults()
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import settings
@@ -10,12 +14,28 @@ from scripts.smoke_integrations import run as run_integrations
 from scripts.smoke_memory_docs import run as run_memory_docs
 from scripts.smoke_chat_cron_add import run as run_chat_cron_add
 from scripts.smoke_chat_cron_add_natural import run as run_chat_cron_add_natural
+from scripts.smoke_cron_dedupe import run as run_cron_dedupe
 from scripts.smoke_onboarding_step import run as run_onboarding_step
 from scripts.smoke_telegram_bridge import run as run_telegram_bridge
 from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
 from scripts.smoke_ws_cron import run as run_ws_cron
 from scripts.smoke_tool_routing import run as run_tool_routing
 from scripts.smoke_web_compose_fallback import run as run_web_compose_fallback
+from scripts.smoke_export_claim_guard import run as run_export_claim_guard
+from scripts.smoke_export_claim_guard_e2e import run as run_export_claim_guard_e2e
+from scripts.smoke_export_reenqueue_guard import run as run_export_reenqueue_guard
+from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
+from scripts.smoke_graph_structured_fallback import run as run_graph_structured_fallback
+from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
+from scripts.smoke_document_all_sources import run as run_document_all_sources
+from scripts.smoke_document_raw_passthrough import run as run_document_raw_passthrough
+from scripts.smoke_document_context_filter import run as run_document_context_filter
+from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
+from scripts.smoke_router_tool_export_salvage import run as run_router_tool_export_salvage
+from scripts.smoke_memory_context_priority import run as run_memory_context_priority
+from scripts.smoke_pdf_content_sanitize import run as run_pdf_content_sanitize
+from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
+from scripts.smoke_dynamic_skill_package import run as run_dynamic_skill_package
 
 
 def reset_scheduler() -> None:
@@ -64,6 +84,11 @@ async def run() -> None:
 
         reset_scheduler()
 
+        print("RUN_SMOKE_CRON_DEDUPE")
+        await run_cron_dedupe()
+
+        reset_scheduler()
+
         print("SKIP_SMOKE_CHAT_TOOLS_REMINDERS (web tools removed)")
         print("SKIP_SMOKE_CHAT_SELF_SERVICE (web tools removed)")
 
@@ -95,6 +120,51 @@ async def run() -> None:
 
         print("RUN_SMOKE_WEB_COMPOSE_FALLBACK")
         await run_web_compose_fallback()
+
+        print("RUN_SMOKE_EXPORT_CLAIM_GUARD")
+        run_export_claim_guard()
+
+        print("RUN_SMOKE_EXPORT_CLAIM_GUARD_E2E")
+        await run_export_claim_guard_e2e()
+
+        print("RUN_SMOKE_EXPORT_REENQUEUE_GUARD")
+        run_export_reenqueue_guard()
+
+        print("RUN_SMOKE_ROUTER_CLARIFY_LIVE_EXPORT_OVERRIDE")
+        await run_router_clarify_live_export_override()
+
+        print("RUN_SMOKE_GRAPH_STRUCTURED_FALLBACK")
+        await run_graph_structured_fallback()
+
+        print("RUN_SMOKE_GRAPH_INLINE_CRON_GUARD")
+        await run_graph_inline_cron_guard()
+
+        print("RUN_SMOKE_DOCUMENT_ALL_SOURCES")
+        await run_document_all_sources()
+
+        print("RUN_SMOKE_DOCUMENT_RAW_PASSTHROUGH")
+        run_document_raw_passthrough()
+
+        print("RUN_SMOKE_DOCUMENT_CONTEXT_FILTER")
+        run_document_context_filter()
+
+        print("RUN_SMOKE_WEB_EXPORT_LLM_PDF")
+        await run_web_export_llm_pdf()
+
+        print("RUN_SMOKE_ROUTER_TOOL_EXPORT_SALVAGE")
+        await run_router_tool_export_salvage()
+
+        print("RUN_SMOKE_DESTRUCTIVE_PLANNER_GUARD")
+        run_destructive_planner_guard()
+
+        print("RUN_SMOKE_DYNAMIC_SKILL_PACKAGE")
+        await run_dynamic_skill_package()
+
+        print("RUN_SMOKE_MEMORY_CONTEXT_PRIORITY")
+        await run_memory_context_priority()
+
+        print("RUN_SMOKE_PDF_CONTENT_SANITIZE")
+        run_pdf_content_sanitize()
 
         print("SMOKE_ALL_OK")
     finally:

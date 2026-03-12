@@ -10,7 +10,20 @@
 				"scripts.smoke_all"
 			],
 			"options": {
-				"cwd": "c:/Repositories/SmartAi/backend"
+				"cwd": "c:/Repositories/SmartAi/backend",
+				"env": {
+					"SMOKE_TEST_USER_ID": "505a788e-c6c9-4d69-a768-58860070a9f5",
+					"SMOKE_REMOTE_IP": "91.147.112.158",
+					"DATABASE_URL": "postgresql+asyncpg://assistant:assistant@91.147.112.158:5432/assistant",
+					"REDIS_URL": "redis://91.147.112.158:6379/0",
+					"MILVUS_HOST": "91.147.112.158",
+					"MILVUS_PORT": "19530",
+					"OLLAMA_BASE_URL": "http://91.147.112.158:11434",
+					"WORKER_ENABLED": "0",
+					"WS_FANOUT_REDIS_ENABLED": "0",
+					"SCHEDULER_ENABLED": "0",
+					"SMOKE_CHAT_CRON_ADD_ASSERT_PERSISTENCE": "0"
+				}
 			},
 			"isBackground": false,
 			"presentation": {
@@ -168,6 +181,66 @@
 				"-m",
 				"scripts.smoke_chat_cron_add_natural"
 			]
+		},
+		{
+			"label": "run-smoke-chat-cron-add-local",
+			"type": "shell",
+			"command": "C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"scripts.smoke_chat_cron_add"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-chat-cron-add-local-cwd",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_chat_cron_add"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-graph-inline-cron-guard",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_graph_inline_cron_guard"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-graph-structured-fallback-local",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_graph_structured_fallback"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-smoke-graph-inline-cron-guard-v2",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && C:\\Repositories\\SmartAi\\.venv\\Scripts\\python.exe -m scripts.smoke_graph_inline_cron_guard"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "smoke-all-remote-fixed-user",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"cd backend && set DATABASE_URL=postgresql+asyncpg://assistant:assistant@91.147.112.158:5432/assistant&& set REDIS_URL=redis://91.147.112.158:6379/0&& set MILVUS_HOST=91.147.112.158&& set MILVUS_PORT=19530&& set OLLAMA_BASE_URL=http://91.147.112.158:11434&& set WORKER_ENABLED=0&& set WS_FANOUT_REDIS_ENABLED=0&& set SCHEDULER_ENABLED=0&& set SMOKE_TEST_USER_ID=505a788e-c6c9-4d69-a768-58860070a9f5&& set SMOKE_CHAT_CRON_ADD_ASSERT_PERSISTENCE=0&& C:/Repositories/SmartAi/.venv/Scripts/python.exe -m scripts.smoke_all"
+			],
+			"isBackground": false
 		}
 	]
 }

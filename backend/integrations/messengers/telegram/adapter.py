@@ -142,6 +142,9 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("doc_ask", self.doc_ask))
         application.add_handler(CommandHandler("doc_delete", self.doc_delete))
         application.add_handler(CommandHandler("doc_delete_all", self.doc_delete_all))
+        application.add_handler(CommandHandler("skill_list", self.skill_list))
+        application.add_handler(CommandHandler("skill_delete", self.skill_delete))
+        application.add_handler(CommandHandler("skill_delete_all", self.skill_delete_all))
         application.add_handler(CommandHandler("cron_add", self.cron_add))
         application.add_handler(CommandHandler("cron_list", self.cron_list))
         application.add_handler(CommandHandler("cron_del", self.cron_del))
@@ -741,6 +744,10 @@ class TelegramAdapter(MessengerAdapter):
         if job_type in {"cron_reminder", "cron_chat"} and human_message:
             return human_message
 
+        # For background export jobs keep the user-facing message minimal.
+        if job_type in {"pdf_create", "excel_create"}:
+            return "Задача поставлена в очередь."
+
         preview = item.get("result_preview")
         if preview is None:
             preview = item.get("result", {})
@@ -936,8 +943,11 @@ class TelegramAdapter(MessengerAdapter):
             result.get("status"),
             _safe_json(payload, max_len=4000),
         )
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        detail_text = _safe_json(detail, max_len=1200) if isinstance(detail, (dict, list)) else str(detail or "")
+        suffix = f"\n{detail_text}" if detail_text else ""
         await update.effective_message.reply_text(
-            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз."
+            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз.{suffix}"
         )
 
     async def _ensure_soul_ready_for_chat(
@@ -999,6 +1009,9 @@ class TelegramAdapter(MessengerAdapter):
             "/doc_ask <question>\n"
             "/doc_delete <filename>\n"
             "/doc_delete_all\n"
+            "/skill_list\n"
+            "/skill_delete <skill_name>\n"
+            "/skill_delete_all\n"
             "/cron_add <name>|<cron>|<action_type>|<payload_json>\n"
             "/cron_list, /cron_del <job_id>\n"
             "/integrations_add <service>|<auth_json>|<endpoints_json>\n"
@@ -1285,21 +1298,42 @@ class TelegramAdapter(MessengerAdapter):
         doc = update.effective_message.document
         tg_file = await context.bot.get_file(doc.file_id)
         content = await tg_file.download_as_bytearray()
+        filename = str(doc.file_name or "document.bin").strip() or "document.bin"
+        lowered_name = filename.lower()
+        is_skill_archive = lowered_name.endswith(".zip") and (
+            lowered_name == "add_skill.zip" or "skill" in lowered_name
+        )
         try:
-            res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
+            if is_skill_archive:
+                res = await self.client.skills_upload(token, filename, bytes(content))
+            else:
+                res = await self.client.documents_upload(token, filename, bytes(content))
         except httpx.TimeoutException:
-            await update.effective_message.reply_text(
-                "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+            timeout_message = (
+                "Регистрация Dynamic Skill заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+                if is_skill_archive
+                else "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
             )
+            await update.effective_message.reply_text(timeout_message)
             return
         except Exception:
             logger.exception("telegram document upload failed")
-            await update.effective_message.reply_text(
-                "Внутренняя ошибка при загрузке документа. Попробуйте позже."
+            fail_message = (
+                "Внутренняя ошибка при регистрации Dynamic Skill. Попробуйте позже."
+                if is_skill_archive
+                else "Внутренняя ошибка при загрузке документа. Попробуйте позже."
             )
+            await update.effective_message.reply_text(fail_message)
             return
         if res.get("status") != 200:
             await self._reply_api_result(update, res)
+            return
+
+        if is_skill_archive:
+            payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+            tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
+            tool_name = str(tool.get("name") or "skill")
+            await update.effective_message.reply_text(f"Dynamic Skill зарегистрирован ✅ Имя: {tool_name}")
             return
 
         payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
@@ -1469,6 +1503,68 @@ class TelegramAdapter(MessengerAdapter):
         self._dev_log("doc_delete_all", deleted_count=deleted_count)
         await update.effective_message.reply_text(
             f"Удалены все загруженные документы. Удалено чанков: {deleted_count}."
+        )
+
+    async def skill_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_list(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            await update.effective_message.reply_text("Dynamic Skills пока не зарегистрированы.")
+            return
+
+        lines = ["Dynamic Skills:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or "skill"
+            method = str(item.get("method") or "").strip() or "UNKNOWN"
+            lines.append(f"- {name} ({method})")
+        if len(items) > 30:
+            lines.append(f"- ...и еще {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def skill_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        skill_name = " ".join(context.args).strip()
+        if not skill_name:
+            await update.effective_message.reply_text("Использование: /skill_delete <skill_name>")
+            return
+
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete(token, skill_name)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        await update.effective_message.reply_text(f"Dynamic Skill '{skill_name}' удален ✅")
+
+    async def skill_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        await update.effective_message.reply_text(
+            f"Удалены все Dynamic Skills. Количество: {deleted_count}."
         )
 
     async def cron_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

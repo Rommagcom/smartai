@@ -1,6 +1,11 @@
 """Quick validation of the structured output parsing."""
 from app.schemas.graph import RouterOutput, RouterDecision, ToolStep
 from app.llm import LLMProvider
+import uuid
+
+from scripts.smoke_env import apply_smoke_env_defaults, smoke_user_uuid
+
+apply_smoke_env_defaults()
 
 provider = LLMProvider()
 
@@ -18,11 +23,10 @@ print(f"Fenced parse: {result2.decision.value}")
 
 # Test AgentState creation
 from app.schemas.graph import AgentState
-import uuid
-
+_smoke_user_id = smoke_user_uuid()
 state = AgentState(
-    user_id=uuid.uuid4(),
-    session_id=uuid.uuid4(),
+    user_id=_smoke_user_id,
+    session_id=uuid.uuid5(uuid.NAMESPACE_DNS, f"smoke-session-{_smoke_user_id}"),
     user_message="тестовое сообщение",
 )
 print(f"AgentState: user_message={state.user_message}, iteration={state.iteration}")

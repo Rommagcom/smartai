@@ -1,4 +1,7 @@
 fastapi==0.116.1
+starlette>=0.40.0,<0.48.0
+sse-starlette<3
+packaging<26
 gunicorn==23.0.0
 uvicorn[standard]==0.35.0
 sqlalchemy==2.0.43
