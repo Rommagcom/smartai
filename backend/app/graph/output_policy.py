@@ -71,6 +71,12 @@ def sanitize_false_attachment_claims(answer: str, tool_calls: list[dict], artifa
             "Текущий ответ не содержит вложения."
         )
 
+    if _has_any_export_success(tool_calls):
+        return (
+            f"{_delivery_subject(tool_calls)} сформирован и будет отправлен отдельным сообщением. "
+            "Текущий ответ не содержит вложения."
+        )
+
     return text
 
 
@@ -107,6 +113,28 @@ def _has_queued_export(tool_calls: list[dict]) -> bool:
         if status in {"queued", "deduplicated"}:
             return True
     return False
+
+
+def _has_any_export_success(tool_calls: list[dict]) -> bool:
+    for call in tool_calls:
+        if not isinstance(call, dict) or not bool(call.get("success")):
+            continue
+        tool_name = str(call.get("tool") or "").strip().lower()
+        if tool_name in {"pdf_create", "excel_create"}:
+            return True
+    return False
+
+
+def _delivery_subject(tool_calls: list[dict]) -> str:
+    for call in tool_calls:
+        if not isinstance(call, dict) or not bool(call.get("success")):
+            continue
+        tool_name = str(call.get("tool") or "").strip().lower()
+        if tool_name == "excel_create":
+            return "Excel-файл"
+        if tool_name == "pdf_create":
+            return "PDF-файл"
+    return "Файл"
 
 
 def _contains_export_success_claim(text: str) -> bool:

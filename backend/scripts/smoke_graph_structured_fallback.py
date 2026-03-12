@@ -11,6 +11,9 @@ from app.models.message import Message
 from app.models.session import Session
 from app.models.user import User
 from app.services.chat_service import chat_service
+from scripts.smoke_env import apply_smoke_env_defaults, smoke_user_uuid
+
+apply_smoke_env_defaults()
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -43,6 +46,7 @@ async def run() -> None:
     try:
         async with session_factory() as db:
             user = User(
+                id=smoke_user_uuid(),
                 username="graph_fallback_user",
                 hashed_password=get_password_hash("smoke-graph-fallback"),
                 soul_configured=True,

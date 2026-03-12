@@ -1,5 +1,9 @@
 import asyncio
 
+from scripts.smoke_env import apply_smoke_env_defaults
+
+apply_smoke_env_defaults()
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.config import settings
@@ -103,13 +107,13 @@ async def run() -> None:
         await run_web_compose_fallback()
 
         print("RUN_SMOKE_EXPORT_CLAIM_GUARD")
-        await run_export_claim_guard()
+        run_export_claim_guard()
 
         print("RUN_SMOKE_EXPORT_CLAIM_GUARD_E2E")
         await run_export_claim_guard_e2e()
 
         print("RUN_SMOKE_EXPORT_REENQUEUE_GUARD")
-        await run_export_reenqueue_guard()
+        run_export_reenqueue_guard()
 
         print("RUN_SMOKE_ROUTER_CLARIFY_LIVE_EXPORT_OVERRIDE")
         await run_router_clarify_live_export_override()
