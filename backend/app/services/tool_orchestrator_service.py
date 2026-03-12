@@ -188,6 +188,7 @@ def _resolve_placeholders(arguments: dict, *, prev: dict | None, steps: list[dic
 
 class ToolOrchestratorService:
     _CRON_DEDUPE_WINDOW_SECONDS = 180
+    _DOC_ALL_SOURCES_TOKENS = {"$all_sources", "{{all_sources}}", "all_sources"}
 
     @staticmethod
     def _normalize_cron_action_type(action_type: str) -> str:
@@ -292,6 +293,8 @@ class ToolOrchestratorService:
             "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
             "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
             "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}]."
+            "22) Чтобы сгенерировать документ ИЗ ВСЕХ предыдущих результатов цепочки через LLM, "
+            "используй content='$all_sources' в pdf_create/excel_create."
         )
 
         try:
@@ -376,6 +379,7 @@ class ToolOrchestratorService:
                 continue
 
             arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
+            arguments = await self._enrich_document_arguments(tool=tool, arguments=arguments, context=context)
             arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
             arguments = self._coerce_argument_types(tool, arguments)
             if tool not in handlers:
@@ -446,6 +450,66 @@ class ToolOrchestratorService:
             tools=[str(item.get("tool") or "") for item in results],
         )
         return results
+
+    async def _enrich_document_arguments(self, *, tool: str, arguments: dict, context: dict[str, Any]) -> dict:
+        """Auto-fill/summarize document content from chain context for pdf/excel tools."""
+        if tool not in {"pdf_create", "excel_create"}:
+            return arguments
+
+        enriched = dict(arguments)
+        raw_content = enriched.get("content")
+        rows = enriched.get("rows")
+
+        token_requested = isinstance(raw_content, str) and raw_content.strip().lower() in self._DOC_ALL_SOURCES_TOKENS
+        missing_content = not str(raw_content or "").strip()
+        should_use_context_bundle = token_requested or (missing_content and not (isinstance(rows, list) and rows))
+
+        if should_use_context_bundle:
+            bundle = self._build_document_context_bundle(context)
+            if bundle is not None:
+                raw_content = bundle
+
+        if raw_content is not None:
+            try:
+                title_hint = str(enriched.get("title") or "")
+                enriched["content"] = await self._maybe_summarize_content(raw_content, title_hint=title_hint)
+            except Exception:
+                logger.warning("document content enrichment failed", exc_info=True)
+                enriched["content"] = str(raw_content)
+
+        return enriched
+
+    @staticmethod
+    def _build_document_context_bundle(context: dict[str, Any]) -> dict | None:
+        steps = context.get("_steps") or []
+        if not isinstance(steps, list) or not steps:
+            return None
+
+        sources: list[dict[str, Any]] = []
+        for idx, item in enumerate(steps):
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool") or "").strip().lower()
+            if tool_name in {"pdf_create", "excel_create"}:
+                continue
+            result = item.get("result")
+            if result is None:
+                continue
+            sources.append(
+                {
+                    "step_index": idx,
+                    "tool": tool_name,
+                    "result": result,
+                }
+            )
+
+        if not sources:
+            return None
+
+        return {
+            "summary": "Собранные данные из предыдущих шагов цепочки инструментов",
+            "sources": sources,
+        }
 
     @staticmethod
     def _augment_step_arguments(tool: str, arguments: dict, context: dict[str, Any]) -> dict:
@@ -852,6 +916,8 @@ class ToolOrchestratorService:
         if not filename.lower().endswith(".pdf"):
             filename = f"{filename}.pdf"
 
+        raw_content = await self._maybe_summarize_content(raw_content, title_hint=title)
+
         # Serialize content for the worker payload
         if isinstance(raw_content, dict):
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
@@ -973,6 +1039,9 @@ class ToolOrchestratorService:
         filename = str(arguments.get("filename") or "document.xlsx").strip()
         if not filename.lower().endswith(".xlsx"):
             filename = f"{filename}.xlsx"
+
+        if not (isinstance(rows, list) and rows):
+            raw_content = await self._maybe_summarize_content(raw_content, title_hint=title)
 
         if isinstance(raw_content, dict):
             content_str = json.dumps(raw_content, ensure_ascii=False, default=str)
