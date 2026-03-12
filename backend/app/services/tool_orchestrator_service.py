@@ -554,7 +554,6 @@ class ToolOrchestratorService:
                 "bytes",
                 "binary",
                 "raw_html",
-                "raw",
             }
             compact: dict[str, Any] = {}
             for idx, (k, v) in enumerate(value.items()):
