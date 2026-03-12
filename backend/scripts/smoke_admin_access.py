@@ -122,10 +122,10 @@ async def run() -> None:
         ensure(revoke_last_remaining.status_code == 400, f"should protect last remaining admin: {revoke_last_remaining.text}")
 
     try:
-            with suppress(asyncio.CancelledError):
-                await engine.dispose()
-        except Exception as exc:
-            print(f"engine dispose failed: {exc}")
+        with suppress(asyncio.CancelledError):
+            await engine.dispose()
+    except Exception as exc:
+        print(f"engine dispose failed: {exc}")
     if DB_PATH.exists():
         DB_PATH.unlink()
 
