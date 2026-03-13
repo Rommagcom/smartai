@@ -271,6 +271,21 @@ class ToolOrchestratorService:
     def _normalize_dedupe_text(text: str) -> str:
         return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
+    @staticmethod
+    def _is_interval_cron_expression(cron_expression: str) -> bool:
+        expr = str(cron_expression or "").strip().lower()
+        return re.fullmatch(r"\*/\d+\s+\*\s+\*\s+\*\s+\*", expr) is not None
+
+    @staticmethod
+    def _is_relative_once_schedule(schedule_text: str) -> bool:
+        text = str(schedule_text or "").strip().lower()
+        if not text:
+            return False
+        return bool(
+            re.search(r"\bчерез\s+\d+\s*(?:секунд|секунды|секунду|мин|минут|минуты|минуту|час|часа|часов|день|дня|дней)\b", text)
+            or re.search(r"\bin\s+\d+\s*(?:seconds?|minutes?|hours?|days?)\b", text)
+        )
+
     @classmethod
     def _is_recent_for_dedupe(cls, value: datetime | None) -> bool:
         if not isinstance(value, datetime):
@@ -1395,12 +1410,36 @@ class ToolOrchestratorService:
             or ""
         ).strip()
 
+        user_timezone = str(user.preferences.get("timezone") or "Europe/Moscow")
+
+        if (
+            cron_expression
+            and schedule_text
+            and self._is_interval_cron_expression(cron_expression)
+            and self._is_relative_once_schedule(schedule_text)
+        ):
+            try:
+                parsed = schedule_parser_service.parse(schedule_text=schedule_text, timezone_name=user_timezone)
+                if parsed.is_one_time:
+                    cron_expression = parsed.cron_expression
+                    payload["timezone"] = user_timezone
+                    if parsed.run_at_iso:
+                        payload["run_at"] = parsed.run_at_iso
+                        payload["is_one_time"] = True
+                    _dev_verbose_log(
+                        "cron_add_interval_overridden_to_once",
+                        user_id=str(user.id),
+                        schedule_text=schedule_text,
+                        cron_expression=cron_expression,
+                    )
+            except Exception:
+                logger.debug("cron interval override failed", exc_info=True)
+
         if not cron_expression:
             if not schedule_text:
                 _dev_verbose_log("cron_add_invalid_args", user_id=str(user.id), reason="missing_schedule_and_cron_expression")
                 raise ValueError("cron_add requires cron_expression or schedule_text")
 
-            user_timezone = str(user.preferences.get("timezone") or "Europe/Moscow")
             parsed = schedule_parser_service.parse(schedule_text=schedule_text, timezone_name=user_timezone)
             cron_expression = parsed.cron_expression
             _dev_verbose_log(
