@@ -180,6 +180,29 @@ async def run() -> None:
                 f"invalid natural reminder changed job count unexpectedly: before={before_invalid_count}, after={len(jobs_after_invalid)}",
             )
 
+        relative_once_message = "Создай напоминание через 3 минуты -Нужна встреча"
+        relative_once_response = client.post(
+            "/api/v1/chat",
+            json={"message": relative_once_message, "session_id": session_id},
+            headers=headers,
+        )
+        ensure(relative_once_response.status_code == 200, f"chat relative-once failed: {relative_once_response.text}")
+
+        listed_after_relative_once = client.get("/api/v1/cron", headers=headers)
+        ensure(listed_after_relative_once.status_code == 200, f"cron list after relative-once failed: {listed_after_relative_once.text}")
+        jobs_after_relative_once = listed_after_relative_once.json() if isinstance(listed_after_relative_once.json(), list) else []
+
+        once_jobs = [
+            item for item in jobs_after_relative_once
+            if isinstance(item, dict)
+            and str((item.get("payload") or {}).get("message") or "").strip().lower() == "нужна встреча"
+        ]
+        ensure(bool(once_jobs), f"relative reminder payload not found: {jobs_after_relative_once}")
+        ensure(
+            str(once_jobs[0].get("cron_expression") or "").startswith("@once:"),
+            f"relative reminder must be one-time, got: {once_jobs[0]}",
+        )
+
     if should_assert_persistence():
         async with session_factory() as session:
             result = await session.execute(select(CronJob))

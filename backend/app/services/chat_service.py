@@ -591,7 +591,7 @@ class ChatService:
             return None
 
         reminder_intent = re.search(
-            r"\b(?:напомни|напомин|запланируй|поставь\s+напомин|создай\s+напомин"
+            r"\b(?:напомни|напомин|запланируй|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?"
             r"|remind|set\s+(?:a\s+)?reminder|(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder))\b",
             lowered,
         )
