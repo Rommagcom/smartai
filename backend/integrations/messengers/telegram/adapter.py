@@ -702,7 +702,8 @@ class TelegramAdapter(MessengerAdapter):
             # Always send the text notification (unless the file was sent and
             # the text would just be a generic "task done" message).
             if not file_sent:
-                await application.bot.send_message(
+                await self._send_long_text(
+                    bot=application.bot,
                     chat_id=chat_id,
                     text=self._format_worker_item(item),
                 )
@@ -714,6 +715,31 @@ class TelegramAdapter(MessengerAdapter):
             latency_ms=(perf_counter() - started_at) * 1000,
         )
         return True
+
+    @staticmethod
+    async def _send_long_text(bot: Bot, chat_id: int, text: str, chunk_size: int = 3500) -> None:
+        """Send long text safely to Telegram by splitting into message-sized chunks."""
+        clean = str(text or "").strip()
+        if not clean:
+            return
+
+        remaining = clean
+        while remaining:
+            if len(remaining) <= chunk_size:
+                await bot.send_message(chat_id=chat_id, text=remaining)
+                return
+
+            split_at = remaining.rfind("\n\n", 0, chunk_size)
+            if split_at < 0:
+                split_at = remaining.rfind("\n", 0, chunk_size)
+            if split_at < 0:
+                split_at = chunk_size
+
+            part = remaining[:split_at].strip()
+            if part:
+                await bot.send_message(chat_id=chat_id, text=part)
+
+            remaining = remaining[split_at:].lstrip()
 
     @staticmethod
     async def _try_send_worker_artifact(
