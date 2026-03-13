@@ -59,6 +59,7 @@ from app.graph.node_helpers import (
     fallback_live_data_export_route,
     feedback_requires_web_search,
     feedback_to_search_query,
+    followup_export_route,
     format_deterministic_tool_answer,
     has_successful_export_call,
     is_web_search_intent,
@@ -329,8 +330,19 @@ async def router_node(state: dict) -> dict:
             "next_step": hard_route.decision.value,
         }
 
-    # 1. Try deterministic shortcuts first (fast path, no LLM call)
+    # 1. History-aware export follow-up should always work, even when generic
+    # deterministic shortcuts are disabled by config.
+    export_followup = followup_export_route(user_message, history)
+    if export_followup is not None:
+        _dev_log("router_deterministic_export_followup", decision=export_followup.decision.value)
+        return {
+            "router_output": export_followup,
+            "next_step": export_followup.decision.value,
+        }
+
+    # 2. Try deterministic shortcuts first (fast path, no LLM call)
     if settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
+
         deterministic = deterministic_route(user_message)
         if deterministic is not None:
             _dev_log("router_deterministic", decision=deterministic.decision.value)
@@ -339,13 +351,13 @@ async def router_node(state: dict) -> dict:
                 "next_step": deterministic.decision.value,
             }
 
-    # 2. Load user integrations & dynamic tools for context
+    # 3. Load user integrations & dynamic tools for context
     integrations_block = ""
     dynamic_tools_block = ""
     if user_id:
         integrations_block, dynamic_tools_block = await load_user_tool_context(user_id)
 
-    # 3. Build retrieved-tools block from Milvus results
+    # 4. Build retrieved-tools block from Milvus results
     retrieved_block = ""
     if retrieved_tools:
         from app.schemas.tool_registry import RetrievedTool
@@ -362,7 +374,7 @@ async def router_node(state: dict) -> dict:
                 + "\n".join(lines) + "\n"
             )
 
-    # 4. LLM-based routing via structured output
+    # 5. LLM-based routing via structured output
     planner_model = settings.LITELLM_PLANNER_MODEL or None
     planner_prompt = (
         "Ты — маршрутизатор задач AI-агента.\n"

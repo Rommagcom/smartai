@@ -30,6 +30,51 @@ _LIVE_DATA_RE = re.compile(
     re.IGNORECASE,
 )
 
+_EXPORT_FOLLOWUP_RE = re.compile(
+    r"\b(?:да|yes|sure|ok|okay|ага|угу|нужен|нужно|хочу|want|need|готов(?:ый|ую|ое)?|"
+    r"документ|document|pdf|пдф|excel|xlsx|файл|file|сгенерируй|generate|сформируй|create|export)\b",
+    re.IGNORECASE,
+)
+_EXPORT_OFFER_SENTENCE_RE = re.compile(
+    r"(?:если\s+нужен|если\s+нужно|if\s+you\s+need|if\s+needed)[^.!?\n]*(?:pdf|пдф|excel|xlsx|документ|document|file|файл)[^.!?\n]*(?:[.!?]|$)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_space(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _clean_export_source_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    cleaned = _EXPORT_OFFER_SENTENCE_RE.sub("", raw)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_last_assistant_message(history: list[dict]) -> str:
+    for item in reversed(history or []):
+        if str(item.get("role") or "").lower() != "assistant":
+            continue
+        content = _normalize_space(str(item.get("content") or ""))
+        if content:
+            return str(item.get("content") or "")
+    return ""
+
+
+def _is_export_followup_intent(user_message: str) -> bool:
+    text = _normalize_space(user_message)
+    lowered = text.lower()
+    if not lowered:
+        return False
+    if len(text) > 180:
+        return False
+    if requested_export_kind(text) in {"pdf", "excel"}:
+        return True
+    return bool(_EXPORT_FOLLOWUP_RE.search(lowered))
+
 
 def is_web_search_intent(user_message: str) -> bool:
     """Check if user message clearly asks for a web search."""
@@ -92,6 +137,47 @@ def deterministic_route(user_message: str) -> RouterOutput | None:
         )
 
     return None
+
+
+def followup_export_route(user_message: str, history: list[dict]) -> RouterOutput | None:
+    """Route short export confirmations to create doc from last assistant answer."""
+    if not _is_export_followup_intent(user_message):
+        return None
+
+    last_assistant = _extract_last_assistant_message(history)
+    if not last_assistant:
+        return None
+
+    content = _clean_export_source_text(last_assistant)
+    if len(content) < 12:
+        return None
+
+    export_kind = requested_export_kind(user_message)
+    if export_kind not in {"pdf", "excel"}:
+        export_kind = "excel" if re.search(r"\b(?:excel|xlsx|таблиц)\b", user_message, re.IGNORECASE) else "pdf"
+
+    if export_kind == "excel":
+        tool = "excel_create"
+        filename = "generated-document.xlsx"
+    else:
+        tool = "pdf_create"
+        filename = "generated-document.pdf"
+
+    return RouterOutput(
+        decision=RouterDecision.TOOL,
+        steps=[
+            ToolStep(
+                tool=tool,
+                arguments={
+                    "title": "Документ",
+                    "filename": filename,
+                    "content": content,
+                },
+            )
+        ],
+        response_hint="Сформируй документ на основе предыдущего ответа ассистента",
+        confidence=0.93,
+    )
 
 
 def fallback_live_data_export_route(user_message: str) -> RouterOutput | None:
