@@ -15,9 +15,21 @@ _SMALL_TALK_RE = re.compile(
 
 _COMPLETENESS_RE = re.compile(r"COMPLETENESS:\s*(COMPLETE|INCOMPLETE)", re.IGNORECASE)
 _TOOL_BLOCK_RE = re.compile(
-    r"<(?:cron_add|pdf_create|excel_create|doc_ask|web_search|function_calls|invoke)[\s\S]*?>"
+    r"<(?:cron_add|pdf_create|excel_create|doc_ask|web_search|"
+    r"memory_add|memory_list|memory_search|memory_delete|memory_delete_all|"
+    r"function_calls|invoke)[\s\S]*?>"
     r"[\s\S]*?"
-    r"</(?:cron_add|pdf_create|excel_create|doc_ask|web_search|function_calls|invoke)>",
+    r"</(?:cron_add|pdf_create|excel_create|doc_ask|web_search|"
+    r"memory_add|memory_list|memory_search|memory_delete|memory_delete_all|"
+    r"function_calls|invoke)>",
+    re.IGNORECASE,
+)
+_GENERIC_COMMAND_BLOCK_RE = re.compile(
+    r"<([a-z][a-z0-9]*_[a-z0-9_:-]*)[^>]*>[\s\S]*?</\1>",
+    re.IGNORECASE,
+)
+_GENERIC_COMMAND_TAG_RE = re.compile(
+    r"</?[a-z][a-z0-9]*_[a-z0-9_:-]*[^>]*>",
     re.IGNORECASE,
 )
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.IGNORECASE)
@@ -44,8 +56,10 @@ def sanitize_llm_answer(text: str) -> str:
     original = cleaned
     # Remove explicit tool command payloads that must never be shown to users.
     cleaned = _TOOL_BLOCK_RE.sub("", cleaned)
+    cleaned = _GENERIC_COMMAND_BLOCK_RE.sub("", cleaned)
     cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = _GENERIC_COMMAND_TAG_RE.sub("", cleaned)
     # Strip fenced blocks too: fallback paths may return raw command snippets in markdown.
     cleaned = _CODE_FENCE_RE.sub("", cleaned)
     cleaned = cleaned.strip()
@@ -54,7 +68,9 @@ def sanitize_llm_answer(text: str) -> str:
 
     logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
     fallback = _TOOL_BLOCK_RE.sub("", original)
+    fallback = _GENERIC_COMMAND_BLOCK_RE.sub("", fallback)
     fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", fallback, flags=re.IGNORECASE)
+    fallback = _GENERIC_COMMAND_TAG_RE.sub("", fallback)
     fallback = _CODE_FENCE_RE.sub("", fallback)
     fallback = fallback.strip()
     return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
