@@ -29,6 +29,7 @@ from app.graph.routing_policy import (
     fallback_live_data_export_route,
     feedback_requires_web_search,
     feedback_to_search_query,
+    followup_export_route,
     is_web_search_intent,
     strip_web_search_prefix,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "fallback_live_data_export_route",
     "feedback_requires_web_search",
     "feedback_to_search_query",
+    "followup_export_route",
     "format_deterministic_tool_answer",
     "has_successful_export_call",
     "is_web_search_intent",
