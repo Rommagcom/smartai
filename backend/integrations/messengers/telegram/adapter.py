@@ -45,13 +45,11 @@ SUCCESS_REPLY = "Готово ✅"
 DEFAULT_ARTIFACT_FILENAME = "artifact.bin"
 
 (
-    SOUL_NAME,
-    SOUL_EMOJI,
-    SOUL_STYLE,
-    SOUL_TONE,
-    SOUL_TASK,
     SOUL_DESC,
-) = range(6)
+    SOUL_TASK,
+    SOUL_EMOJI,
+    SOUL_TONE,
+) = range(4)
 
 
 def _safe_json(payload: Any, max_len: int = 3500) -> str:
@@ -64,6 +62,40 @@ def _split_pipe(text: str, expected_min: int) -> list[str]:
     if len(parts) < expected_min:
         raise ValueError("Недостаточно аргументов")
     return parts
+
+
+def _normalize_task_mode(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    mapping = {
+        "1": "business-analysis",
+        "бизнес": "business-analysis",
+        "business": "business-analysis",
+        "business-analysis": "business-analysis",
+        "2": "coding",
+        "разработка": "coding",
+        "dev": "coding",
+        "coding": "coding",
+        "3": "other",
+        "личное": "other",
+        "personal": "other",
+        "other": "other",
+    }
+    return mapping.get(value, "other")
+
+
+def _normalize_emoji(raw: str) -> str:
+    value = str(raw or "").strip()
+    mapping = {
+        "1": "🧠",
+        "2": "💼",
+        "3": "💻",
+        "4": "✨",
+    }
+    if value in mapping:
+        return mapping[value]
+    if value:
+        return value[:2]
+    return "🧠"
 
 
 class TelegramAdapter(MessengerAdapter):
@@ -155,12 +187,10 @@ class TelegramAdapter(MessengerAdapter):
         soul_conv = ConversationHandler(
             entry_points=[CommandHandler("soul_setup", self.soul_setup_begin)],
             states={
-                SOUL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_name)],
-                SOUL_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_emoji)],
-                SOUL_STYLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_style)],
-                SOUL_TONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_tone)],
-                SOUL_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_task)],
                 SOUL_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_desc)],
+                SOUL_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_task)],
+                SOUL_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_emoji)],
+                SOUL_TONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_tone)],
             },
             fallbacks=[CommandHandler("cancel", self.soul_setup_cancel)],
         )
@@ -306,7 +336,7 @@ class TelegramAdapter(MessengerAdapter):
                         text="Нужна первичная SOUL-настройка. Используй /start и пройди onboarding.",
                     )
                     if context and context.user_data is not None:
-                        context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
+                        context.user_data.setdefault("soul_setup_auto", {"step": "desc", "data": {}})
                     return
 
                 session_id = self._direct_session_ids.get(telegram_user_id)
@@ -845,10 +875,10 @@ class TelegramAdapter(MessengerAdapter):
         return text if len(text) <= 400 else f"{text[:400]}…"
 
     async def _begin_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        context.user_data["soul_setup_auto"] = {"step": "name", "data": {}}
+        context.user_data["soul_setup_auto"] = {"step": "desc", "data": {}}
         await update.effective_message.reply_text(
             "Нужна первичная SOUL-настройка. Запускаю setup автоматически.\n"
-            "Шаг 1/6: выберите имя ассистента (например: Smart Ai)"
+            "Шаг 1/4: кто вы и чем обычно занимаетесь?"
         )
 
     async def _handle_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -868,48 +898,49 @@ class TelegramAdapter(MessengerAdapter):
         step = str(state.get("step") or "")
         data = state.get("data") if isinstance(state.get("data"), dict) else {}
 
-        if step == "name":
-            data["assistant_name"] = text
+        if step == "desc":
+            data["user_description"] = text
+            data.setdefault("assistant_name", "SmartAi")
+            data.setdefault("style", "friendly")
+            state["step"] = "task"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text(
+                "Шаг 2/4: выберите режим ассистента:\n"
+                "1) Бизнес\n"
+                "2) Разработка\n"
+                "3) Личное"
+            )
+            return True
+
+        if step == "task":
+            data["task_mode"] = _normalize_task_mode(text)
             state["step"] = "emoji"
             state["data"] = data
             context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 2/6: эмодзи ассистента? (например: 🧠)")
+            await message.reply_text(
+                "Шаг 3/4: выберите эмодзи ассистента:\n"
+                "1) 🧠\n"
+                "2) 💼\n"
+                "3) 💻\n"
+                "4) ✨\n"
+                "Или отправьте свой эмодзи."
+            )
             return True
 
         if step == "emoji":
-            data["emoji"] = text
-            state["step"] = "style"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 3/6: стиль? one of: direct, business, sarcastic, friendly")
-            return True
-
-        if step == "style":
-            data["style"] = text
+            data["emoji"] = _normalize_emoji(text)
             state["step"] = "tone"
             state["data"] = data
             context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 4/6: тональность (свободный текст), например: Прямой, без воды")
+            await message.reply_text(
+                "Шаг 4/4: какой тон общения предпочитаете?\n"
+                "Например: Коротко и по делу."
+            )
             return True
 
         if step == "tone":
             data["tone_modifier"] = text
-            state["step"] = "task"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 5/6: профиль задач? one of: business-analysis, devops, creativity, coding, other")
-            return True
-
-        if step == "task":
-            data["task_mode"] = text
-            state["step"] = "desc"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 6/6: кто ты и чем занимаемся?")
-            return True
-
-        if step == "desc":
-            data["user_description"] = text
             auth = await self._auth_or_reject(update)
             if not auth:
                 return True
@@ -1689,37 +1720,49 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return ConversationHandler.END
         context.user_data["soul_setup"] = {}
-        await update.effective_message.reply_text("SOUL setup: выберите имя ассистента (например: SOUL)")
-        return SOUL_NAME
-
-    async def soul_setup_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["assistant_name"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Эмодзи ассистента? (например: 🧠)")
-        return SOUL_EMOJI
-
-    async def soul_setup_emoji(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["emoji"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Стиль? one of: direct, business, sarcastic, friendly")
-        return SOUL_STYLE
-
-    async def soul_setup_style(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["style"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Тональность (свободный текст), например: Прямой, без воды")
-        return SOUL_TONE
-
-    async def soul_setup_tone(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["tone_modifier"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Профиль задач? one of: business-analysis, devops, creativity, coding, other")
-        return SOUL_TASK
+        await update.effective_message.reply_text("SOUL setup (быстрый):\nШаг 1/4: кто вы и чем обычно занимаетесь?")
+        return SOUL_DESC
 
     async def soul_setup_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["task_mode"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Последний шаг: Кто ты и чем занимаемся?")
-        return SOUL_DESC
+        context.user_data["soul_setup"]["task_mode"] = _normalize_task_mode(update.effective_message.text.strip())
+        await update.effective_message.reply_text(
+            "Шаг 3/4: выберите эмодзи ассистента:\n"
+            "1) 🧠\n"
+            "2) 💼\n"
+            "3) 💻\n"
+            "4) ✨\n"
+            "Или отправьте свой эмодзи."
+        )
+        return SOUL_EMOJI
 
     async def soul_setup_desc(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         setup_data = context.user_data.get("soul_setup", {})
         setup_data["user_description"] = update.effective_message.text.strip()
+        setup_data.setdefault("assistant_name", "SmartAi")
+        setup_data.setdefault("style", "friendly")
+
+        context.user_data["soul_setup"] = setup_data
+        await update.effective_message.reply_text(
+            "Шаг 2/4: выберите режим ассистента:\n"
+            "1) Бизнес\n"
+            "2) Разработка\n"
+            "3) Личное"
+        )
+        return SOUL_TASK
+
+    async def soul_setup_emoji(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        setup_data = context.user_data.get("soul_setup", {})
+        setup_data["emoji"] = _normalize_emoji(update.effective_message.text.strip())
+        context.user_data["soul_setup"] = setup_data
+        await update.effective_message.reply_text(
+            "Шаг 4/4: какой тон общения предпочитаете?\n"
+            "Например: Коротко и по делу."
+        )
+        return SOUL_TONE
+
+    async def soul_setup_tone(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        setup_data = context.user_data.get("soul_setup", {})
+        setup_data["tone_modifier"] = update.effective_message.text.strip()
 
         auth = await self._auth_or_reject(update)
         if not auth:
