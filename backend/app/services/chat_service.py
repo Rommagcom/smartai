@@ -2266,6 +2266,7 @@ class ChatService:
         inline_cron_result = await self._maybe_execute_llm_inline_cron(
             db=db,
             user=user,
+            user_message=user_message,
             llm_answer=answer,
             manual_tool_calls=manual_tool_calls,
         )
@@ -2601,6 +2602,7 @@ class ChatService:
         self,
         db: AsyncSession,
         user: User,
+        user_message: str,
         llm_answer: str,
         manual_tool_calls: list[dict],
     ) -> tuple[str, list[dict], list[dict]] | None:
@@ -2613,18 +2615,30 @@ class ChatService:
         cron_expression = parsed["cron_expression"]
         message = parsed["message"]
 
+        quick_relative_args = self._extract_quick_relative_reminder_args(user_message)
+        natural_relative_args = self._extract_natural_reminder_args(user_message)
+        schedule_override = quick_relative_args or natural_relative_args
+
         self._dev_verbose_log(
             "llm_inline_cron_detected",
             cron_expression=cron_expression,
             message_preview=message[:120],
         )
 
-        cron_add_args = {
-            "cron_expression": cron_expression,
-            "task_text": message,
-            "name": "chat-reminder",
-            "action_type": "send_message",
-        }
+        if schedule_override:
+            cron_add_args = {
+                "schedule_text": str(schedule_override.get("schedule_text") or ""),
+                "task_text": str(schedule_override.get("task_text") or message),
+                "name": "chat-reminder",
+                "action_type": "send_message",
+            }
+        else:
+            cron_add_args = {
+                "cron_expression": cron_expression,
+                "task_text": message,
+                "name": "chat-reminder",
+                "action_type": "send_message",
+            }
 
         planned_calls = await self._execute_single_cron_add(
             db=db,
