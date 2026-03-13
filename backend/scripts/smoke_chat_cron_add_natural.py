@@ -203,6 +203,34 @@ async def run() -> None:
             f"relative reminder must be one-time, got: {once_jobs[0]}",
         )
 
+        english_relative_once_message = "Schedule meeting in 2 minutes - Developer interview"
+        english_relative_once_response = client.post(
+            "/api/v1/chat",
+            json={"message": english_relative_once_message, "session_id": session_id},
+            headers=headers,
+        )
+        ensure(english_relative_once_response.status_code == 200, f"chat english relative-once failed: {english_relative_once_response.text}")
+
+        listed_after_english_relative_once = client.get("/api/v1/cron", headers=headers)
+        ensure(
+            listed_after_english_relative_once.status_code == 200,
+            f"cron list after english relative-once failed: {listed_after_english_relative_once.text}",
+        )
+        jobs_after_english_relative_once = (
+            listed_after_english_relative_once.json() if isinstance(listed_after_english_relative_once.json(), list) else []
+        )
+
+        english_once_jobs = [
+            item for item in jobs_after_english_relative_once
+            if isinstance(item, dict)
+            and str((item.get("payload") or {}).get("message") or "").strip().lower() == "developer interview"
+        ]
+        ensure(bool(english_once_jobs), f"english relative reminder payload not found: {jobs_after_english_relative_once}")
+        ensure(
+            str(english_once_jobs[0].get("cron_expression") or "").startswith("@once:"),
+            f"english relative reminder must be one-time, got: {english_once_jobs[0]}",
+        )
+
     if should_assert_persistence():
         async with session_factory() as session:
             result = await session.execute(select(CronJob))

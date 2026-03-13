@@ -592,7 +592,8 @@ class ChatService:
 
         reminder_intent = re.search(
             r"\b(?:напомни|напомин|запланируй|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?"
-            r"|remind|set\s+(?:a\s+)?reminder|(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder))\b",
+            r"|remind|set\s+(?:a\s+)?reminder|(?:create|make|add)\s+(?:a\s+)?(?:remind(?:er)?|remainder)"
+            r"|schedule|plan)\b",
             lowered,
         )
         if not reminder_intent:
@@ -612,8 +613,21 @@ class ChatService:
             return None
 
         tail = raw[schedule_match.end() :].strip(ChatService._TRIM_CHARS)
-        tail = re.sub(r"^(?:что|чтобы)\s+", "", tail, flags=re.IGNORECASE)
+        tail = re.sub(r"^(?:что|чтобы|to|that)\s+", "", tail, flags=re.IGNORECASE)
         task_text = tail.strip()
+
+        if not task_text:
+            head = raw[: schedule_match.start()].strip(ChatService._TRIM_CHARS)
+            head = re.sub(
+                r"^(?:please\s+)?(?:напомни(?:\s+мне)?|поставь\s+напомин(?:ание|алку)?|создай\s+напомин(?:ание|алку)?|запланируй"
+                r"|remind(?:\s+me)?|set\s+(?:me\s+)?(?:a\s+)?reminder|(?:create|make|add)\s+(?:a\s+)?remind(?:er)?|schedule|plan)\b",
+                "",
+                head,
+                flags=re.IGNORECASE,
+            )
+            head = re.sub(r"^(?:me\s+)?(?:about|to|for|that)\s+", "", head, flags=re.IGNORECASE)
+            task_text = head.strip(ChatService._TRIM_CHARS)
+
         if not task_text:
             return None
 
