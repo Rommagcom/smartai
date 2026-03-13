@@ -8,39 +8,30 @@ services:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
-      milvus-standalone:
-        condition: service_started
-      redis:
-        condition: service_started
+    depends_on: !override
+      - postgres
+      - milvus-standalone
+      - redis
 
   scheduler-leader:
     environment:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
-      milvus-standalone:
-        condition: service_started
-      redis:
-        condition: service_started
+    depends_on: !override
+      - postgres
+      - milvus-standalone
+      - redis
 
   worker:
     environment:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      postgres:
-        condition: service_started
-      milvus-standalone:
-        condition: service_started
-      redis:
-        condition: service_started
+    depends_on: !override
+      - postgres
+      - milvus-standalone
+      - redis
 
   # Disable local Ollama container in this mode.
   ollama:
