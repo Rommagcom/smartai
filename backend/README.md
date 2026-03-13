@@ -37,6 +37,43 @@ SmartAI - backend персонального AI-ассистента с един
 5. Быстрая smoke-проверка:
    - `../.venv/Scripts/python.exe -m scripts.smoke_all`
 
+### Режим: Ollama на хост-машине (GPU)
+
+Если Ollama запущена на хосте, а SmartAI работает в контейнерах:
+
+1. В `.env`:
+   - `OLLAMA_BASE_URL=http://host.docker.internal:11434`
+2. Запуск стека с override:
+   - `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build`
+3. Применить миграции:
+   - `docker compose exec api alembic upgrade head`
+4. Проверить доступность Ollama из контейнера:
+   - `docker compose exec api python -c "import urllib.request; r=urllib.request.urlopen('http://host.docker.internal:11434/api/tags', timeout=5); print(r.status)"`
+
+Если получаете `Connection refused`, обычно Ollama на хосте слушает только `127.0.0.1`. Для контейнеров нужен bind на `0.0.0.0:11434`.
+
+## Административный интерфейс
+
+- Как сделать админа сейчас:
+
+   Если база пустая
+   Зарегистрируйте первого пользователя через /api/v1/auth/register
+   Он сразу будет админом
+   Если админ уже есть
+   Залогиньтесь под админом
+   Выдайте права нужному пользователю через endpoint:
+   PATCH /api/v1/users/admin/users/{user_id}/admin-access
+   Body:
+   {"is_admin": true}
+
+   - Аварийный случай
+   Если админа не осталось (аварийный случай)
+   Выдать права напрямую в БД:
+   docker compose exec postgres psql -U assistant -d assistant -c "UPDATE users SET is_admin = true WHERE username = 'your_username';"
+   
+   Проверить:
+   docker compose exec postgres psql -U assistant -d assistant -c "SELECT username, is_admin FROM users ORDER BY created_at;"
+   
 ## Быстрое написание Dynamic Skills
 
 Dynamic Skill - zip-пакет с манифестом, кодом и описанием.
