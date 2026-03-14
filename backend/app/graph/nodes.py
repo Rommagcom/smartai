@@ -332,13 +332,14 @@ async def router_node(state: dict) -> dict:
 
     # 1. History-aware export follow-up should always work, even when generic
     # deterministic shortcuts are disabled by config.
-    export_followup = followup_export_route(user_message, history)
-    if export_followup is not None:
-        _dev_log("router_deterministic_export_followup", decision=export_followup.decision.value)
-        return {
-            "router_output": export_followup,
-            "next_step": export_followup.decision.value,
-        }
+    if settings.ROUTER_ENABLE_EXPORT_FOLLOWUP_SHORTCUT:
+        export_followup = followup_export_route(user_message, history)
+        if export_followup is not None:
+            _dev_log("router_deterministic_export_followup", decision=export_followup.decision.value)
+            return {
+                "router_output": export_followup,
+                "next_step": export_followup.decision.value,
+            }
 
     # 2. Try deterministic shortcuts first (fast path, no LLM call)
     if settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
@@ -454,6 +455,7 @@ async def router_node(state: dict) -> dict:
         )
         if (
             settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT
+            and settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK
             and router_output.decision in {RouterDecision.CLARIFY, RouterDecision.CHAT}
         ):
             live_export_override = fallback_live_data_export_route(user_message)
@@ -490,17 +492,18 @@ async def router_node(state: dict) -> dict:
                     "router_output": salvaged,
                     "next_step": salvaged.decision.value,
                 }
-            live_export_fallback = fallback_live_data_export_route(user_message)
-            if live_export_fallback is not None:
-                _dev_log(
-                    "router_fallback_live_export",
-                    decision=live_export_fallback.decision.value,
-                    steps_count=len(live_export_fallback.steps),
-                )
-                return {
-                    "router_output": live_export_fallback,
-                    "next_step": "tool",
-                }
+            if settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK:
+                live_export_fallback = fallback_live_data_export_route(user_message)
+                if live_export_fallback is not None:
+                    _dev_log(
+                        "router_fallback_live_export",
+                        decision=live_export_fallback.decision.value,
+                        steps_count=len(live_export_fallback.steps),
+                    )
+                    return {
+                        "router_output": live_export_fallback,
+                        "next_step": "tool",
+                    }
             # If the message clearly asks for web search, don't lose the intent
             if is_web_search_intent(user_message):
                 query = strip_web_search_prefix(user_message)
@@ -561,11 +564,26 @@ async def tool_execution_node(state: dict) -> dict:
                 for step in router_output.steps
             ]
 
+            history_messages = state.get("history_messages") or []
+            fallback_export_content = ""
+            for item in reversed(history_messages):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("role") or "").lower() != "assistant":
+                    continue
+                content = str(item.get("content") or "").strip()
+                if content:
+                    fallback_export_content = content
+                    break
+            if not fallback_export_content:
+                fallback_export_content = str(state.get("user_message") or "").strip()
+
             raw_results = await tool_orchestrator_service.execute_tool_chain(
                 db=db,
                 user=user,
                 steps=steps_dicts,
                 max_steps=settings.LANGGRAPH_MAX_ITERATIONS,
+                initial_context={"_fallback_export_content": fallback_export_content},
             )
             await db.commit()
     except Exception as exc:
@@ -784,16 +802,6 @@ async def compose_node(state: dict) -> dict:
     if existing_answer and not tool_results and not web_search_results and not web_fetch_content:
         return {
             "final_answer": existing_answer,
-            "is_complete": True,
-            "feedback_plan": "",
-            "iterations": iterations,
-            "iteration": iterations,
-        }
-
-    deterministic = format_deterministic_tool_answer(tool_results)
-    if deterministic:
-        return {
-            "final_answer": deterministic,
             "is_complete": True,
             "feedback_plan": "",
             "iterations": iterations,
@@ -1059,7 +1067,7 @@ async def output_node(state: dict) -> dict:
     final_answer, result = apply_output_guardrail(final_answer)
 
     export_kind = requested_export_kind(user_message)
-    should_reenqueue = should_reenqueue_export(
+    should_reenqueue = bool(settings.OUTPUT_ENABLE_AUTO_EXPORT_REENQUEUE) and should_reenqueue_export(
         export_kind=export_kind,
         existing_calls=existing_calls,
         existing_artifacts=existing_artifacts,

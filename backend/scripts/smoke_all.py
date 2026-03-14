@@ -29,6 +29,7 @@ from scripts.smoke_export_followup_guard import run as run_export_followup_guard
 from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
 from scripts.smoke_graph_structured_fallback import run as run_graph_structured_fallback
 from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
+from scripts.smoke_cron_chat_pdf_route import run as run_cron_chat_pdf_route
 from scripts.smoke_document_all_sources import run as run_document_all_sources
 from scripts.smoke_document_raw_passthrough import run as run_document_raw_passthrough
 from scripts.smoke_document_context_filter import run as run_document_context_filter
@@ -36,8 +37,10 @@ from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
 from scripts.smoke_router_tool_export_salvage import run as run_router_tool_export_salvage
 from scripts.smoke_memory_context_priority import run as run_memory_context_priority
 from scripts.smoke_pdf_content_sanitize import run as run_pdf_content_sanitize
+from scripts.smoke_pdf_prev_placeholder_fallback import run as run_pdf_prev_placeholder_fallback
 from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
 from scripts.smoke_dynamic_skill_package import run as run_dynamic_skill_package
+from scripts.smoke_compose_llm_sufficiency_gate import run as run_compose_llm_sufficiency_gate
 
 
 def reset_scheduler() -> None:
@@ -149,6 +152,9 @@ async def run() -> None:
         print("RUN_SMOKE_GRAPH_INLINE_CRON_GUARD")
         await run_graph_inline_cron_guard()
 
+        print("RUN_SMOKE_CRON_CHAT_PDF_ROUTE")
+        await run_cron_chat_pdf_route()
+
         print("RUN_SMOKE_DOCUMENT_ALL_SOURCES")
         await run_document_all_sources()
 
@@ -170,11 +176,17 @@ async def run() -> None:
         print("RUN_SMOKE_DYNAMIC_SKILL_PACKAGE")
         await run_dynamic_skill_package()
 
+        print("RUN_SMOKE_COMPOSE_LLM_SUFFICIENCY_GATE")
+        await run_compose_llm_sufficiency_gate()
+
         print("RUN_SMOKE_MEMORY_CONTEXT_PRIORITY")
         await run_memory_context_priority()
 
         print("RUN_SMOKE_PDF_CONTENT_SANITIZE")
         run_pdf_content_sanitize()
+
+        print("RUN_SMOKE_PDF_PREV_PLACEHOLDER_FALLBACK")
+        await run_pdf_prev_placeholder_fallback()
 
         print("SMOKE_ALL_OK")
     finally:

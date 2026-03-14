@@ -33,6 +33,7 @@ async def _run_case(fake_response_obj) -> None:
     original_shortcuts = settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS
     original_fallbacks = settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS
     original_override = settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT
+    original_live_export_fallback = settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK
 
     async def _fake_chat_structured(*args, **kwargs):
         await asyncio.sleep(0)
@@ -42,6 +43,7 @@ async def _run_case(fake_response_obj) -> None:
     settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS = False
     settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS = True
     settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT = True
+    settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK = True
 
     try:
         state = {
@@ -57,6 +59,7 @@ async def _run_case(fake_response_obj) -> None:
         settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS = original_shortcuts
         settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS = original_fallbacks
         settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT = original_override
+        settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK = original_live_export_fallback
 
     ensure(out.get("next_step") == "tool", f"unexpected next_step: {out}")
     router_output = out.get("router_output")

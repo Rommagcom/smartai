@@ -35,6 +35,17 @@ _EXPORT_FOLLOWUP_RE = re.compile(
     r"документ|document|pdf|пдф|excel|xlsx|файл|file|сгенерируй|generate|сформируй|create|export)\b",
     re.IGNORECASE,
 )
+_FOLLOWUP_CONFIRMATION_RE = re.compile(
+    r"^(?:"
+    r"да|ага|угу|yes|ok(?:ay)?|sure"
+    r"|сохрани(?:\s+в\s+(?:pdf|excel))?"
+    r"|сделай(?:\s+в\s+(?:pdf|excel))?"
+    r"|в\s+(?:pdf|excel)"
+    r"|пришли(?:\s+файл)?|отправь(?:\s+файл)?"
+    r"|pdf|excel|xlsx|пдф"
+    r")$",
+    re.IGNORECASE,
+)
 _EXPORT_OFFER_SENTENCE_RE = re.compile(
     r"(?:если\s+нужен|если\s+нужно|if\s+you\s+need|if\s+needed)[^.!?\n]*(?:pdf|пдф|excel|xlsx|документ|document|file|файл)[^.!?\n]*(?:[.!?]|$)",
     re.IGNORECASE,
@@ -87,10 +98,16 @@ def _is_export_followup_intent(user_message: str) -> bool:
     lowered = text.lower()
     if not lowered:
         return False
-    if len(text) > 180:
+    # Follow-up must be a short confirmation, not a full new task.
+    if len(text) > 80:
         return False
-    if requested_export_kind(text) in {"pdf", "excel"}:
+    if len(text.split()) > 8:
+        return False
+    if _FOLLOWUP_CONFIRMATION_RE.match(lowered):
         return True
+    if requested_export_kind(text) in {"pdf", "excel"}:
+        # Explicit export kind in a short phrase can still be follow-up.
+        return len(text.split()) <= 6
     return bool(_EXPORT_FOLLOWUP_RE.search(lowered))
 
 
