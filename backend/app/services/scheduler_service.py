@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import logging
 from time import perf_counter
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -63,6 +64,36 @@ class SchedulerService:
         normalized = self._normalize_run_at(run_at)
         lag_seconds = (datetime.now(timezone.utc) - normalized).total_seconds()
         return lag_seconds > max(0, int(settings.SCHEDULER_ONCE_MAX_LAG_SECONDS))
+
+    async def _finalize_once_job_if_needed(self, *, job_id: str, executed_at: datetime) -> None:
+        try:
+            job_uuid = UUID(str(job_id))
+        except ValueError:
+            return
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CronJob).where(CronJob.id == job_uuid))
+            job = result.scalar_one_or_none()
+            if not job:
+                return
+
+            cron_expression = str(job.cron_expression or "").strip().lower()
+            if not cron_expression.startswith("@once:"):
+                return
+
+            if not bool(job.is_active):
+                return
+
+            job.is_active = False
+            job.last_run = self._normalize_run_at(executed_at)
+            job.next_run = None
+            await db.commit()
+
+        try:
+            if self.scheduler.get_job(str(job_id)):
+                self.scheduler.remove_job(str(job_id))
+        except Exception:
+            logger.debug("scheduler once job removal failed", exc_info=True)
 
     async def _acquire_inactivity_reminder_slot(self, user_id: str) -> bool:
         """Rate-limit inactivity reminders per user using Redis NX lock."""
@@ -480,6 +511,7 @@ class SchedulerService:
     async def execute_action(self, job_id: str, user_id: str, action_type: str, payload: dict) -> None:
         started_at = perf_counter()
         success = False
+        executed_at = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc).isoformat()
         try:
             if not await self._acquire_execution_lock(job_id=str(job_id), action_type=str(action_type or "")):
@@ -550,6 +582,8 @@ class SchedulerService:
                 )
             else:
                 raise ValueError(f"Unsupported scheduler action_type: {action_type}")
+
+            await self._finalize_once_job_if_needed(job_id=str(job_id), executed_at=executed_at)
             success = True
             if settings.DEV_VERBOSE_LOGGING:
                 logger.info(
