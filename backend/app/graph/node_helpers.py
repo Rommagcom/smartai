@@ -26,6 +26,7 @@ from app.graph.router_recovery import (
 from app.graph.routing_policy import (
     WEB_SEARCH_RE,
     deterministic_route,
+    fallback_explicit_export_route,
     fallback_live_data_export_route,
     feedback_requires_web_search,
     feedback_to_search_query,
@@ -57,6 +58,7 @@ __all__ = [
     "build_raw_tool_summary",
     "build_raw_web_summary",
     "deterministic_route",
+    "fallback_explicit_export_route",
     "enqueue_export_if_needed",
     "extract_artifacts",
     "extract_facts_to_ltm",

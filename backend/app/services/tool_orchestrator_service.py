@@ -49,16 +49,39 @@ def _dev_verbose_log(event: str, **context: object) -> None:
 # ---- Prompt-like content detection for PDF/Excel ----
 
 _PROMPT_VERBS = re.compile(
-    r"^(расскажи|напиши|опиши|составь|сгенерируй|создай|подготовь|придумай|"
+    r"^(расскажи|напиши|опиши|составь|разработай|спланируй|"
+    r"сгенерируй|создай|подготовь|придумай|"
     r"сделай|объясни|перечисли|покажи|дай|выведи|"
     r"write|tell|describe|generate|create|explain|list|show|make|prepare)\b",
+    re.IGNORECASE,
+)
+
+_EXPORT_REQUEST_RE = re.compile(
+    r"\b(?:"
+    r"сохрани\s+в\s+(?:pdf|excel)"
+    r"|сделай\s+в\s+(?:pdf|excel)"
+    r"|сформируй\s+в\s+(?:pdf|excel)"
+    r"|(?:pdf|пдф|excel|xlsx)\b"
+    r"|export\s+(?:to\s+)?(?:pdf|excel)"
+    r")\b",
     re.IGNORECASE,
 )
 
 
 def _looks_like_prompt(text: str) -> bool:
     """Check if short text looks like an instruction/prompt rather than ready content."""
-    return bool(_PROMPT_VERBS.match(text.strip()))
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+
+    if _PROMPT_VERBS.match(normalized):
+        return True
+
+    # Export intent phrases are still prompt-like content requests, not final document text.
+    if _EXPORT_REQUEST_RE.search(normalized):
+        return True
+
+    return False
 
 
 def _looks_like_structured_payload(text: str) -> bool:

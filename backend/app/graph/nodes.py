@@ -56,6 +56,7 @@ from app.graph.node_helpers import (
     extract_facts_to_ltm,
     extract_non_json_answer_from_exception,
     extract_router_output_from_exception,
+    fallback_explicit_export_route,
     fallback_live_data_export_route,
     feedback_requires_web_search,
     feedback_to_search_query,
@@ -493,6 +494,17 @@ async def router_node(state: dict) -> dict:
             return {
                 "router_output": salvaged,
                 "next_step": salvaged.decision.value,
+            }
+        explicit_export_fallback = fallback_explicit_export_route(user_message)
+        if explicit_export_fallback is not None:
+            _dev_log(
+                "router_fallback_explicit_export",
+                decision=explicit_export_fallback.decision.value,
+                steps_count=len(explicit_export_fallback.steps),
+            )
+            return {
+                "router_output": explicit_export_fallback,
+                "next_step": explicit_export_fallback.decision.value,
             }
         if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
             if settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK:

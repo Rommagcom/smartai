@@ -35,8 +35,11 @@ from scripts.smoke_document_raw_passthrough import run as run_document_raw_passt
 from scripts.smoke_document_context_filter import run as run_document_context_filter
 from scripts.smoke_web_export_llm_pdf import run as run_web_export_llm_pdf
 from scripts.smoke_router_tool_export_salvage import run as run_router_tool_export_salvage
+from scripts.smoke_router_export_parse_fail_no_payload import run as run_router_export_parse_fail_no_payload
+from scripts.smoke_router_salvage_pdf_expand_e2e import run as run_router_salvage_pdf_expand_e2e
 from scripts.smoke_memory_context_priority import run as run_memory_context_priority
 from scripts.smoke_pdf_content_sanitize import run as run_pdf_content_sanitize
+from scripts.smoke_pdf_prompt_expand_export_request import run as run_pdf_prompt_expand_export_request
 from scripts.smoke_pdf_prev_placeholder_fallback import run as run_pdf_prev_placeholder_fallback
 from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
 from scripts.smoke_dynamic_skill_package import run as run_dynamic_skill_package
@@ -170,6 +173,12 @@ async def run() -> None:
         print("RUN_SMOKE_ROUTER_TOOL_EXPORT_SALVAGE")
         await run_router_tool_export_salvage()
 
+        print("RUN_SMOKE_ROUTER_EXPORT_PARSE_FAIL_NO_PAYLOAD")
+        await run_router_export_parse_fail_no_payload()
+
+        print("RUN_SMOKE_ROUTER_SALVAGE_PDF_EXPAND_E2E")
+        await run_router_salvage_pdf_expand_e2e()
+
         print("RUN_SMOKE_DESTRUCTIVE_PLANNER_GUARD")
         run_destructive_planner_guard()
 
@@ -184,6 +193,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_PDF_CONTENT_SANITIZE")
         run_pdf_content_sanitize()
+
+        print("RUN_SMOKE_PDF_PROMPT_EXPAND_EXPORT_REQUEST")
+        await run_pdf_prompt_expand_export_request()
 
         print("RUN_SMOKE_PDF_PREV_PLACEHOLDER_FALLBACK")
         await run_pdf_prev_placeholder_fallback()
