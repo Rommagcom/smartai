@@ -425,6 +425,9 @@ async def router_node(state: dict) -> dict:
         "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
         "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
         "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
+        "15a) Для одиночного шага pdf_create/excel_create НЕ пиши полный документ в arguments.content. "
+        "Передавай только короткий источник (до 300 символов, без markdown-блоков и длинных переносов). "
+        "Если нужен полный документ, сначала получи/сформируй данные отдельным шагом, затем используй $prev.body.\n"
         "16) Если пользователь просит актуальные данные (погода, курс валют, новости и т.п.) И одновременно экспорт в PDF/Excel, "
         "сначала получи данные (decision='web_search' или integration_call), затем сформируй файл по результатам. "
         "Нельзя сразу делать pdf_create/excel_create только из исходного текста запроса.\n"
@@ -475,23 +478,23 @@ async def router_node(state: dict) -> dict:
         }
     except Exception as exc:
         logger.warning("Router LLM failed: %s, using fallback routing", exc)
-        if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
-            salvaged = extract_router_output_from_exception(
-                exc,
-                user_message,
-                web_search_pattern=WEB_SEARCH_RE,
-                web_search_hint=_WEB_SEARCH_HINT,
+        salvaged = extract_router_output_from_exception(
+            exc,
+            user_message,
+            web_search_pattern=WEB_SEARCH_RE,
+            web_search_hint=_WEB_SEARCH_HINT,
+        )
+        if salvaged is not None:
+            _dev_log(
+                "router_fallback_salvaged",
+                decision=salvaged.decision.value,
+                steps_count=len(salvaged.steps),
             )
-            if salvaged is not None:
-                _dev_log(
-                    "router_fallback_salvaged",
-                    decision=salvaged.decision.value,
-                    steps_count=len(salvaged.steps),
-                )
-                return {
-                    "router_output": salvaged,
-                    "next_step": salvaged.decision.value,
-                }
+            return {
+                "router_output": salvaged,
+                "next_step": salvaged.decision.value,
+            }
+        if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
             if settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK:
                 live_export_fallback = fallback_live_data_export_route(user_message)
                 if live_export_fallback is not None:

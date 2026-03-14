@@ -14,6 +14,7 @@ async def run() -> None:
     original_chat_structured = llm_provider.chat_structured
     original_shortcuts = settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS
     original_fallbacks = settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS
+    original_salvage = settings.ROUTER_ENABLE_LLM_PARSE_SALVAGE
 
     async def broken_router_structured(*args, **kwargs):
         del args, kwargs
@@ -28,7 +29,8 @@ async def run() -> None:
     try:
         llm_provider.chat_structured = broken_router_structured
         settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS = False
-        settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS = True
+        settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS = False
+        settings.ROUTER_ENABLE_LLM_PARSE_SALVAGE = True
 
         state = {
             "user_message": "Напиши рассказ на страницу и сгенеоируй pdf документ",
@@ -53,6 +55,7 @@ async def run() -> None:
         llm_provider.chat_structured = original_chat_structured
         settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS = original_shortcuts
         settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS = original_fallbacks
+        settings.ROUTER_ENABLE_LLM_PARSE_SALVAGE = original_salvage
 
 
 if __name__ == "__main__":
