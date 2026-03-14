@@ -15,6 +15,7 @@ from scripts.smoke_memory_docs import run as run_memory_docs
 from scripts.smoke_chat_cron_add import run as run_chat_cron_add
 from scripts.smoke_chat_cron_add_natural import run as run_chat_cron_add_natural
 from scripts.smoke_cron_dedupe import run as run_cron_dedupe
+from scripts.smoke_cron_once_finalize import run as run_cron_once_finalize
 from scripts.smoke_onboarding_step import run as run_onboarding_step
 from scripts.smoke_telegram_bridge import run as run_telegram_bridge
 from scripts.smoke_telegram_admin_delete import run as run_telegram_admin_delete
@@ -24,6 +25,7 @@ from scripts.smoke_web_compose_fallback import run as run_web_compose_fallback
 from scripts.smoke_export_claim_guard import run as run_export_claim_guard
 from scripts.smoke_export_claim_guard_e2e import run as run_export_claim_guard_e2e
 from scripts.smoke_export_reenqueue_guard import run as run_export_reenqueue_guard
+from scripts.smoke_export_followup_guard import run as run_export_followup_guard
 from scripts.smoke_router_clarify_live_export_override import run as run_router_clarify_live_export_override
 from scripts.smoke_graph_structured_fallback import run as run_graph_structured_fallback
 from scripts.smoke_graph_inline_cron_guard import run as run_graph_inline_cron_guard
@@ -89,6 +91,11 @@ async def run() -> None:
 
         reset_scheduler()
 
+        print("RUN_SMOKE_CRON_ONCE_FINALIZE")
+        await run_cron_once_finalize()
+
+        reset_scheduler()
+
         print("SKIP_SMOKE_CHAT_TOOLS_REMINDERS (web tools removed)")
         print("SKIP_SMOKE_CHAT_SELF_SERVICE (web tools removed)")
 
@@ -129,6 +136,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_EXPORT_REENQUEUE_GUARD")
         run_export_reenqueue_guard()
+
+        print("RUN_SMOKE_EXPORT_FOLLOWUP_GUARD")
+        await run_export_followup_guard()
 
         print("RUN_SMOKE_ROUTER_CLARIFY_LIVE_EXPORT_OVERRIDE")
         await run_router_clarify_live_export_override()

@@ -39,6 +39,16 @@ _EXPORT_OFFER_SENTENCE_RE = re.compile(
     r"(?:если\s+нужен|если\s+нужно|if\s+you\s+need|if\s+needed)[^.!?\n]*(?:pdf|пдф|excel|xlsx|документ|document|file|файл)[^.!?\n]*(?:[.!?]|$)",
     re.IGNORECASE,
 )
+_ASSISTANT_STATUS_ONLY_RE = re.compile(
+    r"(?:"
+    r"задача\s+поставлен[ао]?\s+в\s+очеред"
+    r"|документ\s+[^\n.!?]{0,120}\s+в\s+процесс[еа]\s+создани"
+    r"|файл\s+[^\n.!?]{0,120}\s+в\s+процесс[еа]\s+создани"
+    r"|поставлен\s+в\s+очеред"
+    r"|будет\s+отправлен\s+отдельным\s+сообщени"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _normalize_space(value: str) -> str:
@@ -52,6 +62,14 @@ def _clean_export_source_text(text: str) -> str:
     cleaned = _EXPORT_OFFER_SENTENCE_RE.sub("", raw)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def _is_assistant_status_only_text(text: str) -> bool:
+    normalized = _normalize_space(text)
+    if not normalized:
+        return True
+    # Guard against exporting service/status-only responses instead of real content.
+    return bool(_ASSISTANT_STATUS_ONLY_RE.search(normalized))
 
 
 def _extract_last_assistant_message(history: list[dict]) -> str:
@@ -149,6 +167,8 @@ def followup_export_route(user_message: str, history: list[dict]) -> RouterOutpu
         return None
 
     content = _clean_export_source_text(last_assistant)
+    if _is_assistant_status_only_text(content):
+        return None
     if len(content) < 12:
         return None
 
