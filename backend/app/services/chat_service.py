@@ -416,15 +416,6 @@ class ChatService:
         if not lowered:
             return None
 
-        wants_pdf_artifact = bool(
-            re.search(
-                r"\b(?:pdf|пдф)\b.*\b(?:сделай|создай|сформируй|сгенер\w*|генер\w*|выгрузи|экспорт\w*|сохрани|оформи|отправ|пришли|generate|create|export|attach)"
-                r"|\b(?:сделай|создай|сформируй|сгенер\w*|генер\w*|выгрузи|экспорт\w*|сохрани|оформи|отправ|пришли|generate|create|export|attach)\b.*\b(?:pdf|пдф)\b"
-                r"|\bв\s+pdf\b",
-                lowered,
-            )
-        )
-
         cron_add_args = ChatService._extract_cron_add_structured_args(user_message)
         if cron_add_args:
             ChatService._dev_verbose_log(
@@ -528,18 +519,6 @@ class ChatService:
             r"|analy[sz]e|explain|summari[sz]e|what\s+does|key\s+points?)"
         )
         if re.search(_doc_entity, lowered) and re.search(_doc_qa_intent, lowered):
-            if wants_pdf_artifact:
-                return [
-                    {"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 5}},
-                    {
-                        "tool": "pdf_create",
-                        "arguments": {
-                            "title": "Анализ документов",
-                            "filename": "document-analysis.pdf",
-                            "content": "$prev.answer",
-                        },
-                    },
-                ]
             return [{"tool": "doc_ask", "arguments": {"query": str(user_message or "").strip(), "top_k": 5}}]
 
         # Document management: list, delete one, delete all
@@ -568,18 +547,6 @@ class ChatService:
             lowered,
         ):
             return [{"tool": "doc_list", "arguments": {}}]
-
-        if wants_pdf_artifact and not ChatService._is_live_data_intent(user_message):
-            return [
-                {
-                    "tool": "pdf_create",
-                    "arguments": {
-                        "title": "Документ",
-                        "filename": "generated-document.pdf",
-                        "content": str(user_message or "").strip(),
-                    },
-                }
-            ]
 
         return None
 
@@ -2209,21 +2176,22 @@ class ChatService:
 
         # Deterministic: parse structured code-block tool calls from user
         # message (e.g. ```cron_add ...```) before any LLM interaction.
-        fast_tool = await self._maybe_fast_tool_answer(
-            db=db,
-            user=user,
-            user_message=user_message,
-            manual_tool_calls=manual_tool_calls,
-        )
-        if fast_tool:
-            answer, ft_tool_calls, ft_artifacts = fast_tool
-            self._dev_verbose_log(
-                "respond_fast_tool",
-                user_id=str(user.id),
-                session_id=str(session_id),
-                tool_calls_count=len(ft_tool_calls),
+        if bool(settings.CHAT_ENABLE_DETERMINISTIC_FAST_TOOLS):
+            fast_tool = await self._maybe_fast_tool_answer(
+                db=db,
+                user=user,
+                user_message=user_message,
+                manual_tool_calls=manual_tool_calls,
             )
-            return answer, [], [], ft_tool_calls, ft_artifacts
+            if fast_tool:
+                answer, ft_tool_calls, ft_artifacts = fast_tool
+                self._dev_verbose_log(
+                    "respond_fast_tool",
+                    user_id=str(user.id),
+                    session_id=str(session_id),
+                    tool_calls_count=len(ft_tool_calls),
+                )
+                return answer, [], [], ft_tool_calls, ft_artifacts
 
         # For tool-intent messages, try tool-chain first and avoid expensive
         # context building when the final answer can be produced from tools.

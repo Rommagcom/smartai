@@ -420,10 +420,11 @@ class ToolOrchestratorService:
         user: User,
         steps: list[dict],
         max_steps: int = 5,
+        initial_context: dict[str, Any] | None = None,
     ) -> list[dict]:
         handlers = self._handlers()
         results: list[dict] = []
-        context: dict[str, dict] = {}
+        context: dict[str, Any] = dict(initial_context or {})
         _dev_verbose_log(
             "chain_start",
             user_id=str(user.id),
@@ -687,6 +688,14 @@ class ToolOrchestratorService:
         prev = context.get("_prev")
         steps_results: list = context.get("_steps") or []
         merged = _resolve_placeholders(merged, prev=prev, steps=steps_results)
+
+        if tool in {"pdf_create", "excel_create"}:
+            content = str(merged.get("content") or "").strip()
+            rows = merged.get("rows")
+            if not content and not (isinstance(rows, list) and rows):
+                fallback_content = str(context.get("_fallback_export_content") or "").strip()
+                if fallback_content:
+                    merged["content"] = fallback_content
 
         return merged
 

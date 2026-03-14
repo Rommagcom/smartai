@@ -32,6 +32,16 @@ async def run() -> None:
     ensure("Маркетинговый план" in content, f"expected plan content in export follow-up: {content}")
     ensure("очеред" not in content.lower(), f"queue status leaked into export content: {content}")
 
+    long_new_request = (
+        "Разработай маркетинговый план по продаже услуги AI персональный ассистент "
+        "как ты с твоим функционалом и сохрани в pdf"
+    )
+    should_not_followup = followup_export_route(long_new_request, content_history)
+    ensure(
+        should_not_followup is None,
+        f"full standalone request must not use follow-up export route: {should_not_followup}",
+    )
+
     print("SMOKE_EXPORT_FOLLOWUP_GUARD_OK")
 
 

@@ -98,16 +98,12 @@ async def run() -> None:
 
         out = await output_node(state)
 
-        ensure(len(captured_payloads) == 1, f"expected 1 pdf enqueue call, got: {captured_payloads}")
-        payload = captured_payloads[0]["payload"]
-        content = str(payload.get("content") or "")
-        ensure("LLM_WEB_SUMMARY::" in content, f"LLM answer marker missing in PDF payload: {content}")
-        ensure("EUR: 108.42" in content, f"LLM web facts missing in PDF payload: {content}")
+        ensure(len(captured_payloads) == 0, f"implicit export enqueue must be disabled, got: {captured_payloads}")
 
         calls = out.get("tool_calls_log") if isinstance(out.get("tool_calls_log"), list) else []
-        ensure(any(str(item.get("tool") or "") == "pdf_create" for item in calls), f"pdf_create call missing in output state: {calls}")
+        ensure(not calls, f"output_node should not inject tool calls when auto-export is disabled: {calls}")
         answer = str(out.get("final_answer") or "")
-        ensure("PDF" in answer and "очеред" in answer.lower(), f"expected queued export note in final answer: {answer}")
+        ensure("LLM_WEB_SUMMARY::" in answer, f"final answer unexpectedly changed: {answer}")
 
         print("SMOKE_WEB_EXPORT_LLM_PDF_OK")
     finally:
