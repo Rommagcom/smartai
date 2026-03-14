@@ -353,12 +353,46 @@ class SchedulerService:
         loaded = 0
         failed = 0
         removed = 0
+        skipped_stale_once = 0
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(CronJob).where(CronJob.is_active.is_(True)).order_by(CronJob.created_at.desc())
             )
-            rows = result.scalars().all()
+            db_rows = result.scalars().all()
+
+            rows: list[CronJob] = []
+            for row in db_rows:
+                cron_expression = str(row.cron_expression or "").strip().lower()
+                if cron_expression.startswith("@once:"):
+                    try:
+                        run_at_raw = str(row.cron_expression or "").replace("@once:", "", 1)
+                        run_at = datetime.fromisoformat(run_at_raw)
+                    except Exception:
+                        failed += 1
+                        continue
+
+                    if self._should_skip_stale_once_job(run_at):
+                        row.is_active = False
+                        row.next_run = None
+                        skipped_stale_once += 1
+                        logger.debug(
+                            "scheduler stale once job deactivated",
+                            extra={
+                                "context": {
+                                    "component": "scheduler",
+                                    "event": "job_deactivate_stale_once",
+                                    "job_id": str(row.id),
+                                    "action_type": str(row.action_type),
+                                }
+                            },
+                        )
+                        continue
+
+                rows.append(row)
+
+            if skipped_stale_once:
+                await db.commit()
 
         active_ids = {str(row.id) for row in rows}
         existing_ids = {
@@ -392,7 +426,12 @@ class SchedulerService:
             except Exception:
                 failed += 1
 
-        return {"loaded": loaded, "failed": failed, "removed": removed}
+        return {
+            "loaded": loaded,
+            "failed": failed,
+            "removed": removed,
+            "skipped_stale_once": skipped_stale_once,
+        }
 
     async def sync_jobs_from_db(self) -> dict:
         started_at = perf_counter()
@@ -400,13 +439,15 @@ class SchedulerService:
         loaded = 0
         failed = 0
         removed = 0
+        skipped_stale_once = 0
         try:
             sync_result = await self._sync_jobs_from_db_internal(force_reload_all=False)
             loaded = int(sync_result.get("loaded", 0))
             failed = int(sync_result.get("failed", 0))
             removed = int(sync_result.get("removed", 0))
+            skipped_stale_once = int(sync_result.get("skipped_stale_once", 0))
             success = failed == 0
-            if loaded or removed or failed:
+            if loaded or removed or failed or skipped_stale_once:
                 logger.info(
                     "scheduler periodic sync",
                     extra={
@@ -416,6 +457,7 @@ class SchedulerService:
                             "loaded": loaded,
                             "removed": removed,
                             "failed": failed,
+                            "skipped_stale_once": skipped_stale_once,
                         }
                     },
                 )
@@ -429,10 +471,16 @@ class SchedulerService:
                             "loaded": loaded,
                             "removed": removed,
                             "failed": failed,
+                            "skipped_stale_once": skipped_stale_once,
                         }
                     },
                 )
-            return {"loaded": loaded, "failed": failed, "removed": removed}
+            return {
+                "loaded": loaded,
+                "failed": failed,
+                "removed": removed,
+                "skipped_stale_once": skipped_stale_once,
+            }
         except Exception as exc:
             alerting_service.emit(
                 component="scheduler",

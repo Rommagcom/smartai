@@ -264,3 +264,61 @@ def fallback_live_data_export_route(user_message: str) -> RouterOutput | None:
         response_hint="Сначала получи актуальные данные, затем сформируй файл",
         confidence=0.55,
     )
+
+
+def fallback_explicit_export_route(user_message: str) -> RouterOutput | None:
+    """Build a safe direct export route for explicit long-form requests.
+
+    This fallback is intentionally narrow and used when router structured parsing
+    fails with no recoverable JSON payload.
+    """
+    text = str(user_message or "").strip()
+    if not text:
+        return None
+
+    export_kind = requested_export_kind(text)
+    lowered = text.lower()
+    if not export_kind:
+        has_export_verb = bool(
+            re.search(
+                r"\b(?:сделай|создай|сформируй|сгенерируй|выгрузи|экспорт|сохрани|оформи|generate|create|export|save)\b",
+                lowered,
+            )
+        )
+        if has_export_verb and re.search(r"\b(?:pdf|пдф)\b|\bв\s+pdf\b", lowered):
+            export_kind = "pdf"
+        elif has_export_verb and re.search(r"\b(?:excel|xlsx|таблиц)\b|\bв\s+excel\b", lowered):
+            export_kind = "excel"
+
+    if export_kind not in {"pdf", "excel"}:
+        return None
+
+    # Do not treat short confirmations as standalone export jobs.
+    if _is_export_followup_intent(text):
+        return None
+
+    if len(text.split()) < 6 and len(text) < 40:
+        return None
+
+    if export_kind == "pdf":
+        tool = "pdf_create"
+        filename = "generated-document.pdf"
+    else:
+        tool = "excel_create"
+        filename = "generated-document.xlsx"
+
+    return RouterOutput(
+        decision=RouterDecision.TOOL,
+        steps=[
+            ToolStep(
+                tool=tool,
+                arguments={
+                    "title": "Документ",
+                    "filename": filename,
+                    "content": text,
+                },
+            )
+        ],
+        response_hint="Маршрут восстановлен: явный запрос на экспорт документа",
+        confidence=0.5,
+    )
