@@ -247,13 +247,28 @@ class MemoryService:
         await db.flush()
         return memory
 
-    async def retrieve_relevant_memories(self, db: AsyncSession, user_id: UUID, query: str, top_k: int = 5) -> list[LongTermMemory]:
+    async def retrieve_relevant_memories(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        query: str,
+        top_k: int = 5,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> list[LongTermMemory]:
+        """Vector-similarity search over long-term memories.
+
+        ``query_embedding`` can be supplied by the caller to avoid a redundant
+        Ollama round-trip when the embedding was already computed for the same
+        query elsewhere in the request pipeline (e.g. ``retrieve_chat_context_memories``).
+        """
         now = datetime.now(timezone.utc)
-        try:
-            query_embedding = await ollama_client.embeddings(query)
-        except Exception:
-            logger.warning("query embedding generation failed, falling back to importance sort", exc_info=True)
-            query_embedding = self._zero_embedding()
+        if query_embedding is None:
+            try:
+                query_embedding = await ollama_client.embeddings(query)
+            except Exception:
+                logger.warning("query embedding generation failed, falling back to importance sort", exc_info=True)
+                query_embedding = self._zero_embedding()
 
         if self._is_zero_vector(query_embedding):
             result = await db.execute(
@@ -316,43 +331,74 @@ class MemoryService:
         user_id: UUID,
         query: str,
         top_k: int = 5,
+        *,
+        query_embedding: list[float] | None = None,
     ) -> list[LongTermMemory]:
         """Retrieve memories optimized for conversational context.
 
         Combines semantic relevance, pinned/locked facts, key fact types and
         lightweight lexical matching so high-value user facts are less likely to
         be missed in regular chat.
+
+        ``query_embedding`` can be passed from the caller to avoid a second
+        Ollama embedding call when the vector was already computed elsewhere.
         """
+        from app.db.session import AsyncSessionLocal
+
         limit = max(1, min(top_k, 20))
         now = datetime.now(timezone.utc)
         candidates: dict[UUID, LongTermMemory] = {}
 
-        # 1) Semantic candidates from vector retrieval.
-        semantic_rows = await self.retrieve_relevant_memories(db=db, user_id=user_id, query=query, top_k=max(limit * 2, 8))
+        # Run embedding generation and the prioritized (no-vector) DB query in parallel:
+        # - embedding is needed only for the semantic search path
+        # - prioritized query (pinned/locked/fact_type) has no dependency on the embedding
+        async def _get_embedding() -> list[float]:
+            if query_embedding is not None:
+                return query_embedding
+            try:
+                return await ollama_client.embeddings(query)
+            except Exception:
+                logger.warning("query embedding generation failed", exc_info=True)
+                return self._zero_embedding()
+
+        async def _get_prioritized() -> list[LongTermMemory]:
+            async with AsyncSessionLocal() as prio_db:
+                prio_result = await prio_db.execute(
+                    select(LongTermMemory)
+                    .where(
+                        LongTermMemory.user_id == user_id,
+                        self._active_filter(now),
+                        or_(
+                            LongTermMemory.is_pinned.is_(True),
+                            LongTermMemory.is_locked.is_(True),
+                            LongTermMemory.fact_type.in_(tuple(self._MEMORY_CONTEXT_FACT_TYPES)),
+                        ),
+                    )
+                    .order_by(
+                        LongTermMemory.is_pinned.desc(),
+                        LongTermMemory.is_locked.desc(),
+                        LongTermMemory.importance_score.desc(),
+                        LongTermMemory.created_at.desc(),
+                    )
+                    .limit(max(limit * 4, 24))
+                )
+                return list(prio_result.scalars().all())
+
+        embedding_result, prioritized_rows = await asyncio.gather(
+            _get_embedding(),
+            _get_prioritized(),
+        )
+
+        # 1) Semantic candidates from vector retrieval (uses pre-computed embedding).
+        semantic_rows = await self.retrieve_relevant_memories(
+            db=db, user_id=user_id, query=query,
+            top_k=max(limit * 2, 8), query_embedding=embedding_result,
+        )
         for row in semantic_rows:
             candidates[row.id] = row
 
         # 2) Always consider pinned/locked and high-value fact types.
-        prioritized_result = await db.execute(
-            select(LongTermMemory)
-            .where(
-                LongTermMemory.user_id == user_id,
-                self._active_filter(now),
-                or_(
-                    LongTermMemory.is_pinned.is_(True),
-                    LongTermMemory.is_locked.is_(True),
-                    LongTermMemory.fact_type.in_(tuple(self._MEMORY_CONTEXT_FACT_TYPES)),
-                ),
-            )
-            .order_by(
-                LongTermMemory.is_pinned.desc(),
-                LongTermMemory.is_locked.desc(),
-                LongTermMemory.importance_score.desc(),
-                LongTermMemory.created_at.desc(),
-            )
-            .limit(max(limit * 4, 24))
-        )
-        for row in prioritized_result.scalars().all():
+        for row in prioritized_rows:
             candidates[row.id] = row
 
         rows = list(candidates.values())

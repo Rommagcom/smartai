@@ -281,6 +281,9 @@ class DynamicToolService:
             "skill_path": storage_meta["skill_path"],
             "readme_path": storage_meta["readme_path"],
             "zip_sha256": storage_meta["zip_sha256"],
+            # Fallback for container restarts/path drift: execute directly from DB
+            # if the skill file is no longer present on disk.
+            "skill_code_inline": skill_code,
         }
 
         if existing:
@@ -609,17 +612,51 @@ class DynamicToolService:
         auth_data = tool.auth_data if isinstance(tool.auth_data, dict) else {}
         headers = tool.headers if isinstance(tool.headers, dict) else {}
         skill_path = str(auth_data.get("skill_path") or "").strip()
-        if not skill_path:
-            return {"success": False, "error": "Dynamic Python Skill is not installed correctly (missing skill_path)."}
+        skill_code_inline = str(auth_data.get("skill_code_inline") or "").strip()
 
-        path_obj = Path(skill_path)
-        if not path_obj.exists() or not path_obj.is_file():
-            return {"success": False, "error": "Dynamic Python Skill code file is missing."}
+        skill_code = ""
+        if skill_path:
+            path_obj = Path(skill_path)
+            if path_obj.exists() and path_obj.is_file():
+                try:
+                    skill_code = path_obj.read_text(encoding="utf-8")
+                except Exception as exc:
+                    return {"success": False, "error": f"Failed to read skill code: {exc}"}
 
-        try:
-            skill_code = path_obj.read_text(encoding="utf-8")
-        except Exception as exc:
-            return {"success": False, "error": f"Failed to read skill code: {exc}"}
+        if not skill_code:
+            storage_dir = str(auth_data.get("storage_dir") or "").strip()
+            if storage_dir:
+                fallback_path = Path(storage_dir) / "skill.py"
+                if fallback_path.exists() and fallback_path.is_file():
+                    try:
+                        skill_code = fallback_path.read_text(encoding="utf-8")
+                    except Exception as exc:
+                        return {"success": False, "error": f"Failed to read fallback skill code: {exc}"}
+
+        if not skill_code and skill_code_inline:
+            logger.info(
+                "dynamic python skill fallback to inline code: tool=%s user_id=%s",
+                tool.name,
+                user_id,
+            )
+            skill_code = skill_code_inline
+
+        if not skill_code:
+            if not skill_path:
+                return {
+                    "success": False,
+                    "error": (
+                        "Dynamic Python Skill is not installed correctly "
+                        "(missing skill_path and inline backup code)."
+                    ),
+                }
+            return {
+                "success": False,
+                "error": (
+                    "Dynamic Python Skill code file is missing. "
+                    "Re-upload the skill package to restore local runtime files."
+                ),
+            }
 
         function_name = str(headers.get("function") or "run").strip() or "run"
         capabilities = headers.get("capabilities") if isinstance(headers.get("capabilities"), dict) else {}
@@ -749,7 +786,9 @@ class DynamicToolService:
 
     @staticmethod
     def _validate_skill_manifest(manifest: dict) -> None:
-        required = ["name", "entrypoint", "function", "input_schema"]
+        # entrypoint and function are optional — register_skill_package defaults
+        # to "skill.py" and "run" when they are absent, matching the README example.
+        required = ["name", "input_schema"]
         missing = [key for key in required if key not in manifest]
         if missing:
             raise ValueError(f"manifest missing required fields: {', '.join(missing)}")

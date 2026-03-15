@@ -11,6 +11,7 @@ and rag_service — it does NOT replace them, it orchestrates them.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from uuid import UUID
@@ -47,23 +48,32 @@ class MemoryManager:
         Returns a dict with keys: history_messages, stm_context,
         ltm_context, rag_context, history_summary.
         """
-        import asyncio
+        from app.services.ollama_client import ollama_client
 
+        # Start history and STM immediately — they don't need the embedding.
         history_task = asyncio.create_task(
             self._get_history(db, user_id, session_id, history_limit)
         )
         stm_task = asyncio.create_task(self._get_stm(user_id, stm_limit))
+
+        # Compute the query embedding concurrently while history/STM are fetching,
+        # so that both LTM and RAG can reuse it, avoiding two Ollama round-trips.
+        try:
+            shared_embedding: list[float] | None = await ollama_client.embeddings(user_message)
+        except Exception:
+            logger.debug("pre-fetch embedding failed, falling back per-service", exc_info=True)
+            shared_embedding = None
+
         ltm_task = asyncio.create_task(
-            self._get_ltm(db, user_id, user_message, ltm_limit)
+            self._get_ltm(db, user_id, user_message, ltm_limit, query_embedding=shared_embedding)
         )
         rag_task = asyncio.create_task(
-            self._get_rag(user_id, user_message, rag_limit)
+            self._get_rag(user_id, user_message, rag_limit, query_embedding=shared_embedding)
         )
 
-        history_messages = await history_task
-        stm_context = await stm_task
-        ltm_context = await ltm_task
-        rag_context = await rag_task
+        history_messages, stm_context, ltm_context, rag_context = await asyncio.gather(
+            history_task, stm_task, ltm_task, rag_task
+        )
 
         # Build summary for dropped history
         history_summary = self._summarize_dropped_history(
@@ -265,23 +275,31 @@ class MemoryManager:
             return []
 
     async def _get_ltm(
-        self, db: AsyncSession, user_id: UUID, query: str, limit: int
+        self, db: AsyncSession, user_id: UUID, query: str, limit: int,
+        *, query_embedding: list[float] | None = None,
     ) -> list[str]:
         from app.services.memory_service import memory_service
 
         try:
             memories = await memory_service.retrieve_chat_context_memories(
-                db, user_id, query=query, top_k=limit
+                db, user_id, query=query, top_k=limit, query_embedding=query_embedding,
             )
             return [str(m.content or "") for m in memories if str(m.content or "").strip()]
         except Exception:
             logger.debug("LTM fetch failed", exc_info=True)
             return []
 
-    async def _get_rag(self, user_id: UUID, query: str, limit: int) -> list[str]:
+    async def _get_rag(
+        self, user_id: UUID, query: str, limit: int,
+        *, query_embedding: list[float] | None = None,
+    ) -> list[str]:
         from app.services.rag_service import rag_service
 
         try:
+            # If we have a pre-computed embedding, warm the RAG service cache so
+            # it skips its own Ollama call for the same query.
+            if query_embedding is not None:
+                rag_service._cache_put_query_embedding(query, query_embedding)
             chunks = await rag_service.retrieve_context(
                 user_id=user_id, query=query, top_k=limit
             )
