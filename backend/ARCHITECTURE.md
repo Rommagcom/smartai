@@ -2,6 +2,39 @@
 
 Детальное описание архитектуры, потоков данных и маршрутизации.
 
+## Как читать этот файл
+
+- Если вы новый в проекте: начните с разделов
+    - `Граф обработки сообщений (LangGraph)`
+    - `Жизненный цикл запроса`
+- Если дебажите инструмент/интеграцию: переходите в
+    - `Маршрутизация инструментов`
+    - `Dynamic Tool Injection`
+- Если дебажите контекст/память: переходите в
+    - `Система памяти`
+
+## Быстрая карта для разработки
+
+Куда смотреть в коде для типовых задач:
+
+| Задача | Главный файл | Что проверять первым |
+|--------|--------------|----------------------|
+| API не отвечает как ожидается | `app/api/v1/endpoints/chat.py` | входной payload, user/session, финальный response |
+| Неверный route `tool/chat` | `app/graph/nodes.py` | `router_node`, `tool_execution_node`, `compose_node` |
+| Tool не вызвался/упал | `app/services/tool_orchestrator_service.py` | planner steps, args validation, handler dispatch |
+| Dynamic Skill не работает | `app/services/dynamic_tool_service.py` | регистрация пакета, `call_dynamic_tool`, sandbox/fallback |
+| Проблемы с памятью | `app/memory/__init__.py`, `app/services/memory_service.py` | gather_context, LTM retrieval, ranking |
+| Интеграция не дергается | `app/services/integration_onboarding_service.py`, `app/services/api_executor.py` | auth_data, endpoint resolve, egress policy |
+| Фоновые задачи не доезжают | `app/workers/worker_service.py`, `app/services/scheduler_service.py` | enqueue, retries, scheduler sync |
+
+## Быстрый путь запроса (сверху вниз)
+
+1. `POST /api/v1/chat` в `app/api/v1/endpoints/chat.py`
+2. `chat_service.graph_respond(...)`
+3. LangGraph в `app/graph/__init__.py` и узлы в `app/graph/nodes.py`
+4. Tool execution через `app/services/tool_orchestrator_service.py`
+5. Ответ и артефакты обратно в endpoint
+
 ## Оглавление
 - [Логическая структура проекта](#логическая-структура-проекта)
 - [Стек технологий](#стек-технологий)

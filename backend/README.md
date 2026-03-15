@@ -1,84 +1,133 @@
 # SmartAI Backend
 
-SmartAI - backend персонального AI-ассистента с единым чатом, памятью, инструментами, интеграциями и динамическими навыками.
+SmartAI - backend персонального AI-ассистента с единым чатом, памятью, инструментами, интеграциями и Dynamic Skills.
 
-## Функционал SmartAI
+## Что это
 
-- Граф-агент на LangGraph: guardrail -> memory -> router -> tool/chat -> compose -> output.
-- Единая точка общения: REST, WebSocket и Telegram-бот.
-- Многоуровневая память: short-term (Redis), long-term (PostgreSQL/pgvector), документная (Milvus/RAG), история диалога.
-- Tool orchestration: автоматический выбор и вызов инструментов из пользовательского сообщения.
-- Планировщик и напоминания: cron-задачи, в том числе из естественного языка.
-- Интеграции с внешними API: onboarding, health-check, вызов по сохраненным параметрам.
-- Dynamic Skills: загрузка пользовательских zip-пакетов со skill-кодом и подключение в рантайме.
-- Execution safety: guardrails, sandbox-ограничения, валидация схем и аргументов инструментов.
-- Multi-instance ready: выделенные роли api, scheduler-leader и worker.
+- Граф-агент на LangGraph: `guardrail -> memory -> router -> tool/chat -> compose -> output`
+- Каналы: REST, WebSocket, Telegram
+- Память: STM (Redis), LTM (PostgreSQL/pgvector), документы (Milvus/RAG)
+- Интеграции и инструменты: onboarding, health-check, вызовы API
+- Dynamic Skills: загрузка zip-пакетов с Python skill-кодом
 
-## Особенности
+## Быстрый старт за 2-3 минуты
 
-- Admin-only контроль для критичных действий (загрузка/удаление Dynamic Skills, destructive-операции по интеграциям).
-- Durable worker queue с retry, recovery и дедупликацией задач.
-- Встроенная наблюдаемость: метрики, алерты, структурированные логи.
-- Fallback-маршрутизация при неструктурных ответах LLM.
-- Поддержка артефактов (например PDF) с корректной доставкой в API, WS и Telegram.
+Запускайте из каталога `backend`.
 
-## Быстрый запуск
+### 1) Docker (рекомендуется)
 
-Запуск из каталога backend:
+Linux/macOS:
 
-1. Создать рабочий env:
-   - `cp .env.example .env`
-2. Поднять сервисы:
-   - `docker compose up -d --build`
-3. Применить миграции:
-   - `docker compose exec api alembic upgrade head`
-4. Проверить API:
-   - `http://localhost:8000/docs`
-5. Быстрая smoke-проверка:
-   - `../.venv/Scripts/python.exe -m scripts.smoke_all`
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
 
-### Режим: Ollama на хост-машине (GPU)
+Windows PowerShell:
 
-Если Ollama запущена на хосте, а SmartAI работает в контейнерах:
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
 
-1. В `.env`:
-   - `OLLAMA_BASE_URL=http://host.docker.internal:11434`
-2. Запуск стека с override:
-   - `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build`
-3. Применить миграции:
-   - `docker compose exec api alembic upgrade head`
-4. Проверить доступность Ollama из контейнера:
-   - `docker compose exec api python -c "import urllib.request; r=urllib.request.urlopen('http://host.docker.internal:11434/api/tags', timeout=5); print(r.status)"`
+Проверка:
 
-Если получаете `Connection refused`, обычно Ollama на хосте слушает только `127.0.0.1`. Для контейнеров нужен bind на `0.0.0.0:11434`.
+- API docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
 
-## Административный интерфейс
+Smoke:
 
-- Как сделать админа сейчас:
+```powershell
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+```
 
-   Если база пустая
-   Зарегистрируйте первого пользователя через /api/v1/auth/register
-   Он сразу будет админом
-   Если админ уже есть
-   Залогиньтесь под админом
-   Выдайте права нужному пользователю через endpoint:
-   PATCH /api/v1/users/admin/users/{user_id}/admin-access
-   Body:
-   {"is_admin": true}
+### 2) Ollama на хосте (GPU)
 
-   - Аварийный случай
-   Если админа не осталось (аварийный случай)
-   Выдать права напрямую в БД:
-   docker compose exec postgres psql -U assistant -d assistant -c "UPDATE users SET is_admin = true WHERE username = 'your_username';"
-   
-   Проверить:
-   docker compose exec postgres psql -U assistant -d assistant -c "SELECT username, is_admin FROM users ORDER BY created_at;"
-   
-## Быстрое написание Dynamic Skills
+Если Ollama работает на хост-машине, а backend в Docker:
 
-Dynamic Skill - zip-пакет с манифестом, кодом и описанием.
+1. В `.env` задайте:
 
-### 1. Структура пакета
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+2. Запуск с override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+docker compose exec api alembic upgrade head
+```
+
+3. Проверка доступа к Ollama из контейнера:
+
+```bash
+docker compose exec api python -c "import urllib.request; r=urllib.request.urlopen('http://host.docker.internal:11434/api/tags', timeout=5); print(r.status)"
+```
+
+Если `Connection refused`, обычно Ollama слушает только `127.0.0.1`. Для Docker-контейнеров нужен bind на `0.0.0.0:11434`.
+
+## Частые команды
+
+Windows PowerShell:
+
+```powershell
+# поднять стек
+docker compose up -d --build
+
+# миграции
+docker compose exec api alembic upgrade head
+
+# все smoke
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+
+# отдельные smoke
+..\.venv\Scripts\python.exe -m scripts.smoke_admin_access
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_package
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_delete
+```
+
+Linux/macOS:
+
+```bash
+# поднять стек
+docker compose up -d --build
+
+# миграции
+docker compose exec api alembic upgrade head
+
+# все smoke
+../.venv/bin/python -m scripts.smoke_all
+
+# отдельные smoke
+../.venv/bin/python -m scripts.smoke_admin_access
+../.venv/bin/python -m scripts.smoke_dynamic_skill_package
+../.venv/bin/python -m scripts.smoke_dynamic_skill_delete
+```
+
+## Админ-доступ
+
+### Обычный путь
+
+1. Если база пустая: первый зарегистрированный пользователь становится admin автоматически.
+2. Если admin уже есть: выдайте права через endpoint:
+
+- `PATCH /api/v1/users/admin/users/{user_id}/admin-access`
+- Body: `{"is_admin": true}`
+
+### Аварийный путь (если admin не осталось)
+
+```bash
+docker compose exec postgres psql -U assistant -d assistant -c "UPDATE users SET is_admin = true WHERE username = 'your_username';"
+docker compose exec postgres psql -U assistant -d assistant -c "SELECT username, is_admin FROM users ORDER BY created_at;"
+```
+
+## Dynamic Skills: быстро
+
+Dynamic Skill - zip-пакет с `manifest.json`, `skill.py`, `skill.md`.
+
+### Минимальная структура
 
 ```text
 my_skill.zip
@@ -87,7 +136,7 @@ my_skill.zip
   skill.md
 ```
 
-### 2. Минимальный manifest.json
+### Минимальный manifest.json
 
 ```json
 {
@@ -106,9 +155,7 @@ my_skill.zip
 }
 ```
 
-### 3. Контракт skill.py
-
-Внутри должен быть `run(params, context)`.
+### Контракт skill.py
 
 ```python
 def run(params, context):
@@ -120,20 +167,17 @@ def run(params, context):
     return {"ok": True, "city": city, "summary": f"No LLM available for {city}"}
 ```
 
-### 4. Загрузка и проверка
+### Управление Skills
 
-- Через API (только admin): `POST /api/v1/chat/tools/skill-upload`.
-- Просмотр списка: `GET /api/v1/chat/tools/skills`.
-- Удаление одной: `DELETE /api/v1/chat/tools/skill/{skill_name}` (admin-only).
-- Удаление всех: `DELETE /api/v1/chat/tools/skills/all` (admin-only).
+- Upload (admin): `POST /api/v1/chat/tools/skill-upload`
+- List: `GET /api/v1/chat/tools/skills`
+- Delete one (admin): `DELETE /api/v1/chat/tools/skill/{skill_name}`
+- Delete all (admin): `DELETE /api/v1/chat/tools/skills/all`
 
-### 5. Быстрый тест
-
-После загрузки отправьте в чат сообщение, которое явно вызывает ваш skill (по названию/назначению), и проверьте ответ/артефакты.
-
-## Полная документация
+## Документация
 
 - Полный гайд: [FULLREADME.MD](FULLREADME.MD)
+- Конфигурация (.env): [CONFIGURATION.md](CONFIGURATION.md)
 - Архитектура: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Тесты и smoke: [TESTS.md](TESTS.md)
 - Релизный runbook: [RELEASE.md](RELEASE.md)

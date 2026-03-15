@@ -1,5 +1,14 @@
 # Тестирование и релизный контроль
 
+## Быстрый сценарий (Windows, 2 команды)
+
+Запускать из директории `backend`:
+
+```powershell
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+..\.venv\Scripts\python.exe -m scripts.smoke_admin_access
+```
+
 ## Smoke-проверки
 Запускать из директории `backend`.
 
@@ -15,6 +24,10 @@
    - `python -m scripts.smoke_memory_docs`
 - Integrations flow (`integrations create/list/call`):
    - `python -m scripts.smoke_integrations`
+- Dynamic Skill package flow (`upload/register/call python skill`):
+   - `python -m scripts.smoke_dynamic_skill_package`
+- Dynamic Skill delete flow (`delete by tool_name/skill_name/tool_id + delete_all`):
+   - `python -m scripts.smoke_dynamic_skill_delete`
 - Onboarding-step flow (`onboarding-next-step` до/после `soul/setup`):
    - `python -m scripts.smoke_onboarding_step`
 - Telegram bridge flow (хендлеры `start/chat/memory_add` без real Telegram API):
@@ -54,6 +67,8 @@ Windows PowerShell (из корня репозитория):
 Set-Location backend
 ..\.venv\Scripts\python.exe -m scripts.smoke_all
 ..\.venv\Scripts\python.exe -m scripts.smoke_admin_access
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_package
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_delete
 ```
 
 Linux/macOS (из корня репозитория):
@@ -61,6 +76,8 @@ Linux/macOS (из корня репозитория):
 cd backend
 ../.venv/bin/python -m scripts.smoke_all
 ../.venv/bin/python -m scripts.smoke_admin_access
+../.venv/bin/python -m scripts.smoke_dynamic_skill_package
+../.venv/bin/python -m scripts.smoke_dynamic_skill_delete
 ```
 
 ## Load validation checklist (post-deploy)

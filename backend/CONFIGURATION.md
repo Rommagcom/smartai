@@ -10,6 +10,102 @@
 - Формат: env-переменные из .env переопределяют default.
 - Неиспользуемые extra-поля в .env игнорируются.
 
+### 1.1 Быстрый чеклист перед запуском
+
+Минимум для старта Docker-стека:
+
+- `DATABASE_URL`
+- `REDIS_URL`
+- `OLLAMA_BASE_URL` (или внешний LLM через LiteLLM)
+- `JWT_SECRET_KEY`
+
+Рекомендуемый быстрый self-check:
+
+1. `docker compose up -d --build`
+2. `docker compose exec api alembic upgrade head`
+3. `GET /health`
+4. `python -m scripts.smoke_all`
+
+### 1.2 Готовые профили `.env`
+
+Ниже стартовые профили, которые можно копировать и адаптировать.
+
+#### Профиль A: Local Docker Dev (single instance)
+
+```env
+# Core
+JWT_SECRET_KEY=change-me
+API_V1_PREFIX=/api/v1
+
+# Storage
+DATABASE_URL=postgresql+asyncpg://assistant:assistant@postgres:5432/assistant
+REDIS_URL=redis://redis:6379/0
+
+# LLM
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL_NAME=kimi-k2.5:cloud
+
+# Vector / RAG
+MILVUS_HOST=milvus
+MILVUS_PORT=19530
+EMBEDDING_DIM=768
+
+# Runtime toggles (single instance)
+WORKER_ENABLED=1
+SCHEDULER_ENABLED=1
+WS_FANOUT_REDIS_ENABLED=1
+
+# Security for integration secrets
+AUTH_DATA_ENCRYPTION_KEYS=v1:replace-with-strong-random-key
+AUTH_DATA_ACTIVE_KEY_ID=v1
+```
+
+#### Профиль B: Docker + Ollama на хосте (GPU)
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+Остальные значения - как в профиле A.
+
+#### Профиль C: Multi-instance роли
+
+`api` роль:
+
+```env
+WORKER_ENABLED=0
+SCHEDULER_ENABLED=0
+WS_FANOUT_REDIS_ENABLED=1
+```
+
+`scheduler-leader` роль:
+
+```env
+WORKER_ENABLED=0
+SCHEDULER_ENABLED=1
+WS_FANOUT_REDIS_ENABLED=0
+```
+
+`worker` роль:
+
+```env
+WORKER_ENABLED=1
+SCHEDULER_ENABLED=0
+WS_FANOUT_REDIS_ENABLED=0
+```
+
+### 1.3 Частые симптомы и что проверять первым
+
+- `Connection refused` к Ollama из `api` контейнера:
+	- проверьте `OLLAMA_BASE_URL`
+	- для host-режима нужен bind Ollama на `0.0.0.0:11434`
+- Ошибки интеграций/skill вызовов:
+	- проверьте `AUTH_DATA_ENCRYPTION_KEYS` и `AUTH_DATA_ACTIVE_KEY_ID`
+- Нет фоновой обработки задач:
+	- проверьте `WORKER_ENABLED`
+- Cron/напоминания не срабатывают:
+	- проверьте `SCHEDULER_ENABLED`
+
 ## 2. Core и Auth
 
 - APP_NAME: название приложения.
