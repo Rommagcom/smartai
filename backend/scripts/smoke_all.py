@@ -43,6 +43,7 @@ from scripts.smoke_pdf_prompt_expand_export_request import run as run_pdf_prompt
 from scripts.smoke_pdf_prev_placeholder_fallback import run as run_pdf_prev_placeholder_fallback
 from scripts.smoke_destructive_planner_guard import run as run_destructive_planner_guard
 from scripts.smoke_dynamic_skill_package import run as run_dynamic_skill_package
+from scripts.smoke_dynamic_skill_delete import run as run_dynamic_skill_delete
 from scripts.smoke_compose_llm_sufficiency_gate import run as run_compose_llm_sufficiency_gate
 
 
@@ -184,6 +185,9 @@ async def run() -> None:
 
         print("RUN_SMOKE_DYNAMIC_SKILL_PACKAGE")
         await run_dynamic_skill_package()
+
+        print("RUN_SMOKE_DYNAMIC_SKILL_DELETE")
+        await run_dynamic_skill_delete()
 
         print("RUN_SMOKE_COMPOSE_LLM_SUFFICIENCY_GATE")
         await run_compose_llm_sufficiency_gate()

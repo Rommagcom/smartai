@@ -111,6 +111,9 @@ def format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | No
                         lines.append(f"- **{name}**: {desc} ({endpoint})")
                 return "\n".join(lines)
         if tr.tool == "dynamic_tool_delete":
+            tool_name = str(tr.result.get("tool_name") or "").strip()
+            if tool_name:
+                return f"Пользовательский API-инструмент '{tool_name}' удалён."
             return "Пользовательский API-инструмент удалён."
         if tr.tool == "dynamic_tool_delete_all":
             count = tr.result.get("deleted_count", 0)

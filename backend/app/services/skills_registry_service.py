@@ -522,15 +522,17 @@ class SkillsRegistryService:
                 "manifest": {
                     "name": "dynamic_tool_delete",
                     "title": "Dynamic Tool Delete",
-                    "description": "Удалить зарегистрированный пользовательский API-инструмент",
+                    "description": "Удалить один зарегистрированный пользовательский API-инструмент (по tool_id или имени)",
                     "version": "1.0.0",
                 },
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "tool_id": {"type": "string", "description": "UUID инструмента для удаления"},
+                        "tool_name": {"type": "string", "description": "Имя инструмента для удаления"},
+                        "skill_name": {"type": "string", "description": "Алиас имени инструмента для удаления"},
                     },
-                    "required": ["tool_id"],
+                    "required": [],
                     "additionalProperties": False,
                 },
                 "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],

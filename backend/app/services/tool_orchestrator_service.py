@@ -387,7 +387,7 @@ class ToolOrchestratorService:
             "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
             "12) Для очистки памяти пользователя используй memory_delete_all. "
             "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
-            "14) Для удаления пользовательского API используй dynamic_tool_delete с tool_id. "
+            "14) Для удаления одного пользовательского API используй dynamic_tool_delete с tool_id или tool_name (можно skill_name как алиас). "
             "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
             "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call. "
             "16) Для вопроса по содержимому документов с готовым ответом используй doc_ask (query, top_k). "
@@ -2133,17 +2133,42 @@ class ToolOrchestratorService:
         }
 
     async def _dynamic_tool_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
-        """Delete a specific dynamic tool by id."""
+        """Delete a specific dynamic tool by id or name."""
         if not bool(getattr(user, "is_admin", False)):
             return {"status": "forbidden", "error": "Only administrators can delete Dynamic Skills"}
 
         tool_id_raw = str(arguments.get("tool_id") or "").strip()
-        if not tool_id_raw:
-            raise ValueError("dynamic_tool_delete requires tool_id")
-        deleted = await dynamic_tool_service.delete_tool(
-            db=db, user_id=user.id, tool_id=UUID(tool_id_raw),
-        )
-        return {"deleted": deleted}
+        tool_name_raw = str(
+            arguments.get("tool_name")
+            or arguments.get("skill_name")
+            or arguments.get("name")
+            or ""
+        ).strip()
+
+        if tool_id_raw:
+            try:
+                deleted = await dynamic_tool_service.delete_tool(
+                    db=db,
+                    user_id=user.id,
+                    tool_id=UUID(tool_id_raw),
+                )
+            except ValueError as exc:
+                raise ValueError(f"Invalid tool_id: {exc}") from exc
+            if not deleted:
+                raise ValueError("Dynamic Skill not found")
+            return {"deleted": True, "tool_id": tool_id_raw}
+
+        if tool_name_raw:
+            deleted = await dynamic_tool_service.delete_tool_by_name(
+                db=db,
+                user_id=user.id,
+                tool_name=tool_name_raw,
+            )
+            if not deleted:
+                raise ValueError(f"Dynamic Skill '{tool_name_raw}' not found")
+            return {"deleted": True, "tool_name": tool_name_raw}
+
+        raise ValueError("dynamic_tool_delete requires tool_id or tool_name/skill_name")
 
     async def _dynamic_tool_delete_all(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """Delete all dynamic tools for the user."""
