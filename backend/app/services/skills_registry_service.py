@@ -724,7 +724,12 @@ class SkillsRegistryService:
     # worker_enqueue is retained for backward compatibility in legacy paths.
     _PLANNER_HIDDEN_TOOLS: set[str] = {"worker_enqueue"}
 
+    # Cached result of planner_signatures() — the skill registry is static after startup.
+    _planner_signatures_cache: str | None = None
+
     def planner_signatures(self) -> str:
+        if self._planner_signatures_cache is not None:
+            return self._planner_signatures_cache
         signatures: list[str] = []
         for item in self._skills:
             manifest = item.get("manifest", {})
@@ -742,7 +747,8 @@ class SkillsRegistryService:
                 if not (isinstance(meta, dict) and bool(meta.get("_planner_hidden")))
             )
             signatures.append(f"{name}({args})")
-        return ", ".join(signatures)
+        self._planner_signatures_cache = ", ".join(signatures)
+        return self._planner_signatures_cache
 
 
 skills_registry_service = SkillsRegistryService()

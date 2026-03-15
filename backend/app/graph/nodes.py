@@ -163,15 +163,17 @@ async def memory_node(state: dict) -> dict:
     _dev_log("memory_gather_start", user_id=str(user_id))
 
     async with AsyncSessionLocal() as db:
-        context = await memory_manager.gather_context(
-            db=db,
-            user_id=user_id,
-            session_id=session_id,
-            user_message=user_message,
+        # Run context gathering and entity extraction in parallel — they are independent
+        context, entities = await asyncio.gather(
+            memory_manager.gather_context(
+                db=db,
+                user_id=user_id,
+                session_id=session_id,
+                user_message=user_message,
+            ),
+            memory_manager.extract_entities(user_message),
         )
 
-        # Entity extraction (semantic memory)
-        entities = await memory_manager.extract_entities(user_message)
         if entities:
             await memory_manager.store_entities(db, user_id, entities)
             await db.commit()
@@ -201,48 +203,21 @@ async def memory_node(state: dict) -> dict:
 
 
 async def intent_classifier_node(state: dict) -> dict:
-    """Classify if request can skip heavy retrieval/tool routing."""
-    from app.llm import llm_provider
+    """Classify if request can skip heavy retrieval/tool routing.
 
+    Uses only deterministic regex rules to avoid a redundant LLM round-trip.
+    The router_node (which always runs for non-small_talk) has its own LLM-based
+    intent classification, so a second LLM call here adds latency with no benefit.
+    """
     messages: list[str] = state.get("messages") or []
     query = (messages[-1] if messages else state.get("user_message", "")).strip()
     if not query:
         return {"intent": "small_talk", "next_step": "chat"}
 
-    # Deterministic guard for ultra-cheap path.
     if _looks_like_small_talk(query):
         return {"intent": "small_talk", "next_step": "chat"}
 
-    prompt = (
-        "Твоя задача — классифицировать намерение пользователя.\n\n"
-        f"Входящее сообщение: \"{query}\"\n\n"
-        "ПРАВИЛА КЛАССИФИКАЦИИ:\n"
-        "1. \"small_talk\": простое приветствие, прощание, благодарность, "
-        "короткая светская беседа или запрос, который НЕ требует поиска свежих фактов, "
-        "баз данных или вычислений.\n"
-        "2. \"needs_tools\": запрос, требующий поиска информации (интернет), "
-        "корпоративных данных, использования API, аналитики или точных фактов.\n\n"
-        "Ответь СТРОГО валидным JSON формата:\n"
-        '{"intent": "small_talk" | "needs_tools"}'
-    )
-
-    try:
-        out = await llm_provider.chat_structured(
-            messages=[{"role": "system", "content": prompt}],
-            response_model=IntentClassifierOutput,
-            model=settings.LITELLM_PLANNER_MODEL or None,
-            temperature=0.0,
-            max_tokens=120,
-        )
-        intent = out.intent
-    except Exception as exc:
-        logger.warning("Intent classifier failed: %s", exc)
-        intent = "small_talk" if _looks_like_small_talk(query) else "needs_tools"
-
-    return {
-        "intent": intent,
-        "next_step": "chat" if intent == "small_talk" else "retriever",
-    }
+    return {"intent": "needs_tools", "next_step": "retriever"}
 
 
 # ======================================================================
@@ -1151,11 +1126,12 @@ async def output_node(state: dict) -> dict:
         except Exception:
             logger.debug("STM append failed", exc_info=True)
 
-        # Background LTM fact extraction (fire-and-forget)
+        # Background LTM fact extraction — fire-and-forget so the user
+        # gets their answer immediately without waiting for the LLM fact pass.
         try:
-            await extract_facts_to_ltm(user_id, user_message, final_answer)
+            asyncio.create_task(extract_facts_to_ltm(user_id, user_message, final_answer))
         except Exception:
-            logger.debug("LTM extraction in output_node failed", exc_info=True)
+            logger.debug("LTM extraction scheduling failed", exc_info=True)
 
     return {
         "final_answer": final_answer,

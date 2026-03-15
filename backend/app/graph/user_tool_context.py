@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -10,13 +11,14 @@ async def load_user_tool_context(user_id: Any) -> tuple[str, str]:
     """Load user integrations and dynamic tools for router planner context.
 
     Returns (integrations_block, dynamic_tools_block) as prompt fragments.
+    Both DB queries run in parallel via separate sessions.
     """
     from app.db.session import AsyncSessionLocal
     from app.models.api_integration import ApiIntegration
     from app.services.dynamic_tool_service import dynamic_tool_service
     from sqlalchemy import select
 
-    try:
+    async def _load_integrations() -> str:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(ApiIntegration).where(
@@ -24,13 +26,21 @@ async def load_user_tool_context(user_id: Any) -> tuple[str, str]:
                     ApiIntegration.is_active.is_(True),
                 )
             )
-            integrations = result.scalars().all()
-            integrations_block = _build_integrations_block(integrations)
-            dynamic_tools_block = await _load_dynamic_tools_block(
+            return _build_integrations_block(result.scalars().all())
+
+    async def _load_dynamic_tools() -> str:
+        async with AsyncSessionLocal() as db:
+            return await _load_dynamic_tools_block(
                 dynamic_tool_service=dynamic_tool_service,
                 db=db,
                 user_id=user_id,
             )
+
+    try:
+        integrations_block, dynamic_tools_block = await asyncio.gather(
+            _load_integrations(),
+            _load_dynamic_tools(),
+        )
     except Exception as exc:
         logger.debug("failed to load user tool context: %s", exc)
         return "", ""
