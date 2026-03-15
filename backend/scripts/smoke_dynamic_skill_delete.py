@@ -38,7 +38,7 @@ async def _create_tool(db: AsyncSession, user_id, name: str) -> DynamicTool:
         user_id=user_id,
         name=name,
         description=f"Tool {name}",
-        endpoint=f"https://example.test/{name}",
+        endpoint=f"https://example.com/{name}",
         method="GET",
         parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
     )
@@ -55,6 +55,14 @@ async def _count_tools(db: AsyncSession, user_id) -> int:
 async def run() -> None:
     db_path = BASE_DIR / f"{DB_PATH_PREFIX}_{uuid4().hex}.db"
     session_factory, engine = await init_db(db_path)
+
+    # Deletion paths try to sync vectors in Milvus; stub out these calls so
+    # smoke remains local/offline and deterministic.
+    from app.services.vector_tool_registry import vector_tool_registry
+    original_delete_tool = vector_tool_registry.delete_tool
+    original_delete_user_tools = vector_tool_registry.delete_user_tools
+    vector_tool_registry.delete_tool = lambda *args, **kwargs: 0
+    vector_tool_registry.delete_user_tools = lambda *args, **kwargs: 0
 
     try:
         async with session_factory() as session:
@@ -151,6 +159,8 @@ async def run() -> None:
 
         print("SMOKE_DYNAMIC_SKILL_DELETE_OK")
     finally:
+        vector_tool_registry.delete_tool = original_delete_tool
+        vector_tool_registry.delete_user_tools = original_delete_user_tools
         try:
             await engine.dispose()
         finally:
