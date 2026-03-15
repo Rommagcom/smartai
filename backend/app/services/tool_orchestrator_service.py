@@ -437,6 +437,103 @@ class ToolOrchestratorService:
             )
             return {"use_tools": False, "steps": [], "response_hint": ""}
 
+    # ------------------------------------------------------------------
+    # Placeholder dependency detection helpers
+    # ------------------------------------------------------------------
+
+    _PLACEHOLDER_RE = re.compile(r"\$(?:prev\b|step\[)")
+
+    @classmethod
+    def _has_placeholder_deps(cls, arguments: dict) -> bool:
+        """Return True if any argument value references $prev.* or $step[N].*.
+
+        Steps with placeholder references must run *after* the step whose result
+        they reference, so they cannot be included in a parallel batch.
+        """
+        def _scan(val: Any) -> bool:
+            if isinstance(val, str):
+                return bool(cls._PLACEHOLDER_RE.search(val))
+            if isinstance(val, dict):
+                return any(_scan(v) for v in val.values())
+            if isinstance(val, list):
+                return any(_scan(item) for item in val)
+            return False
+
+        return any(_scan(v) for v in arguments.values())
+
+    # ------------------------------------------------------------------
+    # Single-step executor (shared by sequential and parallel paths)
+    # ------------------------------------------------------------------
+
+    async def _execute_one_step(
+        self,
+        *,
+        db: AsyncSession,
+        user: User,
+        tool: str,
+        raw_arguments: dict,
+        context: dict[str, Any],
+        handlers: dict,
+    ) -> dict:
+        """Execute one tool step against the current chain context and return its result record."""
+        _dev_verbose_log("step_start", tool=tool, arguments=raw_arguments)
+
+        if self.is_dynamic_tool(tool):
+            arguments = self._augment_step_arguments(tool=tool, arguments=raw_arguments, context=context)
+            try:
+                result = await asyncio.wait_for(
+                    dynamic_tool_service.call_dynamic_tool(
+                        db=db,
+                        user_id=user.id,
+                        tool_name=tool,
+                        arguments=arguments,
+                    ),
+                    timeout=TOOL_STEP_TIMEOUT_SECONDS,
+                )
+                _dev_verbose_log("step_success_dynamic", tool=tool, result=result)
+                return {
+                    "tool": tool,
+                    "arguments": arguments,
+                    "success": bool(result.get("success")),
+                    "result": result,
+                }
+            except asyncio.TimeoutError:
+                return {"tool": tool, "arguments": raw_arguments, "success": False, "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s"}
+            except Exception as exc:
+                return {"tool": tool, "arguments": raw_arguments, "success": False, "error": str(exc)}
+
+        arguments = self._augment_step_arguments(tool=tool, arguments=raw_arguments, context=context)
+        arguments = await self._enrich_document_arguments(tool=tool, arguments=arguments, context=context)
+        arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
+        arguments = self._coerce_argument_types(tool, arguments)
+
+        if tool not in handlers:
+            return {"tool": tool, "arguments": arguments, "success": False, "error": f"Unsupported tool: {tool}"}
+
+        validation_error = skills_registry_service.validate_input(tool, arguments)
+        if validation_error:
+            _dev_verbose_log("step_validation_error", tool=tool, error=validation_error, arguments=arguments)
+            return {"tool": tool, "arguments": arguments, "success": False, "error": f"Invalid arguments: {validation_error}"}
+
+        try:
+            result = await asyncio.wait_for(
+                handlers[tool](db, user, arguments),
+                timeout=TOOL_STEP_TIMEOUT_SECONDS,
+            )
+            _dev_verbose_log("step_success", tool=tool, result=result)
+            return {"tool": tool, "arguments": arguments, "success": True, "result": result}
+        except asyncio.TimeoutError:
+            logger.warning("tool step '%s' timed out after %ss", tool, TOOL_STEP_TIMEOUT_SECONDS)
+            _dev_verbose_log("step_timeout", tool=tool)
+            return {"tool": tool, "arguments": arguments, "success": False, "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s"}
+        except Exception as exc:
+            _dev_verbose_log("step_error", tool=tool, error=str(exc))
+            return {"tool": tool, "arguments": arguments, "success": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Chain executor
+    # ------------------------------------------------------------------
+
     async def execute_tool_chain(
         self,
         db: AsyncSession,
@@ -448,110 +545,71 @@ class ToolOrchestratorService:
         handlers = self._handlers()
         results: list[dict] = []
         context: dict[str, Any] = dict(initial_context or {})
+        bounded = (steps or [])[:max_steps]
         _dev_verbose_log(
             "chain_start",
             user_id=str(user.id),
             max_steps=max_steps,
-            requested_steps_count=len(steps or []),
-            tools=[str(step.get("tool") or "") for step in (steps or [])[:max_steps] if isinstance(step, dict)],
+            requested_steps_count=len(bounded),
+            tools=[str(s.get("tool") or "") for s in bounded if isinstance(s, dict)],
         )
-        for step in (steps or [])[:max_steps]:
+
+        i = 0
+        while i < len(bounded):
+            step = bounded[i]
             tool = str(step.get("tool") or "").strip().lower()
-            arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
-            _dev_verbose_log("step_start", tool=tool, arguments=arguments)
+            raw_arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
 
-            # Dynamic tool dispatch: dyn:tool_name or dyn_tool_name
-            if self.is_dynamic_tool(tool):
-                # Resolve $prev/$step[N] placeholders for dynamic tools too
-                arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
-                try:
-                    result = await asyncio.wait_for(
-                        dynamic_tool_service.call_dynamic_tool(
+            # --- Fix #7: skip dependent step when its predecessor failed ---
+            if self._has_placeholder_deps(raw_arguments) and results and not results[-1].get("success"):
+                _dev_verbose_log("step_skip_failed_dep", tool=tool)
+                results.append({
+                    "tool": tool,
+                    "arguments": raw_arguments,
+                    "success": False,
+                    "error": "Skipped: preceding dependency step failed",
+                })
+                i += 1
+                continue
+
+            # --- Fix #2: batch consecutive independent steps for parallel execution ---
+            if not self._has_placeholder_deps(raw_arguments):
+                batch_end = i + 1
+                while batch_end < len(bounded):
+                    next_args = bounded[batch_end].get("arguments") if isinstance(bounded[batch_end].get("arguments"), dict) else {}
+                    if self._has_placeholder_deps(next_args):
+                        break
+                    batch_end += 1
+
+                batch = bounded[i:batch_end]
+                if len(batch) > 1:
+                    _dev_verbose_log("parallel_batch_start", tools=[str(s.get("tool") or "") for s in batch])
+                    batch_results = await asyncio.gather(*[
+                        self._execute_one_step(
                             db=db,
-                            user_id=user.id,
-                            tool_name=tool,
-                            arguments=arguments,
-                        ),
-                        timeout=TOOL_STEP_TIMEOUT_SECONDS,
-                    )
-                    self._update_chain_context(tool=tool, result=result, context=context)
-                    _dev_verbose_log("step_success_dynamic", tool=tool, result=result)
-                    results.append({
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": bool(result.get("success")),
-                        "result": result,
-                    })
-                except asyncio.TimeoutError:
-                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s"})
-                except Exception as exc:
-                    results.append({"tool": tool, "arguments": arguments, "success": False, "error": str(exc)})
-                continue
+                            user=user,
+                            tool=str(s.get("tool") or "").strip().lower(),
+                            raw_arguments=s.get("arguments") if isinstance(s.get("arguments"), dict) else {},
+                            context=context,
+                            handlers=handlers,
+                        )
+                        for s in batch
+                    ])
+                    for res in batch_results:
+                        results.append(res)
+                        self._update_chain_context(tool=res["tool"], result=res.get("result") or {}, context=context)
+                    i = batch_end
+                    continue
 
-            arguments = self._augment_step_arguments(tool=tool, arguments=arguments, context=context)
-            arguments = await self._enrich_document_arguments(tool=tool, arguments=arguments, context=context)
-            arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
-            arguments = self._coerce_argument_types(tool, arguments)
-            if tool not in handlers:
-                results.append(
-                    {
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": False,
-                        "error": f"Unsupported tool: {tool}",
-                    }
-                )
-                continue
+            # --- Sequential single step ---
+            result = await self._execute_one_step(
+                db=db, user=user, tool=tool, raw_arguments=raw_arguments,
+                context=context, handlers=handlers,
+            )
+            results.append(result)
+            self._update_chain_context(tool=tool, result=result.get("result") or {}, context=context)
+            i += 1
 
-            validation_error = skills_registry_service.validate_input(tool, arguments)
-            if validation_error:
-                _dev_verbose_log("step_validation_error", tool=tool, error=validation_error, arguments=arguments)
-                results.append(
-                    {
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": False,
-                        "error": f"Invalid arguments: {validation_error}",
-                    }
-                )
-                continue
-
-            try:
-                result = await asyncio.wait_for(
-                    handlers[tool](db, user, arguments),
-                    timeout=TOOL_STEP_TIMEOUT_SECONDS,
-                )
-                self._update_chain_context(tool=tool, result=result, context=context)
-                _dev_verbose_log("step_success", tool=tool, result=result)
-                results.append(
-                    {
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": True,
-                        "result": result,
-                    }
-                )
-            except asyncio.TimeoutError:
-                logger.warning("tool step '%s' timed out after %ss", tool, TOOL_STEP_TIMEOUT_SECONDS)
-                _dev_verbose_log("step_timeout", tool=tool)
-                results.append(
-                    {
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": False,
-                        "error": f"Timeout after {TOOL_STEP_TIMEOUT_SECONDS}s",
-                    }
-                )
-            except Exception as exc:
-                _dev_verbose_log("step_error", tool=tool, error=str(exc))
-                results.append(
-                    {
-                        "tool": tool,
-                        "arguments": arguments,
-                        "success": False,
-                        "error": str(exc),
-                    }
-                )
         _dev_verbose_log(
             "chain_complete",
             user_id=str(user.id),
