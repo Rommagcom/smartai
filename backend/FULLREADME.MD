@@ -2,6 +2,37 @@
 
 Полная техническая документация по установке, запуску, конфигурации и эксплуатации SmartAI Backend.
 
+## Быстрый запуск (копипаст)
+
+Из каталога `backend`:
+
+Linux/macOS:
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
+
+Проверка:
+
+- `http://localhost:8000/docs`
+- `http://localhost:8000/health`
+
+Smoke:
+
+```powershell
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+```
+
 ## Навигация
 
 - Краткий продуктовый README: [README.md](README.md)
@@ -9,6 +40,42 @@
 - Тестирование и нагрузочные проверки: [TESTS.md](TESTS.md)
 - Релизный runbook: [RELEASE.md](RELEASE.md)
 - Подробный справочник конфигурации: [CONFIGURATION.md](CONFIGURATION.md)
+
+## Частые команды
+
+Windows PowerShell:
+
+```powershell
+# Миграции
+docker compose exec api alembic upgrade head
+
+# Все smoke
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+
+# Dynamic skills
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_package
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_delete
+
+# Multi-instance
+docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3
+```
+
+Linux/macOS:
+
+```bash
+# Миграции
+docker compose exec api alembic upgrade head
+
+# Все smoke
+../.venv/bin/python -m scripts.smoke_all
+
+# Dynamic skills
+../.venv/bin/python -m scripts.smoke_dynamic_skill_package
+../.venv/bin/python -m scripts.smoke_dynamic_skill_delete
+
+# Multi-instance
+docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3
+```
 
 ## 1. Что такое SmartAI Backend
 

@@ -2,6 +2,28 @@
 
 Краткий runbook перед выкатом и сразу после релиза.
 
+## 0) Быстрый copy-paste (основной путь)
+
+Linux/macOS:
+
+```bash
+docker compose build --no-cache api scheduler-leader worker telegram-bot
+docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3
+docker compose exec -T api alembic upgrade head
+bash deploy/check-multi.sh 3
+make pre-release WORKERS=3
+```
+
+Windows PowerShell:
+
+```powershell
+docker compose build --no-cache api scheduler-leader worker telegram-bot
+docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3
+docker compose exec -T api alembic upgrade head
+bash deploy/check-multi.sh 3
+make pre-release WORKERS=3
+```
+
 ## 1) Подготовка
 1. Убедиться, что секреты заданы в рабочем `.env` (не из `.env.example`).
 2. Проверить `OLLAMA_BASE_URL`:
