@@ -16,3 +16,4 @@ Contract:
 
 Optional capability:
 - Uses context.llm.chat(...) when enabled in manifest.
+- Uses context.http.get(...) when runner HTTP callback is enabled.
