@@ -215,7 +215,8 @@ async def list_dynamic_skills(
             "description": t.description,
             "method": t.method,
             "endpoint": t.endpoint,
-            "updated_at": t.updated_at,
+            "created_at": t.created_at,
+            "updated_at": getattr(t, "updated_at", t.created_at),
         }
         for t in tools
     ]
