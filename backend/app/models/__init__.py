@@ -1,5 +1,6 @@
 from app.models.api_integration import ApiIntegration
 from app.models.code_snippet import CodeSnippet
+from app.models.dynamic_skill_audit import DynamicSkillAudit
 from app.models.dynamic_tool import DynamicTool
 from app.models.cron_job import CronJob
 from app.models.long_term_memory import LongTermMemory
@@ -17,6 +18,7 @@ __all__ = [
     "CronJob",
     "CodeSnippet",
     "ApiIntegration",
+    "DynamicSkillAudit",
     "DynamicTool",
     "TelegramAllowedUser",
     "WorkerTask",

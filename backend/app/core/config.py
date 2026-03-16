@@ -134,6 +134,16 @@ class Settings(BaseSettings):
     SANDBOX_EGRESS_ALLOWED_HOSTS: str = ""
     SANDBOX_EGRESS_DENIED_HOSTS: str = "localhost,127.0.0.1,::1"
     SANDBOX_EGRESS_ALLOWED_PORTS: str = "80,443"
+    DYNAMIC_SKILL_EXECUTION_MODE: str = "runner" # options: local, runner (in docker)
+    DYNAMIC_SKILL_RUNNER_URL: str = "http://skill-runner:8081"
+    DYNAMIC_SKILL_RUNNER_SECRET: str = "change-me-skill-runner-secret"
+    DYNAMIC_SKILL_RUNNER_TIMEOUT_SECONDS: int = 45
+    DYNAMIC_SKILL_SANDBOX_IMAGE: str = "smartai-skill-runner:latest"
+    DYNAMIC_SKILL_SANDBOX_TIMEOUT_SECONDS: int = 30
+    DYNAMIC_SKILL_SANDBOX_NETWORK: str = "smartai-sandbox-net"
+    DYNAMIC_SKILL_LLM_CALLBACK_ENABLED: bool = True
+    DYNAMIC_SKILL_HTTP_CALLBACK_ENABLED: bool = True
+    DYNAMIC_SKILL_HTTP_TIMEOUT_SECONDS: int = 30
 
     DYNAMIC_SKILL_IMPORT_POLICY: str = "all"
     DYNAMIC_SKILL_ALLOWED_IMPORTS: str = ""

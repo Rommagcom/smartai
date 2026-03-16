@@ -23,7 +23,7 @@ import re
 import shutil
 import zipfile
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,8 @@ from app.models.dynamic_tool import DynamicTool
 from app.models.user import User
 from app.services.api_executor import api_executor, resolve_url_template
 from app.services.auth_data_security_service import auth_data_security_service
+from app.services.dynamic_skill_audit_service import dynamic_skill_audit_service
+from app.services.dynamic_skill_runner_client import dynamic_skill_runner_client
 from app.services.egress_policy_service import egress_policy_service
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,7 @@ logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _DYNAMIC_SKILL_MAX_ZIP_BYTES = 2 * 1024 * 1024
 _DYNAMIC_SKILL_REQUIRED_FILES = {"manifest.json", "skill.py", "skill.md"}
+_SKILL_RUNNER_FAILED = "Skill runner failed"
 
 # Meta-tool system prompt that teaches the LLM to extract API specs from speech
 META_REGISTRATION_PROMPT = """\
@@ -68,6 +71,56 @@ META_REGISTRATION_PROMPT = """\
 
 class DynamicToolService:
     """CRUD + LLM-assisted registration + runtime invocation of dynamic tools."""
+
+    @staticmethod
+    def _log_skill_execution_event(
+        *,
+        event: str,
+        user_id: UUID,
+        tool_name: str,
+        execution_mode: str,
+        success: bool | None = None,
+        error: str | None = None,
+    ) -> None:
+        context: dict[str, Any] = {
+            "component": "dynamic_skill",
+            "event": event,
+            "user_id": str(user_id),
+            "tool_name": tool_name,
+            "execution_mode": execution_mode,
+        }
+        if success is not None:
+            context["success"] = success
+        if error:
+            context["error"] = error[:500]
+        logger.info("dynamic skill execution event", extra={"context": context})
+
+    @staticmethod
+    async def _persist_skill_execution_event(
+        *,
+        event: str,
+        user_id: UUID,
+        tool_name: str,
+        execution_mode: str,
+        execution_id: str,
+        success: bool | None = None,
+        error: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            await dynamic_skill_audit_service.record_event(
+                event_type=event,
+                source="backend",
+                execution_mode=execution_mode,
+                tool_name=tool_name,
+                execution_id=execution_id,
+                user_id=user_id,
+                success=success,
+                error_text=error or "",
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.warning("dynamic skill audit persistence failed: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Registration via LLM (meta-tool)
@@ -660,6 +713,22 @@ class DynamicToolService:
 
         function_name = str(headers.get("function") or "run").strip() or "run"
         capabilities = headers.get("capabilities") if isinstance(headers.get("capabilities"), dict) else {}
+        execution_mode = str(getattr(settings, "DYNAMIC_SKILL_EXECUTION_MODE", "local") or "local").strip().lower()
+        execution_id = uuid4().hex
+        self._log_skill_execution_event(
+            event="execute_start",
+            user_id=user_id,
+            tool_name=str(tool.name),
+            execution_mode=execution_mode,
+        )
+        await self._persist_skill_execution_event(
+            event="execute_start",
+            user_id=user_id,
+            tool_name=str(tool.name),
+            execution_mode=execution_mode,
+            execution_id=execution_id,
+            payload={"function_name": function_name},
+        )
 
         try:
             self._validate_python_skill_code(skill_code=skill_code, function_name=function_name)
@@ -679,6 +748,81 @@ class DynamicToolService:
             if isinstance(timeout_candidate, int) and 1 <= timeout_candidate <= 60:
                 timeout_seconds = timeout_candidate
 
+        if execution_mode == "runner":
+            try:
+                serializable_context = self._build_runner_context(
+                    user_id=user_id,
+                    tool_name=str(tool.name),
+                    capabilities=capabilities,
+                    execution_id=execution_id,
+                )
+                runner_result = await dynamic_skill_runner_client.execute_skill(
+                    skill_code=skill_code,
+                    function_name=function_name,
+                    params=dict(arguments or {}),
+                    context=serializable_context,
+                    timeout_seconds=timeout_seconds,
+                )
+                success = bool(runner_result.get("success"))
+                if not success:
+                    self._log_skill_execution_event(
+                        event="execute_finish",
+                        user_id=user_id,
+                        tool_name=str(tool.name),
+                        execution_mode="runner",
+                        success=False,
+                        error=str(runner_result.get("error") or _SKILL_RUNNER_FAILED),
+                    )
+                    await self._persist_skill_execution_event(
+                        event="execute_finish",
+                        user_id=user_id,
+                        tool_name=str(tool.name),
+                        execution_mode="runner",
+                        execution_id=execution_id,
+                        success=False,
+                        error=str(runner_result.get("error") or _SKILL_RUNNER_FAILED),
+                    )
+                    return {"success": False, "error": str(runner_result.get("error") or _SKILL_RUNNER_FAILED)}
+                data = runner_result.get("result") if isinstance(runner_result.get("result"), dict) else {
+                    "result": runner_result.get("result")
+                }
+                self._log_skill_execution_event(
+                    event="execute_finish",
+                    user_id=user_id,
+                    tool_name=str(tool.name),
+                    execution_mode="runner",
+                    success=True,
+                )
+                await self._persist_skill_execution_event(
+                    event="execute_finish",
+                    user_id=user_id,
+                    tool_name=str(tool.name),
+                    execution_mode="runner",
+                    execution_id=execution_id,
+                    success=True,
+                )
+                return {"success": True, "tool_name": str(tool.name), "data": data}
+            except Exception as exc:
+                logger.warning("dynamic python skill runner mode failed: %s — %s", tool.name, exc)
+                self._log_skill_execution_event(
+                    event="execute_finish",
+                    user_id=user_id,
+                    tool_name=str(tool.name),
+                    execution_mode="runner",
+                    success=False,
+                    error=str(exc),
+                )
+                await self._persist_skill_execution_event(
+                    event="execute_finish",
+                    user_id=user_id,
+                    tool_name=str(tool.name),
+                    execution_mode="runner",
+                    execution_id=execution_id,
+                    success=False,
+                    error=str(exc),
+                )
+                return {"success": False, "error": str(exc)}
+
         try:
             call_result = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -694,11 +838,60 @@ class DynamicToolService:
                 data = call_result
             else:
                 data = {"result": call_result}
+            self._log_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                success=True,
+            )
+            await self._persist_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                execution_id=execution_id,
+                success=True,
+            )
             return {"success": True, "tool_name": str(tool.name), "data": data}
         except asyncio.TimeoutError:
+            self._log_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                success=False,
+                error=f"Dynamic Python Skill timeout after {timeout_seconds}s",
+            )
+            await self._persist_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                execution_id=execution_id,
+                success=False,
+                error=f"Dynamic Python Skill timeout after {timeout_seconds}s",
+            )
             return {"success": False, "error": f"Dynamic Python Skill timeout after {timeout_seconds}s"}
         except Exception as exc:
             logger.warning("dynamic python skill execution failed: %s — %s", tool.name, exc)
+            self._log_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                success=False,
+                error=str(exc),
+            )
+            await self._persist_skill_execution_event(
+                event="execute_finish",
+                user_id=user_id,
+                tool_name=str(tool.name),
+                execution_mode="local",
+                execution_id=execution_id,
+                success=False,
+                error=str(exc),
+            )
             return {"success": False, "error": str(exc)}
 
     # ------------------------------------------------------------------ #
@@ -962,6 +1155,15 @@ class DynamicToolService:
 
         context["llm"] = {"chat": llm_chat}
         return context
+
+    @staticmethod
+    def _build_runner_context(*, user_id: UUID, tool_name: str, capabilities: dict, execution_id: str) -> dict[str, Any]:
+        return {
+            "user_id": str(user_id),
+            "tool_name": tool_name,
+            "capabilities": capabilities if isinstance(capabilities, dict) else {},
+            "execution_id": execution_id,
+        }
 
     @staticmethod
     def _parse_csv_set(raw: str) -> set[str]:

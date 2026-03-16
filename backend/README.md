@@ -167,6 +167,56 @@ def run(params, context):
     return {"ok": True, "city": city, "summary": f"No LLM available for {city}"}
 ```
 
+  ### Sandbox callbacks
+
+  В режиме `DYNAMIC_SKILL_EXECUTION_MODE=runner` skill исполняется в отдельном краткоживущем контейнере.
+
+  - `context["llm"]["chat"](...)` вызывает LLM через callback в `skill-runner`
+  - `context["http"]` даёт безопасный HTTP proxy через `skill-runner`
+  - прямой сетевой доступ из skill лучше не использовать, чтобы сохранить egress policy и audit trail
+
+  Пример:
+
+  ```python
+  def run(params, context):
+    city = params.get("city") or "Almaty"
+    http = (context or {}).get("http", {})
+    llm = (context or {}).get("llm", {})
+
+    weather = {}
+    http_get = http.get("get")
+    if callable(http_get):
+      weather = http_get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+          "latitude": 43.2389,
+          "longitude": 76.8897,
+          "current": "temperature_2m,wind_speed_10m",
+        },
+      )
+
+    summary = weather.get("body")
+    llm_chat = llm.get("chat")
+    if callable(llm_chat):
+      summary = llm_chat(
+        system="Summarize weather in one short sentence.",
+        user=str(weather.get("body") or city),
+        options={"max_tokens": 80},
+      )
+
+    return {
+      "ok": True,
+      "city": city,
+      "weather": weather.get("body"),
+      "summary": summary,
+    }
+  ```
+
+  ### Audit log
+
+  Все запуски Dynamic Skills, а также `llm` и `http` callback могут сохраняться в Postgres в таблицу `dynamic_skill_audit`.
+  Это даёт трассировку по `tool_name`, `execution_id`, `success/error`, источнику события и payload.
+
 ### Управление Skills
 
 - Upload (admin): `POST /api/v1/chat/tools/skill-upload`
