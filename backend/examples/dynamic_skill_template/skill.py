@@ -17,9 +17,18 @@ def run(params, context):
             },
         )
     if callable(chat):
-        summary = chat(
-            f"Rewrite this weather summary into one short friendly sentence: {summary}. API data: {weather.get('body')}"
+        llm_response = chat(
+            system="You are a concise weather assistant. Reply in one short friendly sentence.",
+            user=(
+                f"City: {city}. Draft summary: {summary}. "
+                f"API data: {weather.get('body')}"
+            ),
+            options={"max_tokens": 80},
         )
+        if isinstance(llm_response, dict):
+            summary = str(llm_response.get("text") or summary)
+        elif isinstance(llm_response, str) and llm_response.strip():
+            summary = llm_response.strip()
 
     return {
         "ok": True,
