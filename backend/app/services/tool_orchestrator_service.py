@@ -309,6 +309,32 @@ class ToolOrchestratorService:
             or re.search(r"\bin\s+\d+\s*(?:seconds?|minutes?|hours?|days?)\b", text)
         )
 
+    @staticmethod
+    def _build_cron_human_message(*, status: str, action_type: str, task_text: str, payload: dict, cron_expression: str) -> str:
+        normalized_status = str(status or "created").strip().lower()
+        normalized_action = str(action_type or "send_message").strip().lower()
+        task = str(task_text or payload.get("message") or "напоминание").strip()
+        schedule_text = str(payload.get("schedule_text") or "").strip()
+        timezone_name = str(payload.get("timezone") or "").strip()
+
+        schedule_hint = ""
+        if schedule_text:
+            schedule_hint = f" на {schedule_text}"
+        elif str(cron_expression or "").startswith("@once:"):
+            schedule_hint = " на указанное время"
+        elif cron_expression:
+            schedule_hint = f" по расписанию {cron_expression}"
+
+        timezone_hint = f" ({timezone_name})" if timezone_name else ""
+        if normalized_action == "chat":
+            if normalized_status == "deduplicated":
+                return f"Такая запланированная задача уже есть: {task}{schedule_hint}{timezone_hint}."
+            return f"Запланировал задачу: {task}{schedule_hint}{timezone_hint}. По расписанию я выполню запрос и пришлю результат."
+
+        if normalized_status == "deduplicated":
+            return f"Такое напоминание уже есть: {task}{schedule_hint}{timezone_hint}."
+        return f"Создал напоминание: {task}{schedule_hint}{timezone_hint}."
+
     @classmethod
     def _is_recent_for_dedupe(cls, value: datetime | None) -> bool:
         if not isinstance(value, datetime):
@@ -1499,8 +1525,12 @@ class ToolOrchestratorService:
             or arguments.get("natural_text")
             or ""
         ).strip()
+        if schedule_text:
+            payload.setdefault("schedule_text", schedule_text)
 
-        user_timezone = str(user.preferences.get("timezone") or "Europe/Moscow")
+        user_preferences = dict(user.preferences or {})
+        user_timezone = str(user_preferences.get("timezone") or "Europe/Moscow").strip()
+        payload.setdefault("timezone", user_timezone)
 
         if (
             cron_expression
@@ -1577,6 +1607,13 @@ class ToolOrchestratorService:
                 "action_type": existing_job.action_type,
                 "payload": existing_job.payload,
                 "deduplicated": True,
+                "message": self._build_cron_human_message(
+                    status="deduplicated",
+                    action_type=existing_job.action_type,
+                    task_text=str((existing_job.payload or {}).get("message") or existing_job.name or "Напоминание"),
+                    payload=existing_job.payload if isinstance(existing_job.payload, dict) else {},
+                    cron_expression=existing_job.cron_expression,
+                ),
                 "status": "deduplicated",
             }
 
@@ -1631,6 +1668,13 @@ class ToolOrchestratorService:
             "action_type": cron.action_type,
             "payload": cron.payload,
             "deduplicated": False,
+            "message": self._build_cron_human_message(
+                status="created",
+                action_type=cron.action_type,
+                task_text=task_text,
+                payload=cron.payload if isinstance(cron.payload, dict) else {},
+                cron_expression=cron.cron_expression,
+            ),
             "status": "created",
         }
 

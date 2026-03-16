@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
 	memory,
 	observability,
 	telegram_access,
+	teams_webhook,
 	users,
 	websocket,
 	whatsapp_webhook,
@@ -24,5 +25,6 @@ api_router.include_router(cron.router, prefix="/cron", tags=["cron"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(observability.router, prefix="/observability", tags=["observability"])
 api_router.include_router(telegram_access.router, prefix="/telegram", tags=["telegram-access"])
+api_router.include_router(teams_webhook.router, prefix="/teams", tags=["teams"])
 api_router.include_router(whatsapp_webhook.router, prefix="/whatsapp", tags=["whatsapp"])
 api_router.include_router(websocket.router, prefix="/ws", tags=["websocket"])

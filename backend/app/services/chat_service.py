@@ -635,9 +635,10 @@ class ChatService:
         else:
             natural_match = re.match(
                 r"^((?:сегодня|завтра|послезавтра|на\s+завтра|tomorrow|today|"
-                r"в\s+\d{1,2}(?::\d{2})?|at\s+\d{1,2}(?::\d{2})?|"
+                r"(?:в|на|к)\s+\d{1,2}(?::\d{2})?|"
+                r"at\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|"
                 r"в\s+понедельник|в\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье)"
-                r"[^,;]*)\s+(.+)$",
+                r"(?:\s+(?:на|в)\s+\d{1,2}(?::\d{2})?|\s+at\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)?)\s+(.+)$",
                 tail,
                 flags=re.IGNORECASE,
             )
@@ -645,9 +646,11 @@ class ChatService:
                 task_first_match = re.match(
                     r"^(.+?)\s+(?:на|в|к|for|at|on|by)\s+"
                     r"((?:сегодня|завтра|послезавтра|на\s+завтра|tomorrow|today|"
-                    r"в\s+\d{1,2}(?::\d{2})?|at\s+\d{1,2}(?::\d{2})?|"
+                    r"(?:в|на|к)\s+\d{1,2}(?::\d{2})?|"
+                    r"\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|"
+                    r"at\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|"
                     r"в\s+понедельник|в\s+вторник|в\s+среду|в\s+четверг|в\s+пятницу|в\s+субботу|в\s+воскресенье)"
-                    r"(?:\s+на\s+\d{1,2}(?::\d{2})?|\s+at\s+\d{1,2}(?::\d{2})?)?.*)$",
+                    r"(?:\s+(?:на|в)\s+\d{1,2}(?::\d{2})?|\s+at\s+\d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?)?)$",
                     tail,
                     flags=re.IGNORECASE,
                 )
@@ -1710,6 +1713,9 @@ class ChatService:
             result = call.get("result") if isinstance(call.get("result"), dict) else {}
 
             if tool == "cron_add":
+                message = str(result.get("message") or "").strip()
+                if message:
+                    return message
                 payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
                 task_text = cls._truncate_text(
                     str(payload.get("message") or result.get("name") or "Напоминание"),

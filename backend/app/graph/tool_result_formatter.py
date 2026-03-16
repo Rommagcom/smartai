@@ -35,6 +35,9 @@ def format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | No
             size_kb = f" ({size / 1024:.1f} KB)" if size else ""
             return f"Документ {fname} в процессе создания{size_kb}."
         if tr.tool == "cron_add":
+            message = str(tr.result.get("message") or "").strip()
+            if message:
+                return message
             payload = tr.result.get("payload", {})
             if isinstance(payload, dict):
                 task = payload.get("message", "")
