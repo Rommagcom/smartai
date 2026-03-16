@@ -22,12 +22,18 @@ async def create_cron_job(
     if normalized_action_type in {"reminder", "notification", "daily_briefing"}:
         normalized_action_type = "send_message"
 
+    normalized_payload = dict(payload.payload or {})
+    user_preferences = dict(current_user.preferences or {})
+    user_timezone = str(user_preferences.get("timezone") or "Europe/Moscow").strip()
+    if user_timezone:
+        normalized_payload.setdefault("timezone", user_timezone)
+
     cron = CronJob(
         user_id=current_user.id,
         name=payload.name,
         cron_expression=payload.cron_expression,
         action_type=normalized_action_type,
-        payload=payload.payload,
+        payload=normalized_payload,
         is_active=payload.is_active,
     )
     db.add(cron)

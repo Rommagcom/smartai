@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 import logging
+import re
 from time import perf_counter
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -59,6 +61,24 @@ class SchedulerService:
         if run_at.tzinfo is None:
             return run_at.replace(tzinfo=timezone.utc)
         return run_at.astimezone(timezone.utc)
+
+    @staticmethod
+    def _resolve_trigger_timezone(timezone_name: str):
+        raw = str(timezone_name or "").strip()
+        if not raw:
+            return timezone.utc
+
+        offset_match = re.fullmatch(r"UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?", raw, re.IGNORECASE)
+        if offset_match:
+            sign = 1 if offset_match.group(1) == "+" else -1
+            hours = int(offset_match.group(2))
+            minutes = int(offset_match.group(3) or "0")
+            return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+        try:
+            return ZoneInfo(raw)
+        except Exception:
+            return timezone.utc
 
     def _should_skip_stale_once_job(self, run_at: datetime) -> bool:
         normalized = self._normalize_run_at(run_at)
@@ -519,7 +539,9 @@ class SchedulerService:
                     return False
                 trigger = DateTrigger(run_date=run_at)
             else:
-                trigger = CronTrigger.from_crontab(cron_expression)
+                timezone_name = str((payload or {}).get("timezone") or "UTC")
+                trigger_tz = self._resolve_trigger_timezone(timezone_name)
+                trigger = CronTrigger.from_crontab(cron_expression, timezone=trigger_tz)
             self.scheduler.add_job(
                 self.execute_action,
                 trigger=trigger,

@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     WHATSAPP_BACKEND_BRIDGE_SECRET: str = "change-me-whatsapp-bridge-secret"
     WHATSAPP_DEFAULT_TIMEOUT_SECONDS: int = 60
     WHATSAPP_CHAT_TIMEOUT_SECONDS: int = 300
+    TEAMS_ENABLED: bool = False
+    TEAMS_AUTH_MODE: str = "header-secret"
+    TEAMS_WEBHOOK_SECRET: str = ""
+    TEAMS_ALLOWED_USER_IDS: str = ""
+    TEAMS_BACKEND_BRIDGE_SECRET: str = "change-me-teams-bridge-secret"
+    TEAMS_DEFAULT_TIMEOUT_SECONDS: int = 60
+    TEAMS_CHAT_TIMEOUT_SECONDS: int = 300
 
     AUTH_DATA_ENCRYPTION_KEYS: str = ""
     AUTH_DATA_ACTIVE_KEY_ID: str = ""
@@ -127,6 +134,10 @@ class Settings(BaseSettings):
     SANDBOX_EGRESS_ALLOWED_HOSTS: str = ""
     SANDBOX_EGRESS_DENIED_HOSTS: str = "localhost,127.0.0.1,::1"
     SANDBOX_EGRESS_ALLOWED_PORTS: str = "80,443"
+
+    DYNAMIC_SKILL_IMPORT_POLICY: str = "all"
+    DYNAMIC_SKILL_ALLOWED_IMPORTS: str = ""
+    DYNAMIC_SKILL_BLOCKED_IMPORTS: str = ""
 
     MEMORY_DEFAULT_TTL_DAYS: int = 0
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45

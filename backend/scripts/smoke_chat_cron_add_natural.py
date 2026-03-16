@@ -231,6 +231,29 @@ async def run() -> None:
             f"english relative reminder must be one-time, got: {english_once_jobs[0]}",
         )
 
+        lunch_message = "Поставь напоминание на 14:40 выйти на обед"
+        lunch_response = client.post(
+            "/api/v1/chat",
+            json={"message": lunch_message, "session_id": session_id},
+            headers=headers,
+        )
+        ensure(lunch_response.status_code == 200, f"chat lunch reminder failed: {lunch_response.text}")
+
+        listed_after_lunch = client.get("/api/v1/cron", headers=headers)
+        ensure(listed_after_lunch.status_code == 200, f"cron list after lunch reminder failed: {listed_after_lunch.text}")
+        jobs_after_lunch = listed_after_lunch.json() if isinstance(listed_after_lunch.json(), list) else []
+
+        lunch_jobs = [
+            item for item in jobs_after_lunch
+            if isinstance(item, dict)
+            and str((item.get("payload") or {}).get("message") or "").strip().lower() == "выйти на обед"
+        ]
+        ensure(bool(lunch_jobs), f"lunch reminder payload not found: {jobs_after_lunch}")
+        ensure(
+            str(lunch_jobs[0].get("cron_expression") or "").startswith("@once:"),
+            f"time-only reminder must be one-time, got: {lunch_jobs[0]}",
+        )
+
     if should_assert_persistence():
         async with session_factory() as session:
             result = await session.execute(select(CronJob))

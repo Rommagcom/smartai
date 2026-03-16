@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import builtins
 import hashlib
 import io
 import json
@@ -40,7 +41,6 @@ logger = logging.getLogger(__name__)
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _DYNAMIC_SKILL_MAX_ZIP_BYTES = 2 * 1024 * 1024
 _DYNAMIC_SKILL_REQUIRED_FILES = {"manifest.json", "skill.py", "skill.md"}
-_DYNAMIC_SKILL_ALLOWED_IMPORTS = {"math", "json", "re", "datetime", "statistics", "typing"}
 
 # Meta-tool system prompt that teaches the LLM to extract API specs from speech
 META_REGISTRATION_PROMPT = """\
@@ -782,7 +782,11 @@ class DynamicToolService:
             raise ValueError("manifest.json must be an object")
 
         DynamicToolService._validate_skill_manifest(manifest)
-        return {"manifest": manifest, "skill_py": skill_py, "skill_md": skill_md}
+        return {
+            "manifest": manifest,
+            "skill_py": skill_py,
+            "skill_md": skill_md,
+        }
 
     @staticmethod
     def _validate_skill_manifest(manifest: dict) -> None:
@@ -811,15 +815,18 @@ class DynamicToolService:
         has_function = False
         for node in ast.walk(module_ast):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
-                module_name = ""
                 if isinstance(node, ast.Import):
-                    if node.names:
-                        module_name = str(node.names[0].name or "")
-                elif isinstance(node, ast.ImportFrom):
-                    module_name = str(node.module or "")
-                root = module_name.split(".")[0]
-                if root and root not in _DYNAMIC_SKILL_ALLOWED_IMPORTS:
-                    raise ValueError(f"import '{root}' is not allowed")
+                    module_roots = [
+                        str(alias.name or "").split(".")[0]
+                        for alias in node.names
+                        if str(alias.name or "").strip()
+                    ]
+                else:
+                    module_roots = [str(node.module or "").split(".")[0]] if str(node.module or "").strip() else []
+
+                for root in module_roots:
+                    if root and not DynamicToolService._is_import_allowed(root):
+                        raise ValueError(f"import '{root}' is not allowed")
             if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 has_function = True
 
@@ -957,12 +964,35 @@ class DynamicToolService:
         return context
 
     @staticmethod
-    def _safe_import(name: str, globals_: dict | None = None, locals_: dict | None = None, fromlist=(), level: int = 0):
-        del globals_, locals_, fromlist, level
+    def _parse_csv_set(raw: str) -> set[str]:
+        parts = [chunk.strip() for chunk in str(raw or "").split(",")]
+        return {part for part in parts if part}
+
+    @classmethod
+    def _is_import_allowed(cls, root: str) -> bool:
+        policy = str(getattr(settings, "DYNAMIC_SKILL_IMPORT_POLICY", "all") or "all").strip().lower()
+        allowed = cls._parse_csv_set(getattr(settings, "DYNAMIC_SKILL_ALLOWED_IMPORTS", ""))
+        blocked = cls._parse_csv_set(getattr(settings, "DYNAMIC_SKILL_BLOCKED_IMPORTS", ""))
+
+        if policy == "allowlist":
+            return root in allowed
+        if policy == "blocklist":
+            return root not in blocked
+        return True
+
+    @classmethod
+    def _safe_import(
+        cls,
+        name: str,
+        globals_: dict | None = None,
+        locals_: dict | None = None,
+        fromlist=(),
+        level: int = 0,
+    ):
         root = str(name or "").split(".")[0]
-        if root not in _DYNAMIC_SKILL_ALLOWED_IMPORTS:
+        if root and not cls._is_import_allowed(root):
             raise ImportError(f"import '{root}' is not allowed in Dynamic Skill")
-        return __import__(name)
+        return builtins.__import__(name, globals_, locals_, fromlist, level)
 
     @classmethod
     def _execute_python_skill_sync(
