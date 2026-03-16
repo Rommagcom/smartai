@@ -25,7 +25,7 @@ import zipfile
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -44,6 +44,22 @@ _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _DYNAMIC_SKILL_MAX_ZIP_BYTES = 2 * 1024 * 1024
 _DYNAMIC_SKILL_REQUIRED_FILES = {"manifest.json", "skill.py", "skill.md"}
 _SKILL_RUNNER_FAILED = "Skill runner failed"
+
+
+def _normalize_tool_name(name: str) -> str:
+    return str(name or "").removeprefix("dyn:").removeprefix("dyn_").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _candidate_tool_names(name: str) -> list[str]:
+    normalized = _normalize_tool_name(name)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    if normalized.startswith("python://"):
+        candidates.append(_normalize_tool_name(normalized.removeprefix("python://")))
+    else:
+        candidates.append(f"python://{normalized}")
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
 
 # Meta-tool system prompt that teaches the LLM to extract API specs from speech
 META_REGISTRATION_PROMPT = """\
@@ -496,7 +512,7 @@ class DynamicToolService:
         user_id: UUID,
         tool_name: str,
     ) -> bool:
-        clean_name = str(tool_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        clean_name = _normalize_tool_name(tool_name)
         if not clean_name:
             return False
 
@@ -603,7 +619,7 @@ class DynamicToolService:
         arguments as query params (GET) or JSON body (POST/PUT/PATCH).
         """
         # Strip dyn: prefix if present
-        clean_name = tool_name.removeprefix("dyn:").removeprefix("dyn_").strip().lower()
+        clean_name = _normalize_tool_name(tool_name)
 
         tool = await self._get_by_name(db, user_id, clean_name)
         if not tool:
@@ -904,10 +920,16 @@ class DynamicToolService:
         user_id: UUID,
         name: str,
     ) -> DynamicTool | None:
+        candidates = _candidate_tool_names(name)
+        if not candidates:
+            return None
         result = await db.execute(
             select(DynamicTool).where(
                 DynamicTool.user_id == user_id,
-                DynamicTool.name == name,
+                or_(
+                    func.lower(DynamicTool.name).in_(candidates),
+                    func.lower(DynamicTool.endpoint).in_(candidates),
+                ),
             )
         )
         return result.scalar_one_or_none()
