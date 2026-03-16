@@ -2197,6 +2197,16 @@ class ToolOrchestratorService:
             or ""
         ).strip()
 
+        if tool_name_raw:
+            deleted = await dynamic_tool_service.delete_tool_by_name(
+                db=db,
+                user_id=user.id,
+                tool_name=tool_name_raw,
+            )
+            if not deleted:
+                raise ValueError(f"Dynamic Skill '{tool_name_raw}' not found")
+            return {"deleted": True, "tool_name": tool_name_raw, "skill_name": tool_name_raw}
+
         if tool_id_raw:
             try:
                 deleted = await dynamic_tool_service.delete_tool(
@@ -2209,16 +2219,6 @@ class ToolOrchestratorService:
             if not deleted:
                 raise ValueError("Dynamic Skill not found")
             return {"deleted": True, "tool_id": tool_id_raw}
-
-        if tool_name_raw:
-            deleted = await dynamic_tool_service.delete_tool_by_name(
-                db=db,
-                user_id=user.id,
-                tool_name=tool_name_raw,
-            )
-            if not deleted:
-                raise ValueError(f"Dynamic Skill '{tool_name_raw}' not found")
-            return {"deleted": True, "tool_name": tool_name_raw}
 
         raise ValueError("dynamic_tool_delete requires tool_id or tool_name/skill_name")
 

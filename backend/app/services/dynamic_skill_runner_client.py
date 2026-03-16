@@ -31,14 +31,29 @@ class DynamicSkillRunnerClient:
             "context": dict(context or {}),
             "timeout_seconds": int(timeout_seconds),
         }
+        runner_timeout_seconds = max(
+            1,
+            int(settings.DYNAMIC_SKILL_RUNNER_TIMEOUT_SECONDS),
+            int(timeout_seconds) + 10,
+        )
+        request_timeout = httpx.Timeout(
+            timeout=runner_timeout_seconds,
+            connect=min(10.0, float(runner_timeout_seconds)),
+            read=float(runner_timeout_seconds),
+            write=float(runner_timeout_seconds),
+            pool=5.0,
+        )
 
         try:
-            async with asyncio.timeout(max(1, int(settings.DYNAMIC_SKILL_RUNNER_TIMEOUT_SECONDS))):
-                response = await client.post(url, json=payload, headers=headers)
+            async with asyncio.timeout(runner_timeout_seconds):
+                response = await client.post(url, json=payload, headers=headers, timeout=request_timeout)
         except asyncio.TimeoutError as exc:
-            raise RuntimeError("skill-runner request timeout") from exc
+            raise RuntimeError(f"skill-runner request timeout after {runner_timeout_seconds}s") from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"skill-runner request timeout after {runner_timeout_seconds}s") from exc
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"skill-runner request failed: {exc}") from exc
+            message = str(exc).strip() or exc.__class__.__name__
+            raise RuntimeError(f"skill-runner request failed: {message}") from exc
 
         if response.status_code >= 400:
             raise RuntimeError(f"skill-runner returned {response.status_code}: {response.text[:500]}")
