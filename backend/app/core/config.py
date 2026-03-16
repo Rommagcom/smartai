@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     RAG_DOC_LARGE_CHUNK_OVERLAP: int = 500
 
     TELEGRAM_BACKEND_BRIDGE_SECRET: str = "change-me-telegram-bridge-secret"
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_VERIFY_TOKEN: str = ""
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_APP_SECRET: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    WHATSAPP_API_VERSION: str = "v21.0"
+    WHATSAPP_ALLOWED_PHONE_NUMBERS: str = ""
+    WHATSAPP_BACKEND_BRIDGE_SECRET: str = "change-me-whatsapp-bridge-secret"
+    WHATSAPP_DEFAULT_TIMEOUT_SECONDS: int = 60
+    WHATSAPP_CHAT_TIMEOUT_SECONDS: int = 300
 
     AUTH_DATA_ENCRYPTION_KEYS: str = ""
     AUTH_DATA_ACTIVE_KEY_ID: str = ""

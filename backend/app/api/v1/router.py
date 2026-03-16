@@ -1,6 +1,18 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, chat, cron, documents, integrations, memory, observability, telegram_access, users, websocket
+from app.api.v1.endpoints import (
+	auth,
+	chat,
+	cron,
+	documents,
+	integrations,
+	memory,
+	observability,
+	telegram_access,
+	users,
+	websocket,
+	whatsapp_webhook,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -12,4 +24,5 @@ api_router.include_router(cron.router, prefix="/cron", tags=["cron"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(observability.router, prefix="/observability", tags=["observability"])
 api_router.include_router(telegram_access.router, prefix="/telegram", tags=["telegram-access"])
+api_router.include_router(whatsapp_webhook.router, prefix="/whatsapp", tags=["whatsapp"])
 api_router.include_router(websocket.router, prefix="/ws", tags=["websocket"])
