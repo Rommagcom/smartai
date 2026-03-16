@@ -1716,7 +1716,11 @@ class ToolOrchestratorService:
         result = await db.execute(select(CronJob).where(CronJob.user_id == user.id))
         jobs = result.scalars().all()
         if not jobs:
-            return {"status": "nothing_to_delete", "deleted_count": 0}
+            return {
+                "status": "nothing_to_delete",
+                "deleted_count": 0,
+                "message": "У вас нет активных напоминаний, удалять нечего.",
+            }
         deleted = 0
         for job in jobs:
             if scheduler_service.scheduler.running and scheduler_service.scheduler.get_job(str(job.id)):
@@ -1725,7 +1729,11 @@ class ToolOrchestratorService:
             deleted += 1
         await db.commit()
         _dev_verbose_log("cron_delete_all", user_id=str(user.id), deleted_count=deleted)
-        return {"status": "deleted_all", "deleted_count": deleted}
+        return {
+            "status": "deleted_all",
+            "deleted_count": deleted,
+            "message": f"Готово: удалил все напоминания ({deleted}).",
+        }
 
     async def _integrations_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         del arguments
