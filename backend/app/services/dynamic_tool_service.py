@@ -89,6 +89,21 @@ class DynamicToolService:
     """CRUD + LLM-assisted registration + runtime invocation of dynamic tools."""
 
     @staticmethod
+    def _python_skill_filter():
+        return or_(
+            func.lower(DynamicTool.method) == "python",
+            func.lower(DynamicTool.endpoint).like("python://%"),
+        )
+
+    @classmethod
+    def _apply_kind_filter(cls, query: Any, kind: str | None) -> Any:
+        if kind == "python_skill":
+            return query.where(cls._python_skill_filter())
+        if kind == "api_tool":
+            return query.where(~cls._python_skill_filter())
+        return query
+
+    @staticmethod
     def _log_skill_execution_event(
         *,
         event: str,
@@ -465,10 +480,12 @@ class DynamicToolService:
         db: AsyncSession,
         user_id: UUID,
         active_only: bool = True,
+        kind: str | None = None,
     ) -> list[DynamicTool]:
         q = select(DynamicTool).where(DynamicTool.user_id == user_id)
         if active_only:
             q = q.where(DynamicTool.is_active.is_(True))
+        q = self._apply_kind_filter(q, kind)
         q = q.order_by(DynamicTool.created_at.desc())
         result = await db.execute(q)
         return list(result.scalars().all())
@@ -511,12 +528,13 @@ class DynamicToolService:
         db: AsyncSession,
         user_id: UUID,
         tool_name: str,
+        kind: str | None = None,
     ) -> bool:
         clean_name = _normalize_tool_name(tool_name)
         if not clean_name:
             return False
 
-        tool = await self._get_by_name(db, user_id, clean_name)
+        tool = await self._get_by_name(db, user_id, clean_name, kind=kind)
         if not tool:
             return False
         return await self.delete_tool(db=db, user_id=user_id, tool_id=tool.id)
@@ -525,6 +543,7 @@ class DynamicToolService:
         self,
         db: AsyncSession,
         user_id: UUID,
+        kind: str | None = None,
     ) -> int:
         user_row = (
             await db.execute(select(User).where(User.id == user_id))
@@ -532,9 +551,9 @@ class DynamicToolService:
         if not user_row or not bool(getattr(user_row, "is_admin", False)):
             return 0
 
-        result = await db.execute(
-            select(DynamicTool).where(DynamicTool.user_id == user_id)
-        )
+        query = select(DynamicTool).where(DynamicTool.user_id == user_id)
+        query = self._apply_kind_filter(query, kind)
+        result = await db.execute(query)
         tools = result.scalars().all()
         for t in tools:
             self._cleanup_tool_storage(t)
@@ -543,7 +562,11 @@ class DynamicToolService:
         # Remove all from Milvus
         try:
             from app.services.vector_tool_registry import vector_tool_registry
-            vector_tool_registry.delete_user_tools(user_id=str(user_id))
+            if kind is None:
+                vector_tool_registry.delete_user_tools(user_id=str(user_id))
+            else:
+                for tool in tools:
+                    vector_tool_registry.delete_tool(user_id=str(user_id), tool_name=f"dyn:{tool.name}")
         except Exception as exc:
             logger.debug("failed to delete user tool vectors: %s", exc)
         return len(tools)
@@ -559,7 +582,7 @@ class DynamicToolService:
     ) -> str:
         """Return a planner-compatible signature block for all active dynamic tools.
 
-        Format matches ``skills_registry_service.planner_signatures()``::
+        Format matches ``tool_catalog_service.planner_signatures()``::
 
             dyn:weather_api(city) — Получение прогноза погоды,
             dyn:check_order(order_id) — Проверка заказа в CRM
@@ -919,19 +942,20 @@ class DynamicToolService:
         db: AsyncSession,
         user_id: UUID,
         name: str,
+        kind: str | None = None,
     ) -> DynamicTool | None:
         candidates = _candidate_tool_names(name)
         if not candidates:
             return None
-        result = await db.execute(
-            select(DynamicTool).where(
-                DynamicTool.user_id == user_id,
-                or_(
-                    func.lower(DynamicTool.name).in_(candidates),
-                    func.lower(DynamicTool.endpoint).in_(candidates),
-                ),
-            )
+        query = select(DynamicTool).where(
+            DynamicTool.user_id == user_id,
+            or_(
+                func.lower(DynamicTool.name).in_(candidates),
+                func.lower(DynamicTool.endpoint).in_(candidates),
+            ),
         )
+        query = DynamicToolService._apply_kind_filter(query, kind)
+        result = await db.execute(query)
         return result.scalar_one_or_none()
 
     @staticmethod

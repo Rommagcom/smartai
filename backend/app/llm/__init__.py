@@ -369,7 +369,7 @@ class LLMProvider:
             candidate = text[brace_start: brace_end + 1]
             return model.model_validate_json(candidate)
 
-        raise StructuredParseError(f"Structured JSON payload not found in LLM response: {text[:200]}")
+        raise StructuredParseError(f"Structured JSON payload not found in LLM response: {text[:8000]}")
 
     # ------------------------------------------------------------------
     # Embeddings

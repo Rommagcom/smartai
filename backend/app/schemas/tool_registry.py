@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 class RegisterApiToolInput(BaseModel):
     """Schema that the LLM fills when the user describes a new API tool.
 
-    The router uses ``register_api_tool`` skill, and the LLM generates
+    The router uses ``register_api_tool`` tool, and the LLM generates
     this model from a natural-language description of an API.
     """
     tool_name: str = Field(..., description="Unique tool name (latin, snake_case, 2-63 chars)")

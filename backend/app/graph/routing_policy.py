@@ -116,6 +116,11 @@ def is_web_search_intent(user_message: str) -> bool:
     return bool(WEB_SEARCH_RE.search(user_message or ""))
 
 
+def is_live_data_query(user_message: str) -> bool:
+    """Check if the user asks for live data that usually requires web lookup."""
+    return bool(_LIVE_DATA_RE.search(user_message or ""))
+
+
 def strip_web_search_prefix(user_message: str) -> str:
     query = WEB_SEARCH_RE.sub("", str(user_message or "")).strip()
     return query or str(user_message or "").strip()

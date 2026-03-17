@@ -33,6 +33,7 @@ _GENERIC_COMMAND_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.IGNORECASE)
+_TABLE_LINE_RE = re.compile(r"^\s*\|.*$")
 
 
 def looks_like_small_talk(text: str) -> bool:
@@ -74,6 +75,40 @@ def sanitize_llm_answer(text: str) -> str:
     fallback = _CODE_FENCE_RE.sub("", fallback)
     fallback = fallback.strip()
     return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
+
+
+def looks_like_incomplete_markdown_answer(text: str) -> bool:
+    """Heuristic for truncated markdown that commonly appears in web answers."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return False
+
+    if cleaned.count("```") % 2 == 1:
+        return True
+
+    lines = [line.rstrip() for line in cleaned.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+
+    table_lines = [line.strip() for line in lines if _TABLE_LINE_RE.match(line)]
+    if len(table_lines) < 2:
+        return False
+
+    last_line = lines[-1].strip()
+    if not last_line.startswith("|"):
+        return False
+
+    if not last_line.endswith("|"):
+        return True
+
+    previous_table_line = next(
+        (line for line in reversed(lines[:-1]) if line.strip().startswith("|")),
+        "",
+    ).strip()
+    if previous_table_line and last_line.count("|") < previous_table_line.count("|"):
+        return True
+
+    return False
 
 
 def extract_completeness(text: str) -> bool:

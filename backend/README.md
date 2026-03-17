@@ -219,10 +219,22 @@ def run(params, context):
 
 ### Управление Skills
 
-- Upload (admin): `POST /api/v1/chat/tools/skill-upload`
-- List: `GET /api/v1/chat/tools/skills`
-- Delete one (admin): `DELETE /api/v1/chat/tools/skill/{skill_name}`
-- Delete all (admin): `DELETE /api/v1/chat/tools/skills/all`
+Эти endpoints управляют только Python Dynamic Skills. Интеграции живут отдельно в `/api/v1/integrations`, а пользовательские API tools не попадают в skill CRUD.
+
+- Registry: `GET /api/v1/skills/registry`
+- Upload (admin): `POST /api/v1/skills/upload`
+- List: `GET /api/v1/skills`
+- Delete one (admin): `DELETE /api/v1/skills/{skill_name}`
+- Delete all (admin): `DELETE /api/v1/skills`
+
+### Управление API Tools
+
+Эти endpoints управляют пользовательскими API-инструментами, а не Python Skills и не интеграциями.
+
+- Register: `POST /api/v1/api-tools/register`
+- List: `GET /api/v1/api-tools`
+- Delete one (admin): `DELETE /api/v1/api-tools/{tool_name}`
+- Delete all (admin): `DELETE /api/v1/api-tools`
 
 ## Документация
 

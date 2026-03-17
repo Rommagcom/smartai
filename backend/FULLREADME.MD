@@ -222,10 +222,22 @@ Zip-архив:
 
 ### 6.5 API для управления skills
 
-- POST /api/v1/chat/tools/skill-upload
-- GET /api/v1/chat/tools/skills
-- DELETE /api/v1/chat/tools/skill/{skill_name}
-- DELETE /api/v1/chat/tools/skills/all
+Этот раздел относится только к Python Dynamic Skills. Интеграции и их onboarding/health/call вынесены в отдельный `/api/v1/integrations`, а CRUD пользовательских API tools не смешивается со skills API.
+
+- GET /api/v1/skills/registry
+- POST /api/v1/skills/upload
+- GET /api/v1/skills
+- DELETE /api/v1/skills/{skill_name}
+- DELETE /api/v1/skills
+
+### 6.6 API для управления пользовательскими API-tools
+
+Этот раздел относится только к пользовательским API-инструментам. Он не пересекается с Python Skills и не дублирует integrations API.
+
+- POST /api/v1/api-tools/register
+- GET /api/v1/api-tools
+- DELETE /api/v1/api-tools/{tool_name}
+- DELETE /api/v1/api-tools
 
 ## 7. Проверка работоспособности
 

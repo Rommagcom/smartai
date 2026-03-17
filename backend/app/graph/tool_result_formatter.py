@@ -116,8 +116,8 @@ def format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | No
         if tr.tool == "dynamic_tool_delete":
             tool_name = str(tr.result.get("tool_name") or tr.result.get("skill_name") or "").strip()
             if tool_name:
-                return f"Dynamic Skill '{tool_name}' удалён."
-            return "Dynamic Skill удалён."
+                return f"Пользовательский API-инструмент '{tool_name}' удалён."
+            return "Пользовательский API-инструмент удалён."
         if tr.tool == "dynamic_tool_delete_all":
             count = tr.result.get("deleted_count", 0)
             return f"Все пользовательские API-инструменты удалены ({count})."

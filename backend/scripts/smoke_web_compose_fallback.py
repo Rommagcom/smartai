@@ -72,6 +72,32 @@ async def run() -> None:
         ensure("cron_add" not in answer3.lower(), f"tool markup leaked to user: {answer3}")
         ensure("```" not in answer3, f"markdown fence leaked to user: {answer3}")
 
+        # Case 4: fallback returns truncated markdown table -> must be recovered.
+        async def fallback_chat_with_truncated_table(*args, **kwargs):
+            del args, kwargs
+            return "**Погода в Алматы**\n\n| Параметр | Значение |\n|----------"
+
+        async def fallback_chat_plain_recovery(*args, **kwargs):
+            del args, kwargs
+            return "Погода в Алматы: около +9C, пасмурно, влажность 57%."
+
+        llm_provider.chat = fallback_chat_with_truncated_table
+        out4 = await nodes.compose_node(state)
+        answer4 = str(out4.get("final_answer") or "")
+        ensure("|----------" not in answer4, f"truncated markdown leaked to user: {answer4}")
+
+        llm_provider.chat = fallback_chat_plain_recovery
+        recovered = await nodes._recover_truncated_web_answer(
+            llm_provider=llm_provider,
+            answer="**Погода в Алматы**\n\n| Параметр | Значение |\n|----------",
+            user_message="Какая погода в Алматы",
+            web_fetch_content="Источник: +9C, пасмурно, влажность 57%",
+            web_search_results=[],
+            tool_results=[],
+        )
+        ensure("Алматы" in recovered or "+9" in recovered, f"web recovery mismatch: {recovered}")
+        ensure("|----------" not in recovered, f"broken table not recovered: {recovered}")
+
         print("SMOKE_WEB_COMPOSE_FALLBACK_OK")
     finally:
         llm_provider.chat_structured = original_chat_structured

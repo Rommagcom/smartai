@@ -13,6 +13,16 @@ PERMISSION_DYNAMIC_TOOLS_CALL = "dynamic_tools.call"
 
 class SkillsRegistryService:
     REGISTRY_VERSION = "1.0.0"
+    _LEGACY_ALIAS_NAMES = {"dynamic_tool_register"}
+    _INTEGRATION_PREFIXES = ("integration_", "integrations_")
+    _DYNAMIC_TOOL_NAMES = {
+        "dynamic_tool_register",
+        "dynamic_tool_call",
+        "dynamic_tool_list",
+        "dynamic_tool_delete",
+        "dynamic_tool_delete_all",
+        "register_api_tool",
+    }
 
     def __init__(self) -> None:
         self._skills: list[dict] = self._build_default_skills()
@@ -573,6 +583,39 @@ class SkillsRegistryService:
 
     def list_contracts(self) -> list[dict]:
         return deepcopy(self._skills)
+
+    def list_skills(self) -> list[dict]:
+        return deepcopy([item for item in self._skills if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES])
+
+    def list_skill_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "skill"
+        ])
+
+    def list_integration_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "integration"
+        ])
+
+    def list_dynamic_tool_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "dynamic_tool"
+        ])
+
+    @staticmethod
+    def _contract_name(item: dict) -> str:
+        return str(item.get("manifest", {}).get("name") or "").strip()
+
+    def _contract_category(self, item: dict) -> str:
+        name = self._contract_name(item)
+        if name in self._DYNAMIC_TOOL_NAMES:
+            return "dynamic_tool"
+        if any(name.startswith(prefix) for prefix in self._INTEGRATION_PREFIXES):
+            return "integration"
+        return "skill"
 
     def get_contract(self, skill_name: str) -> dict | None:
         target = str(skill_name or "").strip()

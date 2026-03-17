@@ -42,6 +42,7 @@ from app.graph.node_helpers import (
     WEB_SEARCH_RE,
     _build_enriched_system_prompt,
     _hard_structured_route,
+    _looks_like_incomplete_markdown_answer,
     _looks_like_small_talk,
     _sanitize_llm_answer,
     apply_direct_route_fallback,
@@ -63,6 +64,7 @@ from app.graph.node_helpers import (
     followup_export_route,
     format_deterministic_tool_answer,
     has_successful_export_call,
+    is_live_data_query,
     is_web_search_intent,
     load_user_tool_context,
     requested_export_kind,
@@ -85,6 +87,63 @@ from app.schemas.graph import (
 
 logger = logging.getLogger(__name__)
 _WEB_SEARCH_HINT = "Выполни поиск в интернете"
+
+
+async def _recover_truncated_web_answer(
+    *,
+    llm_provider: Any,
+    answer: str,
+    user_message: str,
+    web_fetch_content: str,
+    web_search_results: list[dict],
+    tool_results: list[ToolResult],
+) -> str:
+    sanitized = _sanitize_llm_answer(answer)
+    if not (web_fetch_content or web_search_results):
+        return sanitized
+    if not _looks_like_incomplete_markdown_answer(sanitized):
+        return sanitized
+
+    _dev_log("compose_truncated_markdown_detected", answer_len=len(sanitized))
+
+    web_context = web_fetch_content.strip()
+    if not web_context and web_search_results:
+        web_context = "\n".join(
+            f"- {web_result_field(r, 'title')}: {web_result_field(r, 'snippet')} ({web_result_field(r, 'url')})"
+            for r in web_search_results[:8]
+        )
+
+    try:
+        recovered = await llm_provider.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Сформируй полный ответ по данным ниже. "
+                        "Пиши обычным текстом или коротким маркированным списком. "
+                        "Не используй markdown-таблицы и не оставляй ответ незавершенным."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Вопрос: {user_message}\n\nДанные:\n{web_context[:12000]}",
+                },
+            ],
+            temperature=0.0,
+            max_tokens=settings.OLLAMA_NUM_PREDICT,
+        )
+        recovered = _sanitize_llm_answer(recovered)
+        if recovered and not _looks_like_incomplete_markdown_answer(recovered):
+            return recovered
+    except Exception:
+        logger.debug("truncated web answer recovery failed", exc_info=True)
+
+    return build_raw_web_summary(
+        web_fetch_content=web_fetch_content,
+        web_search_results=web_search_results,
+        tool_results=tool_results,
+        sanitize_answer=_sanitize_llm_answer,
+    )
 
 
 class IntentClassifierOutput(BaseModel):
@@ -273,7 +332,7 @@ async def router_node(state: dict) -> dict:
     - **Semantically retrieved tools** (from Milvus via retriever node)
     """
     from app.llm import llm_provider
-    from app.services.skills_registry_service import skills_registry_service
+    from app.services.tool_catalog_service import tool_catalog_service
 
     user_message = state["user_message"]
     user_id = state.get("user_id")
@@ -334,6 +393,25 @@ async def router_node(state: dict) -> dict:
     if user_id:
         integrations_block, dynamic_tools_block = await load_user_tool_context(user_id)
 
+    if (
+        user_id
+        and not integrations_block.strip()
+        and not dynamic_tools_block.strip()
+        and is_live_data_query(user_message)
+    ):
+        query = user_message.strip()
+        live_data_route = RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint="Быстрый путь live-data: web_search без planner LLM",
+            confidence=0.9,
+        )
+        _dev_log("router_fast_live_data", query=query[:120])
+        return {
+            "router_output": live_data_route,
+            "next_step": "web_search",
+        }
+
     # 4. Build retrieved-tools block from Milvus results
     retrieved_block = ""
     if retrieved_tools:
@@ -358,7 +436,7 @@ async def router_node(state: dict) -> dict:
         "Твоя цель — выбрать правильный инструмент для выполнения запроса.\n\n"
         f"Вопрос пользователя: \"{user_message}\"\n\n"
         "Доступные инструменты:\n"
-        f"{skills_registry_service.planner_signatures()}\n"
+        f"{tool_catalog_service.planner_signatures()}\n"
         f"{dynamic_tools_block}"
         f"{integrations_block}"
         f"{retrieved_block}"
@@ -907,6 +985,14 @@ async def compose_node(state: dict) -> dict:
             "Если пользователь просил конкретные данные - выдели их."
         )
 
+    web_formatting_prompt = ""
+    if web_fetch_content or web_search_results:
+        web_formatting_prompt = (
+            "\n\nДОПОЛНИТЕЛЬНО ДЛЯ WEB-ОТВЕТОВ:\n"
+            "Не используй markdown-таблицы. Предпочитай обычный текст и короткие списки. "
+            "Ответ должен быть завершенным, без оборванных строк и незакрытого markdown."
+        )
+
     prompt = (
         "Ты — финальный проверяющий AI-агента. Твоя задача — проанализировать "
         "вопрос пользователя и собранные данные.\n\n"
@@ -923,7 +1009,7 @@ async def compose_node(state: dict) -> dict:
         "   - Не пиши финальный ответ пользователю.\n"
         "   - Напиши четкую инструкцию (feedback_plan), что нужно найти на следующем шаге.\n"
         "   - Установи is_complete: false.\n\n"
-        f"{integration_summary_prompt}\n\n"
+        f"{integration_summary_prompt}{web_formatting_prompt}\n\n"
         "Ответь СТРОГО валидным JSON:\n"
         '{"is_complete": true | false, "answer": "...", "feedback_plan": "..."}'
     )
@@ -949,7 +1035,10 @@ async def compose_node(state: dict) -> dict:
         else:
             logger.warning("Compose reflexion failed: %s", exc)
         recovered = extract_non_json_answer_from_exception(exc)
-        if recovered:
+        # Only use recovered text as final answer if it looks like a complete response
+        # (long enough to be useful) or there is no web context to synthesize from.
+        _has_web_context = bool(web_fetch_content or web_search_results)
+        if recovered and (len(recovered) >= 300 or not _has_web_context):
             return {
                 "final_answer": _sanitize_llm_answer(recovered),
                 "is_complete": True,
@@ -958,7 +1047,7 @@ async def compose_node(state: dict) -> dict:
                 "iteration": iterations,
             }
         # 1) If web context exists, run non-structured synthesis first.
-        # Structured parse errors often contain a truncated preview (~200 chars).
+        # Structured parse errors may contain a truncated text preview.
         if web_fetch_content or web_search_results:
             web_context = web_fetch_content.strip()
             if not web_context and web_search_results:
@@ -973,7 +1062,8 @@ async def compose_node(state: dict) -> dict:
                             "role": "system",
                             "content": (
                                 "Сформируй короткий и точный ответ пользователю только по данным ниже. "
-                                "Если данных недостаточно, честно скажи, чего не хватает."
+                                "Если данных недостаточно, честно скажи, чего не хватает. "
+                                "Не используй markdown-таблицы."
                             ),
                         },
                         {
@@ -987,7 +1077,14 @@ async def compose_node(state: dict) -> dict:
                     temperature=0.0,
                     max_tokens=settings.OLLAMA_NUM_PREDICT,
                 )
-                fallback_answer = _sanitize_llm_answer(fallback_answer)
+                fallback_answer = await _recover_truncated_web_answer(
+                    llm_provider=llm_provider,
+                    answer=fallback_answer,
+                    user_message=user_message,
+                    web_fetch_content=web_fetch_content,
+                    web_search_results=web_search_results,
+                    tool_results=tool_results,
+                )
             except Exception:
                 fallback_answer = existing_answer or build_raw_web_summary(
                     web_fetch_content=web_fetch_content,
@@ -1008,8 +1105,10 @@ async def compose_node(state: dict) -> dict:
 
     is_complete = bool(out.is_complete) or iterations >= max_iterations
     if is_complete:
-        answer = _sanitize_llm_answer(
-            out.answer
+        answer = await _recover_truncated_web_answer(
+            llm_provider=llm_provider,
+            answer=(
+                out.answer
             or existing_answer
             or build_raw_web_summary(
                 web_fetch_content=web_fetch_content,
@@ -1017,6 +1116,11 @@ async def compose_node(state: dict) -> dict:
                 tool_results=tool_results,
                 sanitize_answer=_sanitize_llm_answer,
             )
+            ),
+            user_message=user_message,
+            web_fetch_content=web_fetch_content,
+            web_search_results=web_search_results,
+            tool_results=tool_results,
         )
         return {
             "final_answer": answer,
@@ -1055,6 +1159,9 @@ async def output_node(state: dict) -> dict:
     existing_artifacts = state.get("artifacts") or []
 
     final_answer, result = apply_output_guardrail(final_answer)
+    web_fetch_content = state.get("web_fetch_content") or ""
+    web_search_results = state.get("web_search_results") or []
+    tool_results = state.get("tool_results") or []
 
     export_kind = requested_export_kind(user_message)
     should_reenqueue = bool(settings.OUTPUT_ENABLE_AUTO_EXPORT_REENQUEUE) and should_reenqueue_export(
@@ -1109,6 +1216,18 @@ async def output_node(state: dict) -> dict:
         tool_calls=all_calls,
         artifacts=all_artifacts,
     )
+
+    if web_fetch_content or web_search_results:
+        from app.llm import llm_provider
+
+        final_answer = await _recover_truncated_web_answer(
+            llm_provider=llm_provider,
+            answer=final_answer,
+            user_message=user_message,
+            web_fetch_content=web_fetch_content,
+            web_search_results=web_search_results,
+            tool_results=tool_results,
+        )
 
     sanitized_final = _sanitize_llm_answer(final_answer)
     if sanitized_final != final_answer:
