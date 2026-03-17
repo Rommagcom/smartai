@@ -1,12 +1,17 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
+import re
 from time import perf_counter
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.session import AsyncSessionLocal
 from app.models.cron_job import CronJob
+from app.models.message import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -22,6 +27,12 @@ from app.services.websocket_manager import connection_manager
 from app.services.worker_result_service import worker_result_service
 
 logger = logging.getLogger(__name__)
+
+
+class _InactivityReminderPlan(BaseModel):
+    send_now: bool = Field(default=True)
+    message: str = Field(default="")
+    next_reminder_hours: int = Field(default=24, ge=1, le=336)
 
 
 class SchedulerService:
@@ -51,10 +62,215 @@ class SchedulerService:
             return run_at.replace(tzinfo=timezone.utc)
         return run_at.astimezone(timezone.utc)
 
+    @staticmethod
+    def _resolve_trigger_timezone(timezone_name: str):
+        raw = str(timezone_name or "").strip()
+        if not raw:
+            return timezone.utc
+
+        offset_match = re.fullmatch(r"UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?", raw, re.IGNORECASE)
+        if offset_match:
+            sign = 1 if offset_match.group(1) == "+" else -1
+            hours = int(offset_match.group(2))
+            minutes = int(offset_match.group(3) or "0")
+            return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+        try:
+            return ZoneInfo(raw)
+        except Exception:
+            return timezone.utc
+
     def _should_skip_stale_once_job(self, run_at: datetime) -> bool:
         normalized = self._normalize_run_at(run_at)
         lag_seconds = (datetime.now(timezone.utc) - normalized).total_seconds()
         return lag_seconds > max(0, int(settings.SCHEDULER_ONCE_MAX_LAG_SECONDS))
+
+    async def _finalize_once_job_if_needed(self, *, job_id: str, executed_at: datetime) -> None:
+        try:
+            job_uuid = UUID(str(job_id))
+        except ValueError:
+            return
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(CronJob).where(CronJob.id == job_uuid))
+            job = result.scalar_one_or_none()
+            if not job:
+                return
+
+            cron_expression = str(job.cron_expression or "").strip().lower()
+            if not cron_expression.startswith("@once:"):
+                return
+
+            if not bool(job.is_active):
+                return
+
+            job.is_active = False
+            job.last_run = self._normalize_run_at(executed_at)
+            job.next_run = None
+            await db.commit()
+
+        try:
+            if self.scheduler.get_job(str(job_id)):
+                self.scheduler.remove_job(str(job_id))
+        except Exception:
+            logger.debug("scheduler once job removal failed", exc_info=True)
+
+    async def _acquire_inactivity_reminder_slot(self, user_id: str) -> bool:
+        """Rate-limit inactivity reminders per user using Redis NX lock."""
+        cooldown_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS))
+        ttl_seconds = cooldown_hours * 3600
+        return await self._acquire_inactivity_reminder_slot_with_ttl(user_id, ttl_seconds)
+
+    async def _acquire_inactivity_reminder_slot_with_ttl(self, user_id: str, ttl_seconds: int) -> bool:
+        ttl_seconds = max(60, int(ttl_seconds))
+        lock_key = f"scheduler:inactive-reminder:{user_id}"
+        try:
+            redis = self._get_redis()
+            acquired = await redis.set(lock_key, "1", nx=True, ex=ttl_seconds)
+            return bool(acquired)
+        except Exception:
+            logger.debug("inactivity reminder lock unavailable", exc_info=True)
+            return True
+
+    async def _recent_dialog_excerpt(self, user_id: str, limit: int = 6) -> str:
+        async with AsyncSessionLocal() as db:
+            user_uuid = user_id
+            result = await db.execute(
+                select(Message.role, Message.content)
+                .where(Message.user_id == user_uuid)
+                .order_by(Message.created_at.desc())
+                .limit(max(1, limit))
+            )
+            rows = list(reversed(result.all()))
+
+        lines: list[str] = []
+        for role, content in rows:
+            role_name = "Пользователь" if str(role or "") == "user" else "Ассистент"
+            text = str(content or "").strip()
+            if not text:
+                continue
+            if len(text) > 280:
+                text = text[:279] + "…"
+            lines.append(f"{role_name}: {text}")
+        return "\n".join(lines)
+
+    async def _plan_inactivity_reminder(self, user_id: str) -> _InactivityReminderPlan:
+        fallback_message = str(settings.SCHEDULER_INACTIVITY_REMINDER_MESSAGE or "").strip()
+        fallback_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS))
+
+        if not bool(settings.SCHEDULER_INACTIVITY_REMINDER_LLM_ENABLED):
+            return _InactivityReminderPlan(
+                send_now=True,
+                message=fallback_message,
+                next_reminder_hours=fallback_hours,
+            )
+
+        try:
+            from app.llm import llm_provider
+
+            history_excerpt = await self._recent_dialog_excerpt(user_id=user_id, limit=6)
+            min_hours = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_MIN_HOURS))
+            max_hours = max(min_hours, int(settings.SCHEDULER_INACTIVITY_REMINDER_MAX_HOURS))
+            planner_prompt = (
+                "Ты планируешь напоминание пользователю после длительной неактивности. "
+                "Сформируй короткий дружелюбный текст на русском языке без давления. "
+                "Также выбери, когда следующее напоминание уместно. "
+                f"Границы next_reminder_hours: от {min_hours} до {max_hours}. "
+                "Если сейчас лучше НЕ отправлять сообщение, поставь send_now=false. "
+                "Никогда не упоминай внутренние системы или технические детали."
+            )
+
+            out = await llm_provider.chat_structured(
+                messages=[
+                    {"role": "system", "content": planner_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"recent_dialog:\n{history_excerpt or '(пусто)'}\n\n"
+                            "Верни план напоминания."
+                        ),
+                    },
+                ],
+                response_model=_InactivityReminderPlan,
+                model=settings.LITELLM_PLANNER_MODEL or None,
+                temperature=0.2,
+                max_tokens=max(256, int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
+            )
+            message = str(out.message or "").strip() or fallback_message
+            hours = int(out.next_reminder_hours or fallback_hours)
+            hours = max(min_hours, min(max_hours, hours))
+            return _InactivityReminderPlan(
+                send_now=bool(out.send_now),
+                message=message,
+                next_reminder_hours=hours,
+            )
+        except Exception:
+            logger.warning("inactivity reminder LLM planning failed", exc_info=True)
+            return _InactivityReminderPlan(
+                send_now=True,
+                message=fallback_message,
+                next_reminder_hours=fallback_hours,
+            )
+
+    async def _load_inactive_user_ids(self) -> list[str]:
+        """Return users with no user messages for configured inactivity window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            hours=max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_AFTER_HOURS))
+        )
+        batch_limit = max(1, int(settings.SCHEDULER_INACTIVITY_REMINDER_BATCH_LIMIT))
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Message.user_id)
+                .where(Message.role == "user")
+                .group_by(Message.user_id)
+                .having(func.max(Message.created_at) <= cutoff)
+                .limit(batch_limit)
+            )
+            rows = result.scalars().all()
+
+        return [str(user_id) for user_id in rows if user_id]
+
+    async def _send_inactivity_reminders(self, now_iso: str) -> int:
+        if not bool(settings.SCHEDULER_INACTIVITY_REMINDER_ENABLED):
+            return 0
+
+        sent_count = 0
+        user_ids = await self._load_inactive_user_ids()
+        for user_id in user_ids:
+            plan = await self._plan_inactivity_reminder(user_id=user_id)
+            reminder_message = str(plan.message or "").strip()
+            if not reminder_message:
+                continue
+
+            lock_ttl = max(60, int(plan.next_reminder_hours) * 3600)
+            if not await self._acquire_inactivity_reminder_slot_with_ttl(user_id, lock_ttl):
+                continue
+
+            if not bool(plan.send_now):
+                continue
+
+            payload = {
+                "type": "proactive_message",
+                "message": reminder_message,
+                "timestamp": now_iso,
+            }
+            await connection_manager.send_to_user(user_id, payload)
+
+            delivery_payload = build_worker_delivery_payload(
+                job_type="inactivity_reminder",
+                is_success=True,
+                result={
+                    "message": reminder_message,
+                    "source": "scheduler",
+                    "timestamp": now_iso,
+                },
+                human_message=reminder_message,
+            )
+            await worker_result_service.push(user_id=user_id, payload=delivery_payload)
+            sent_count += 1
+
+        return sent_count
 
     def start(self) -> None:
         started_at = perf_counter()
@@ -157,12 +373,46 @@ class SchedulerService:
         loaded = 0
         failed = 0
         removed = 0
+        skipped_stale_once = 0
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(CronJob).where(CronJob.is_active.is_(True)).order_by(CronJob.created_at.desc())
             )
-            rows = result.scalars().all()
+            db_rows = result.scalars().all()
+
+            rows: list[CronJob] = []
+            for row in db_rows:
+                cron_expression = str(row.cron_expression or "").strip().lower()
+                if cron_expression.startswith("@once:"):
+                    try:
+                        run_at_raw = str(row.cron_expression or "").replace("@once:", "", 1)
+                        run_at = datetime.fromisoformat(run_at_raw)
+                    except Exception:
+                        failed += 1
+                        continue
+
+                    if self._should_skip_stale_once_job(run_at):
+                        row.is_active = False
+                        row.next_run = None
+                        skipped_stale_once += 1
+                        logger.debug(
+                            "scheduler stale once job deactivated",
+                            extra={
+                                "context": {
+                                    "component": "scheduler",
+                                    "event": "job_deactivate_stale_once",
+                                    "job_id": str(row.id),
+                                    "action_type": str(row.action_type),
+                                }
+                            },
+                        )
+                        continue
+
+                rows.append(row)
+
+            if skipped_stale_once:
+                await db.commit()
 
         active_ids = {str(row.id) for row in rows}
         existing_ids = {
@@ -196,7 +446,12 @@ class SchedulerService:
             except Exception:
                 failed += 1
 
-        return {"loaded": loaded, "failed": failed, "removed": removed}
+        return {
+            "loaded": loaded,
+            "failed": failed,
+            "removed": removed,
+            "skipped_stale_once": skipped_stale_once,
+        }
 
     async def sync_jobs_from_db(self) -> dict:
         started_at = perf_counter()
@@ -204,13 +459,15 @@ class SchedulerService:
         loaded = 0
         failed = 0
         removed = 0
+        skipped_stale_once = 0
         try:
             sync_result = await self._sync_jobs_from_db_internal(force_reload_all=False)
             loaded = int(sync_result.get("loaded", 0))
             failed = int(sync_result.get("failed", 0))
             removed = int(sync_result.get("removed", 0))
+            skipped_stale_once = int(sync_result.get("skipped_stale_once", 0))
             success = failed == 0
-            if loaded or removed or failed:
+            if loaded or removed or failed or skipped_stale_once:
                 logger.info(
                     "scheduler periodic sync",
                     extra={
@@ -220,6 +477,7 @@ class SchedulerService:
                             "loaded": loaded,
                             "removed": removed,
                             "failed": failed,
+                            "skipped_stale_once": skipped_stale_once,
                         }
                     },
                 )
@@ -233,10 +491,16 @@ class SchedulerService:
                             "loaded": loaded,
                             "removed": removed,
                             "failed": failed,
+                            "skipped_stale_once": skipped_stale_once,
                         }
                     },
                 )
-            return {"loaded": loaded, "failed": failed, "removed": removed}
+            return {
+                "loaded": loaded,
+                "failed": failed,
+                "removed": removed,
+                "skipped_stale_once": skipped_stale_once,
+            }
         except Exception as exc:
             alerting_service.emit(
                 component="scheduler",
@@ -275,7 +539,9 @@ class SchedulerService:
                     return False
                 trigger = DateTrigger(run_date=run_at)
             else:
-                trigger = CronTrigger.from_crontab(cron_expression)
+                timezone_name = str((payload or {}).get("timezone") or "UTC")
+                trigger_tz = self._resolve_trigger_timezone(timezone_name)
+                trigger = CronTrigger.from_crontab(cron_expression, timezone=trigger_tz)
             self.scheduler.add_job(
                 self.execute_action,
                 trigger=trigger,
@@ -315,6 +581,7 @@ class SchedulerService:
     async def execute_action(self, job_id: str, user_id: str, action_type: str, payload: dict) -> None:
         started_at = perf_counter()
         success = False
+        executed_at = datetime.now(timezone.utc)
         now = datetime.now(timezone.utc).isoformat()
         try:
             if not await self._acquire_execution_lock(job_id=str(job_id), action_type=str(action_type or "")):
@@ -385,6 +652,8 @@ class SchedulerService:
                 )
             else:
                 raise ValueError(f"Unsupported scheduler action_type: {action_type}")
+
+            await self._finalize_once_job_if_needed(job_id=str(job_id), executed_at=executed_at)
             success = True
             if settings.DEV_VERBOSE_LOGGING:
                 logger.info(
@@ -536,6 +805,19 @@ class SchedulerService:
                         "type": "proactive_message",
                         "message": "Я на связи. Хотите, помогу с задачами на сегодня?",
                         "timestamp": now,
+                    },
+                )
+
+            inactivity_sent = await self._send_inactivity_reminders(now_iso=now)
+            if inactivity_sent > 0:
+                logger.info(
+                    "scheduler inactivity reminders sent",
+                    extra={
+                        "context": {
+                            "component": "scheduler",
+                            "event": "inactivity_reminders",
+                            "sent": inactivity_sent,
+                        }
                     },
                 )
             success = True

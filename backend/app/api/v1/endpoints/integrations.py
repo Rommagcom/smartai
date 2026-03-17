@@ -158,10 +158,14 @@ async def onboarding_save(
     return IntegrationOnboardingSaveResponse(draft_id=draft_id, step="saved", integration=integration, test=test_result)
 
 
-@router.delete("", response_model=dict)
+@router.delete(
+    "",
+    response_model=dict,
+    responses={403: {"description": "Only administrators can delete integrations"}},
+)
 async def delete_all_integrations(
     db: DBSession,
-    current_user: CurrentUser,
+    current_user: AdminUser,
 ) -> dict:
     result = await db.execute(
         select(ApiIntegration).where(ApiIntegration.user_id == current_user.id)

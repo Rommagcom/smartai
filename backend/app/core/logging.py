@@ -27,11 +27,15 @@ class JsonFormatter(logging.Formatter):
 
 
 class _PollAccessFilter(logging.Filter):
-    """Suppress noisy 200 OK lines for the worker-results/poll endpoint."""
+    """Suppress noisy, expected uvicorn access-log lines for service endpoints."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if "worker-results/poll" in msg and "200" in msg:
+            return False
+        # Prometheus metrics endpoint is commonly probed without auth.
+        # Keep unauthorized probes out of INFO access logs.
+        if "/observability/metrics/prometheus" in msg and "401" in msg:
             return False
         return True
 
@@ -63,6 +67,19 @@ def setup_logging() -> None:
         "urllib3",
     ):
         logging.getLogger(logger_name).setLevel(third_party_level)
+
+    # Trafilatura can be extremely noisy on DEBUG and pollutes request logs.
+    # Keep it informative by default unless explicit deep-debug is enabled.
+    trafilatura_level = logging.DEBUG if settings.DEV_VERBOSE_LOGGING else logging.INFO
+    for logger_name in (
+        "trafilatura",
+        "trafilatura.main_extractor",
+        "trafilatura.htmlprocessing",
+        "trafilatura.readability_lxml",
+        "trafilatura.external",
+        "trafilatura.core",
+    ):
+        logging.getLogger(logger_name).setLevel(trafilatura_level)
 
     # Reduce poll endpoint noise in uvicorn access log
     logging.getLogger("uvicorn.access").addFilter(_PollAccessFilter())

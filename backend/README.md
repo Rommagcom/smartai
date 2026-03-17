@@ -1,443 +1,245 @@
-# AI Personal Assistant Backend (FastAPI)
+# SmartAI Backend
 
-Backend-сервис персонального AI ассистента на стеке:
-- **LangGraph 1.0** — граф-агент: 7 узлов с условной маршрутизацией (guardrail → memory → router → tool/chat → compose → output)
-- **LiteLLM 1.82** — унифицированный LLM-провайдер (OpenAI, Anthropic, Ollama, Azure и 100+ моделей)
-- **FastAPI 0.116** + WebSockets
-- **Pydantic v2** — строгие схемы и структурированные ответы LLM
-- **PostgreSQL** (+pgvector) + **Milvus** — долговременная память и RAG
-- **Redis** — STM, worker queue, WebSocket fanout
-- **MCP Python SDK 1.26** — Model Context Protocol для внешних AI-клиентов
-- **APScheduler** — cron-задачи и напоминания
-- **Dynamic Tool Injection** — пользователь подключает внешние API через чат, ассистент автоматически создаёт и вызывает инструменты
+SmartAI - backend персонального AI-ассистента с единым чатом, памятью, инструментами, интеграциями и Dynamic Skills.
 
-Архитектурные диаграммы и подробное описание: [ARCHITECTURE.md](ARCHITECTURE.md)
+## Что это
 
-Быстрый релизный runbook: [RELEASE.md](RELEASE.md)
+- Граф-агент на LangGraph: `guardrail -> memory -> router -> tool/chat -> compose -> output`
+- Каналы: REST, WebSocket, Telegram
+- Память: STM (Redis), LTM (PostgreSQL/pgvector), документы (Milvus/RAG)
+- Интеграции и инструменты: onboarding, health-check, вызовы API
+- Dynamic Skills: загрузка zip-пакетов с Python skill-кодом
 
-## Оглавление
-- [Архитектура (диаграммы)](ARCHITECTURE.md)
-- [Release runbook](RELEASE.md)
-- [1) Быстрый старт в Docker](#1-быстрый-старт-в-docker)
-- [2) Развертывание на VDS](#2-развертывание-на-vds)
-- [3) Тестирование и релизный контроль](TESTS.md)
-- [4) Обзор возможностей](#4-обзор-возможностей)
-- [5) API и product-flow](#5-api-и-product-flow)
-- [6) Безопасность](#6-безопасность)
-- [7) Наблюдаемость и масштабирование](#7-наблюдаемость-и-масштабирование)
-- [8) Пользовательские сценарии](#8-пользовательские-сценарии)
-- [9) Telegram Bot (модуль мессенджера)](#9-telegram-bot-модуль-мессенджера)
-- [10) Инструменты и мессенджеры](#10-инструменты-и-мессенджеры)
-- [11) Локальный запуск без Docker](#11-локальный-запуск-без-docker)
-- [12) Production security checklist](#12-production-security-checklist)
+## Быстрый старт за 2-3 минуты
 
-## 1) Быстрый старт в Docker
-Рекомендуемый минимальный путь запуска:
-1. `cp .env.example .env`
-2. `docker compose up -d --build`
-3. `docker compose exec api alembic upgrade head`
-4. открыть `http://localhost:8000/docs`
+Запускайте из каталога `backend`.
 
-1. Создайте `.env` из `.env.example`:
-   - `cp .env.example .env`
-2. Поднимите стек:
-   - `docker compose up -d --build`
-3. Примените миграции:
-   - `docker compose exec api alembic upgrade head`
-4. Откройте Swagger:
-   - `http://localhost:8000/docs`
+### 1) Docker (рекомендуется)
 
-### LLM-провайдер (LiteLLM)
-- Backend использует **LiteLLM** как единый интерфейс к LLM.
-- Модель задаётся через `LLM_MODEL` в `.env` (например `ollama_chat/kimi-k2.5:cloud`, `openai/gpt-4o`, `anthropic/claude-sonnet-4-20250514`).
-- LiteLLM автоматически определяет провайдер по префиксу модели. Если префикс не указан, используется `ollama_chat/`.
-- Для **Ollama** (локальный inference):
-   - Docker: `OLLAMA_BASE_URL=http://ollama:11434`
-   - Хост: `OLLAMA_BASE_URL=http://127.0.0.1:11434`
-   - Загрузка модели: `docker compose exec ollama ollama pull kimi-k2.5:cloud`
-- Быстрая проверка:
-   - `docker compose exec api sh -lc "wget -qO- http://ollama:11434/api/tags | head"`
+Linux/macOS:
 
-### Авто-сжатие контекста (anti-context-bloat)
-- В `POST /api/v1/chat` включено автоматическое сжатие длинной истории: в prompt отправляются последние сообщения + короткая выжимка более старых.
-- Это снижает деградацию на больших диалогах и при работе с объёмными PDF.
-- Основные env-параметры:
-   - `CONTEXT_MAX_PROMPT_TOKENS` (по умолчанию `5000`)
-   - `CONTEXT_ALWAYS_KEEP_LAST_MESSAGES` (по умолчанию `6`)
-   - `CONTEXT_SUMMARY_MAX_ITEMS` (по умолчанию `8`)
-   - `CONTEXT_SUMMARY_ITEM_MAX_CHARS` (по умолчанию `220`)
-   - `CONTEXT_MESSAGE_MAX_CHARS` (по умолчанию `2000`)
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
 
-## 2) Развертывание на VDS
-### API/бот на хосте, базы в Docker
-1. Поднимите только базы:
-   - `docker compose -f docker-compose.db.yml up -d`
-2. Примените миграции на хосте:
-   - `alembic upgrade head`
-3. Установите systemd unit-файлы:
-   - `sudo cp deploy/systemd/assistant-api.service /etc/systemd/system/`
-   - `sudo cp deploy/systemd/assistant-scheduler-leader.service /etc/systemd/system/`
-   - `sudo cp deploy/systemd/assistant-worker.service /etc/systemd/system/`
-   - `sudo cp deploy/systemd/assistant-telegram-bot.service /etc/systemd/system/`
-   - `sudo systemctl daemon-reload`
-4. Включите и запустите сервисы:
-   - `sudo systemctl enable --now assistant-api`
-   - `sudo systemctl enable --now assistant-scheduler-leader`
-   - `sudo systemctl enable --now assistant-worker`
-   - `sudo systemctl enable --now assistant-telegram-bot`
-5. Проверка:
-   - `sudo systemctl status assistant-api assistant-scheduler-leader assistant-worker assistant-telegram-bot`
-   - `sudo journalctl -u assistant-api -f`
+Windows PowerShell:
 
-Файлы:
-- `docker-compose.db.yml` — только PostgreSQL/Redis/Milvus стек
-- `deploy/systemd/assistant-api.service` — systemd unit для FastAPI
-- `deploy/systemd/assistant-scheduler-leader.service` — systemd unit для scheduler leader
-- `deploy/systemd/assistant-worker.service` — systemd unit для worker-процесса
-- `deploy/systemd/assistant-telegram-bot.service` — systemd unit для Telegram-бота
-- `deploy/systemd/INSTALL.md` — пошаговая установка
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+docker compose exec api alembic upgrade head
+```
 
-Короткая проверка после запуска:
-- `curl -f http://127.0.0.1:8000/health`
-- `sudo systemctl status assistant-api assistant-scheduler-leader assistant-worker assistant-telegram-bot --no-pager`
+Проверка:
 
-## 3) Тестирование и релизный контроль
-Подробная документация по тестам, smoke, pre-release и нагрузочной валидации:
-- [TESTS.md](TESTS.md)
+- API docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
 
-## 4) Обзор возможностей
+Smoke:
 
-### Архитектура агента
-- **LangGraph StateGraph** — 7 узлов обработки с условной маршрутизацией (см. [ARCHITECTURE.md](ARCHITECTURE.md))
-- **LiteLLM** — единый провайдер для 100+ LLM (OpenAI, Anthropic, Ollama, Azure, Groq, Bedrock и др.)
-- **Guardrails** — двухуровневая защита: input (prompt injection) + output (утечка промптов)
-- **MCP Server** — публикация 27 инструментов через Model Context Protocol
-- **Dynamic Tool Injection** — подключение внешних API через чат, LLM генерирует JSON Schema, инструменты вызываются автоматически
+```powershell
+..\.venv\Scripts\python.exe -m scripts.smoke_all
+```
 
-### Возможности
-- Неголосовой чат-ассистент (REST + WebSocket, Telegram)
-- Четырёхуровневая система памяти: STM (Redis) + LTM (PostgreSQL+pgvector) + RAG (Milvus) + история
-- Планировщик cron (создание/удаление/исполнение задач, естественный язык)
-- Самоадаптация по feedback (`/chat/self-improve`)
-- Авто-извлечение сущностей из диалога (timezone, city, name) → LTM
-- Исполнение Python кода в Docker sandbox
-- Генерация PDF-документов (base64 artifact + Telegram отправка файлом)
-- Интеграции с внешними API (универсальный executor + onboarding wizard)
-- Dynamic Tool Injection — пользователь описывает API → ассистент создаёт инструмент
-- Мультипользовательская изоляция через `user_id` во всех сущностях
-- JWT access/refresh аутентификация
-- SOUL onboarding (auto setup при первом чате)
-- Проактивные сообщения (периодические и по cron)
-- Единая точка входа `POST /api/v1/chat`: граф-агент маршрутизирует к нужному инструменту
+### 2) Ollama на хосте (GPU)
 
-### Структура проекта
-- `app/graph/` — LangGraph StateGraph: определение узлов, состояния и маршрутизации
-- `app/llm/` — LiteLLM Provider: единый интерфейс к LLM (chat, stream, structured, embeddings)
-- `app/memory/` — MemoryManager: параллельный сбор STM + LTM + RAG + история
-- `app/mcp/` — MCP Server: публикация инструментов по Model Context Protocol
-- `app/guardrails/` — Input/Output guardrails: защита от prompt injection и утечек
-- `app/api/v1/endpoints/` — HTTP и WebSocket endpoints (10 групп)
-- `app/services/` — 25 сервисов: оркестрация, память, планировщик, sandbox, Dynamic Tools, интеграции
-- `app/workers/` — Redis-backed worker queue с durable persistence
-- `app/models/` — SQLAlchemy ORM модели (10 моделей, включая DynamicTool)
-- `alembic/` — миграции БД
-- `integrations/messengers/` — модульные интеграции мессенджеров (Telegram + базовый адаптер)
+Если Ollama работает на хост-машине, а backend в Docker:
 
-Подробные диаграммы: [ARCHITECTURE.md](ARCHITECTURE.md)
+1. В `.env` задайте:
 
-## 5) API и product-flow
-### Ключевые эндпоинты
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `GET /api/v1/users/me`
-- `GET /api/v1/users/me/onboarding-next-step`
-- `GET /api/v1/users/me/soul/status`
-- `POST /api/v1/users/me/soul/setup`
-- `POST /api/v1/users/me/soul/adapt-task`
-- `GET /api/v1/users/admin/users` (admin)
-- `PATCH /api/v1/users/admin/users/{user_id}/admin-access` (admin)
-- `POST /api/v1/chat`
-- `GET /api/v1/chat/history/{session_id}`
-- `POST /api/v1/chat/feedback`
-- `POST /api/v1/chat/self-improve`
-- `POST /api/v1/chat/execute-python`
-- `POST /api/v1/chat/tools/pdf-create`
-- `GET /api/v1/chat/tasks/history`
-- `GET /api/v1/chat/worker-results/poll`
-- `GET /api/v1/chat/skills`
-- `POST /api/v1/documents/upload`
-- `GET /api/v1/documents/search`
-- `POST /api/v1/memory`
-- `GET /api/v1/memory`
-- `POST /api/v1/memory/cleanup`
-- `PATCH /api/v1/memory/{memory_id}/pin`
-- `PATCH /api/v1/memory/{memory_id}/lock`
-- `POST /api/v1/cron`
-- `GET /api/v1/cron`
-- `DELETE /api/v1/cron/{job_id}`
-- `POST /api/v1/integrations`
-- `GET /api/v1/integrations`
-- `POST /api/v1/integrations/{integration_id}/call`
-- `POST /api/v1/integrations/onboarding/connect`
-- `POST /api/v1/integrations/onboarding/test`
-- `POST /api/v1/integrations/onboarding/save`
-- `GET /api/v1/integrations/onboarding/status/{draft_id}`
-- `GET /api/v1/integrations/{integration_id}/health`
-- `POST /api/v1/integrations/admin/rotate-auth-data` (admin)
-- `GET /api/v1/observability/metrics` (admin)
-- `GET /api/v1/observability/metrics/prometheus` (admin)
-- `GET /api/v1/observability/alerts` (admin)
-- `WS /api/v1/ws/chat?token=<access_token>`
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
 
-> Важно: при первом `POST /api/v1/chat` применяется auto SOUL setup c дефолтным профилем, поэтому ручной `POST /api/v1/users/me/soul/setup` больше не обязателен для старта.
+2. Запуск с override:
 
-### Единая точка входа: chat auto-tools
-- Пользователь пишет обычный запрос в `POST /api/v1/chat`.
-- Ассистент автоматически определяет, нужен ли tool-вызов (`pdf_create`, `memory`, `cron`, `integrations`, `execute_python`, `doc_search`).
-- Поддерживаются цепочки до 3 шагов в одном сообщении (например: `integrations_list -> integration_call -> pdf_create`).
-- Если planner/tool-chain недоступен или падает, chat автоматически делает fallback на обычный LLM-ответ (без ошибки для пользователя).
-- Если tool вернул файл (например PDF/скриншот), API вернёт его в `artifacts` (base64), а Telegram-бот отправит как файл в чат.
-- Поддерживается фоновая очередь: если пользователь просит выполнить задачу в фоне/очереди, ассистент ставит её в worker и отвечает понятным статусом (`задача в очереди на обработке`) без отправки `job_id`.
-- После выполнения worker отправляет пользователю событие `worker_result` через WebSocket с итогом задачи (или текстом ошибки).
-- Для Telegram бот автоматически опрашивает `GET /api/v1/chat/worker-results/poll` и отправляет итог фоновой задачи отдельным сообщением в чат.
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+docker compose exec api alembic upgrade head
+```
 
-### Durable очередь (Redis + БД)
-- Worker-задачи сохраняются в таблице `worker_tasks` (статусы: `queued`, `running`, `retry_scheduled`, `success`, `failed`).
-- Redis используется как брокер: `WORKER_QUEUE_KEY` (основная очередь), `WORKER_PROCESSING_QUEUE_KEY` (in-flight задачи) и `WORKER_RETRY_ZSET_KEY` (отложенные retry).
-- Восстановление после падений: при старте/цикле worker выполняет recovery processing-очереди и requeue/retry для зависших задач по lease timeout (`WORKER_RUNNING_LEASE_SECONDS`).
-- Retry policy: экспоненциальная задержка от `WORKER_RETRY_BASE_DELAY_SECONDS` до `WORKER_RETRY_MAX_DELAY_SECONDS`, максимум `WORKER_MAX_RETRIES` попыток.
-- Дедупликация: одинаковые активные задачи в окне `WORKER_DEDUPE_WINDOW_SECONDS` не дублируются в очереди.
+3. Проверка доступа к Ollama из контейнера:
 
-### Delivery layer (WebSocket + Telegram)
-- Фоновый результат доставляется в едином формате события `worker_result` для обоих каналов.
-- Поля payload: `success`, `status`, `job_type`, `message`, `result_preview`, `next_action_hint`, `error.message`, `delivered_at`.
-- Для обратной совместимости в payload сохраняется `result` (alias для preview).
-- Poll delivery теперь хранится в Redis (ключи `WORKER_RESULT_QUEUE_PREFIX:*`) с TTL/ограничением размера, что устраняет потерю результатов между процессами.
-- WebSocket fanout отправляет payload параллельно с timeout (`WEBSOCKET_SEND_TIMEOUT_SECONDS`), чтобы медленные клиенты не блокировали остальных.
+```bash
+docker compose exec api python -c "import urllib.request; r=urllib.request.urlopen('http://host.docker.internal:11434/api/tags', timeout=5); print(r.status)"
+```
 
-### Skills-контракт и реестр
-- Реестр базовых skills доступен через `GET /api/v1/chat/skills`.
-- Каждый skill описан контрактом: `manifest` (name/title/description/version), `input_schema` (JSON Schema), `permissions`.
-- `tool_orchestrator` использует этот реестр как source of truth для допустимых имен инструментов.
-- Перед выполнением tool-вызова `tool_orchestrator` валидирует входные аргументы по `input_schema` из реестра skills.
+Если `Connection refused`, обычно Ollama слушает только `127.0.0.1`. Для Docker-контейнеров нужен bind на `0.0.0.0:11434`.
 
-### Подключение внешнего API через чат
-- Пользователь может попросить в чате: `подключи API ...` или `добавь интеграцию <name> <url>` — ассистент создаст интеграцию через внутренний tool `integration_add`.
-- После подключения запросы вида `получи данные из интеграции <name>` выполняются детерминированным маршрутом `integration_call` по имени сервиса (без LLM planner).
-- Поддерживаемые фразы для вызова: `получи/запроси/вызови/дай ... интеграцию <name>`, `<name> сделай запрос`, `call/get integration <name>`.
-- `integration_call` автоматически: находит интеграцию по `service_name`, берёт первый endpoint, подставляет сохранённые params и вызывает API.
-- Интеграции изолированы по `user_id` и доступны только владельцу.
+## Частые команды
 
-### URL-шаблоны и параметры интеграций
-- При создании интеграции можно указать `params` — JSON-объект параметров, которые автоматически подставляются при вызове.
-- Поддерживаются шаблонные переменные в значениях параметров:
-   - `{{today}}` — текущая дата DD.MM.YYYY 
-   - `{{today_iso}}` — текущая дата YYYY-MM-DD
-   - `{{now}}` — текущее время в формате ISO-8601 UTC
-- URL может содержать `{key}` плейсхолдеры, которые заменяются значениями из `params`.
-- Параметры, не совпавшие с плейсхолдерами, добавляются как query-параметры URL.
-- При вызове (`integration_call`) сохранённые params используются как defaults, а переданные при вызове — как overrides.
-- Пример: `url=https://nationalbank.kz/rss/get_rates.cfm`, `params={"fdate": "{{today}}"}` → итоговый URL: `https://nationalbank.kz/rss/get_rates.cfm?fdate=04.03.2026`.
+Windows PowerShell:
 
-### Integrations chat-onboarding API
-- Пошаговый onboarding: `connect -> test -> save` через endpoint’ы `/api/v1/integrations/onboarding/*`.
-- `connect` создаёт onboarding-сессию и возвращает `draft_id` + текущий `step=connected`.
-- `test` и `save` могут работать по `draft_id` (или по raw `draft`), обновляя шаги `tested` и `saved`.
-- `status/{draft_id}` возвращает текущее состояние сессии (`step`, `draft`, `last_test`, `saved_integration_id`).
-- `connect` нормализует draft подключения (service/auth/endpoints/healthcheck) без сохранения.
-- `test` проверяет доступность API по healthcheck и возвращает `success/status_code/response_preview`.
-- `save` сохраняет интеграцию (опционально с обязательным успешным test).
-- `GET /api/v1/integrations/{integration_id}/health` выполняет health-check для уже сохранённой интеграции.
+```powershell
+# поднять стек
+docker compose up -d --build
 
-## 6) Безопасность
-### Security hardening
-- `auth_data` интеграций шифруется в БД (Fernet) перед сохранением.
-- Ротация ключей поддерживается через keyring: `AUTH_DATA_ENCRYPTION_KEYS` (формат `kid:key,kid:key`) и `AUTH_DATA_ACTIVE_KEY_ID`.
-- При чтении интеграции выполняется lazy-rotation: если запись зашифрована старым ключом (или в legacy plaintext), она автоматически перешифровывается активным ключом.
-- Sandbox egress policy применяется к `api_executor`:
-   - `SANDBOX_EGRESS_ENABLED`
-   - `SANDBOX_EGRESS_BLOCK_PRIVATE_NETWORKS`
-   - `SANDBOX_EGRESS_ALLOWLIST_MODE`
-   - `SANDBOX_EGRESS_ALLOWED_HOSTS`
-   - `SANDBOX_EGRESS_DENIED_HOSTS`
-   - `SANDBOX_EGRESS_ALLOWED_PORTS`
+# миграции
+docker compose exec api alembic upgrade head
 
-#### Runbook: ротация ключей `auth_data`
-1. Сгенерируйте новый Fernet key (base64-url, 32 bytes).
-2. Добавьте его в `AUTH_DATA_ENCRYPTION_KEYS`, не удаляя старый:
-   - было: `k1:<old_key>`
-   - стало: `k1:<old_key>,k2:<new_key>`
-3. Переключите активный ключ: `AUTH_DATA_ACTIVE_KEY_ID=k2`.
-4. Перезапустите backend и выполните штатные операции с интеграциями (`list/call/health`), чтобы сработал lazy-rotation.
-5. Проверьте, что новые/прочитанные записи перешифрованы ключом `k2`.
-6. После валидации удалите старый ключ из keyring:
-   - финально: `AUTH_DATA_ENCRYPTION_KEYS=k2:<new_key>`.
+# все smoke
+..\.venv\Scripts\python.exe -m scripts.smoke_all
 
-> Для ускоренной миграции можно вызвать `POST /api/v1/integrations/admin/rotate-auth-data` (admin-only), чтобы batch-перешифровать все интеграции без ожидания lazy-rotation.
+# отдельные smoke
+..\.venv\Scripts\python.exe -m scripts.smoke_admin_access
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_package
+..\.venv\Scripts\python.exe -m scripts.smoke_dynamic_skill_delete
+```
 
-#### Safety checklist
-- Никогда не публикуйте ключи в репозитории, используйте secret manager/.env в защищённом хранилище.
-- На период ротации всегда держите минимум 2 ключа в keyring (старый + новый).
-- Убедитесь, что интеграционные smoke/health-check проходят до удаления старого ключа.
+Linux/macOS:
 
-## 7) Наблюдаемость и масштабирование
-### Observability
-- Structured logs: backend пишет JSON-логи (`ts`, `level`, `logger`, `message`, контекстные поля).
-- Метрики собираются in-memory с latency/success/failure по ключевым операциям (`worker.*`, `scheduler.*`, `telegram_bridge.*`).
-- Алерты (in-memory buffer) генерируются для критичных сбоев в `worker`, `scheduler`, `telegram_bridge`.
-- Доступ к данным наблюдаемости:
-   - `GET /api/v1/observability/metrics` — snapshot counters + latency aggregates.
-   - `GET /api/v1/observability/metrics/prometheus` — text exposition format для Prometheus scrape.
-   - `GET /api/v1/observability/alerts?limit=50` — последние alert-события.
+```bash
+# поднять стек
+docker compose up -d --build
 
-### Runtime mode flags (scaling)
-- `SCHEDULER_ENABLED=true|false` — запускать ли APScheduler в данном процессе.
-- `WORKER_ENABLED=true|false` — запускать ли embedded worker loop в данном процессе.
-- Для multi-instance обычно включают scheduler только в одном процессе (leader), а worker — в выделенных worker-процессах.
-- `scheduler-leader` периодически синхронизирует cron jobs из БД (каждые ~30 сек), поэтому напоминания, созданные через API/Telegram, подхватываются без рестарта leader.
-- В `docker-compose.yml` добавлены profile-сервисы:
-   - `scheduler-leader` (`--profile multi`)
-   - `worker` (`--profile multi`)
-- Пример запуска multi-profile:
-   - `docker compose --profile multi up -d --build`
-- Пример с масштабированием worker:
-   - `docker compose --profile multi up -d --build --scale worker=3`
-- Role-based override файл:
-   - `docker-compose.multi.yml` (фиксирует флаги ролей для `api/scheduler-leader/worker`)
-   - запуск: `docker compose -f docker-compose.yml -f docker-compose.multi.yml --profile multi up -d --build --scale worker=3`
-- Быстрая проверка топологии после запуска:
-   - `bash deploy/check-multi.sh 3`
-   - скрипт проверяет: ровно 1 `scheduler-leader`, заданное число `worker`, минимум 1 `api`.
+# миграции
+docker compose exec api alembic upgrade head
 
-### Production runbook (multi-instance)
-Рекомендуемая схема:
-- `api` replicas (`WORKER_ENABLED=false`, `SCHEDULER_ENABLED=false`) — только HTTP/WebSocket.
-- `scheduler-leader` (1 экземпляр, `SCHEDULER_ENABLED=true`, `WORKER_ENABLED=false`) — только APScheduler + bootstrap cron jobs.
-- `worker` replicas (`WORKER_ENABLED=true`, `SCHEDULER_ENABLED=false`) — обработка очереди и retry.
-- `telegram-bridge` (1+ экземпляров при необходимости) — polling Telegram + backend bridge.
+# все smoke
+../.venv/bin/python -m scripts.smoke_all
 
-Минимальные env-параметры для продакшена:
-- `REDIS_URL` — общий Redis для queue/retry/result delivery.
-- `WORKER_QUEUE_KEY`, `WORKER_PROCESSING_QUEUE_KEY`, `WORKER_RETRY_ZSET_KEY`.
-- `WORKER_RUNNING_LEASE_SECONDS`, `WORKER_PROCESSING_RECOVERY_BATCH`.
-- `WORKER_RESULT_QUEUE_PREFIX`, `WORKER_RESULT_QUEUE_MAX_ITEMS`, `WORKER_RESULT_TTL_SECONDS`.
-- `WEBSOCKET_SEND_TIMEOUT_SECONDS`, `TELEGRAM_POLL_CONCURRENCY`, `TELEGRAM_KNOWN_USER_TTL_SECONDS`.
+# отдельные smoke
+../.venv/bin/python -m scripts.smoke_admin_access
+../.venv/bin/python -m scripts.smoke_dynamic_skill_package
+../.venv/bin/python -m scripts.smoke_dynamic_skill_delete
+```
 
-Порядок запуска/деплоя:
-1. Поднять Redis/PostgreSQL/Milvus/Ollama.
-2. Применить миграции: `alembic upgrade head`.
-3. Запустить `scheduler-leader` (один экземпляр).
-4. Запустить `worker` replicas.
-5. Запустить `api` replicas.
-6. Запустить `telegram-bridge` (если используется).
+## Админ-доступ
 
-Проверка после выката:
-- Health API: `GET /health`.
-- Worker delivery: `GET /api/v1/chat/worker-results/poll` возвращает результаты после enqueue.
-- Scheduler bootstrap: в логах есть `scheduler bootstrap complete`.
-- Observability: `assistant_observability_up == 1`, алерты не растут аномально.
+### Обычный путь
 
-Антипаттерны:
-- Не запускать больше одного scheduler-leader без leader-election.
-- Не держать `WORKER_ENABLED=true` на всех API-репликах (избыточная конкуренция за очередь).
-- Не хранить bridge/JWT/rotation keys в репозитории.
+1. Если база пустая: первый зарегистрированный пользователь становится admin автоматически.
+2. Если admin уже есть: выдайте права через endpoint:
 
-### Нагрузочная валидация и тестовые runbook
-Подробные сценарии валидации, go-live checklist и примеры Prometheus вынесены в [TESTS.md](TESTS.md).
+- `PATCH /api/v1/users/admin/users/{user_id}/admin-access`
+- Body: `{"is_admin": true}`
 
-## 8) Пользовательские сценарии
-### Напоминания на естественном языке
-- В чате можно писать без cron-формата: `запиши на 25 февраля на 9:00 к врачу`, `на завтра на 9:00`, `сегодня на 23:00`.
-- Повторяющиеся задачи тоже поддержаны: `каждый день в 9:00 курс валют и погода`, `каждую пятницу в 9:00 отчёт`.
-- Для одноразовых задач backend сохраняет специальный формат `@once:<ISO_DATETIME_UTC>` и исполняет их через date-trigger.
+### Аварийный путь (если admin не осталось)
 
-### Память и timezone пользователя
-- Пользователь может один раз написать в чат свой UTC-offset, например: `моя зона UTC+3`.
-- Backend сохранит это в `user.preferences.timezone` и в `long-term memory` (как `timezone=UTC+03:00`).
-- Команда `запомни ...` сохраняет факт в long-term memory без ручного вызова `/memory`.
-- Проверка текущей зоны: спросить в чате `какая у меня зона` (или `мой UTC`).
+```bash
+docker compose exec postgres psql -U assistant -d assistant -c "UPDATE users SET is_admin = true WHERE username = 'your_username';"
+docker compose exec postgres psql -U assistant -d assistant -c "SELECT username, is_admin FROM users ORDER BY created_at;"
+```
 
-### Memory quality
-- Dedup: одинаковые факты (`fact_type + normalized content`) объединяются в одну запись памяти.
-- TTL: поддерживается `expiration_date`; при `MEMORY_DEFAULT_TTL_DAYS > 0` TTL проставляется автоматически для новых неприкреплённых фактов.
-- Importance decay: для неприкреплённых/неблокированных фактов важность постепенно снижается (настраивается через `MEMORY_DECAY_HALF_LIFE_DAYS` и `MEMORY_DECAY_MIN_FACTOR`).
-- Pin/Lock: важные факты можно закрепить (`pin`) или заблокировать (`lock`), чтобы исключить TTL-очистку и decay.
-- Cleanup: `POST /api/v1/memory/cleanup` физически удаляет просроченные неприкреплённые/неблокированные факты пользователя.
-- При создании напоминаний из естественного языка timezone берётся из `preferences.timezone` (если не задано — `Europe/Moscow`).
+## Dynamic Skills: быстро
 
-## 9) Telegram Bot (модуль мессенджера)
-- Запуск (локально):
-   - `python -m integrations.messengers.telegram.run`
-- Запуск (docker):
-   - `docker compose up -d telegram-bot`
-- Обязательные переменные:
-   - `TELEGRAM_BOT_TOKEN`
-   - `BACKEND_API_BASE_URL`
-   - `TELEGRAM_BACKEND_BRIDGE_SECRET`
+Dynamic Skill - zip-пакет с `manifest.json`, `skill.py`, `skill.md`.
 
-### Команды Telegram
-- `\start`, `\help`, `\me`, `\onboarding_next`
-- `\soul_setup` (wizard), `\soul_status`, `\soul_adapt`
-- `\chat` (или просто текст), `\history`, `\self_improve`
-- `\py`, `\memory_add`, `\memory_list`
-- `\make_pdf`
-- загрузка документа файлом + `\doc_search`
-- `\cron_add`, `\cron_list`, `\cron_del`
-- `\integrations_add`, `\integrations_list`, `\integration_call`
+### Минимальная структура
 
-> Если пользователь пишет первое обычное сообщение в Telegram chat flow и SOUL ещё не настроен, бот автоматически предложит выполнить `/soul_setup` (один раз перед началом работы).
+```text
+my_skill.zip
+  manifest.json
+  skill.py
+  skill.md
+```
 
-### Доступ в Telegram по whitelist
-- Неверфицированные Telegram User ID не могут работать с ботом.
-- Доступ управляется через backend admin API:
-   - `GET /api/v1/telegram/admin/access`
-   - `POST /api/v1/telegram/admin/access`
-   - `DELETE /api/v1/telegram/admin/access/{telegram_user_id}`
-   - `DELETE /api/v1/telegram/admin/users/{telegram_user_id}` (admin, full delete)
-- Проверка доступа для bridge:
-   - `GET /api/v1/telegram/access/check/{telegram_user_id}` с заголовком `X-Telegram-Bridge-Secret`.
-- Первый зарегистрированный пользователь backend автоматически получает `is_admin=true`.
+### Минимальный manifest.json
 
-## 10) Инструменты и мессенджеры
-### Цепочки инструментов (tool chains)
-- Поддерживаются цепочки инструментов до 3 шагов (например, onboarding интеграции и последующий вызов API).
-- Каждый шаг ограничен таймаутом `TOOL_STEP_TIMEOUT_SECONDS` (по умолчанию 90 сек).
-- Если все шаги цепочки завершились ошибкой, LLM получает явное указание сообщить об этом пользователю.
+```json
+{
+  "name": "weather_custom_skill",
+  "title": "Weather Skill",
+  "description": "Returns short weather summary",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "city": { "type": "string" }
+    },
+    "required": ["city"],
+    "additionalProperties": false
+  }
+}
+```
 
-### Модульная архитектура мессенджеров
-- Базовый контракт: `integrations/messengers/base/adapter.py`
-- Telegram-реализация: `integrations/messengers/telegram`
-- Для нового мессенджера: создать новый модуль рядом с Telegram и реализовать `MessengerAdapter`.
+### Контракт skill.py
 
-### Надёжность доставки уведомлений
-- Крон-напоминания доставляются с человекочитаемым текстом: `⏰ Напоминание: {текст}`.
-- `_known_users` Telegram-бота персистятся в `data/tg_known_users.json`, TTL = 30 дней.
-- При 401 во время polling автоматически обновляется JWT.
+```python
+def run(params, context):
+    city = params.get("city", "Almaty")
+    llm = context.get("llm")
+    if llm:
+        text = llm.chat(system="You are concise", user=f"Weather for {city}")
+        return {"ok": True, "city": city, "summary": text}
+    return {"ok": True, "city": city, "summary": f"No LLM available for {city}"}
+```
 
-### AdminUser dependency
-- Для admin-эндпоинтов используется `AdminUser = Annotated[User, Depends(get_admin_user)]`.
-- Проверка `is_admin` вынесена в единую FastAPI-зависимость `get_admin_user`.
+  ### Sandbox callbacks
 
-### PDF и кириллица
-- Для корректного отображения кириллицы в PDF используется шрифт DejaVu Sans (путь: переменная `PDF_FONT_PATH`).
-- Если шрифт недоступен, система корректно деградирует к Helvetica.
+  В режиме `DYNAMIC_SKILL_EXECUTION_MODE=runner` skill исполняется в отдельном краткоживущем контейнере.
 
-## 11) Локальный запуск без Docker
-1. Установите зависимости:
-   - `pip install -r requirements.txt`
-2. Поднимите PostgreSQL + Milvus + Ollama
-3. Сконфигурируйте `.env`
-4. Примените миграции:
-   - `alembic upgrade head`
-5. Запустите API:
-   - `uvicorn app.main:app --reload`
-6. (Опционально) запустите worker:
-   - `python -m app.workers.run`
+  - `context["llm"]["chat"](...)` вызывает LLM через callback в `skill-runner`
+  - `context["http"]` даёт безопасный HTTP proxy через `skill-runner`
+  - прямой сетевой доступ из skill лучше не использовать, чтобы сохранить egress policy и audit trail
 
-## 12) Production security checklist
-- Для production обязательно:
-  - сменить `JWT_SECRET_KEY`
-  - включить RLS политики (`scripts/rls.sql`)
-  - шифровать `auth_data` интеграций (Fernet/Vault)
-  - ограничить доступ к Docker socket
-  - оставить Ollama только во внутренней сети
+  Пример:
+
+  ```python
+  def run(params, context):
+    city = params.get("city") or "Almaty"
+    http = (context or {}).get("http", {})
+    llm = (context or {}).get("llm", {})
+
+    weather = {}
+    http_get = http.get("get")
+    if callable(http_get):
+      weather = http_get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+          "latitude": 43.2389,
+          "longitude": 76.8897,
+          "current": "temperature_2m,wind_speed_10m",
+        },
+      )
+
+    summary = weather.get("body")
+    llm_chat = llm.get("chat")
+    if callable(llm_chat):
+      summary = llm_chat(
+        system="Summarize weather in one short sentence.",
+        user=str(weather.get("body") or city),
+        options={"max_tokens": 80},
+      )
+
+    return {
+      "ok": True,
+      "city": city,
+      "weather": weather.get("body"),
+      "summary": summary,
+    }
+  ```
+
+  ### Audit log
+
+  Все запуски Dynamic Skills, а также `llm` и `http` callback могут сохраняться в Postgres в таблицу `dynamic_skill_audit`.
+  Это даёт трассировку по `tool_name`, `execution_id`, `success/error`, источнику события и payload.
+
+### Управление Skills
+
+Эти endpoints управляют только Python Dynamic Skills. Интеграции живут отдельно в `/api/v1/integrations`, а пользовательские API tools не попадают в skill CRUD.
+
+- Registry: `GET /api/v1/skills/registry`
+- Upload (admin): `POST /api/v1/skills/upload`
+- List: `GET /api/v1/skills`
+- Delete one (admin): `DELETE /api/v1/skills/{skill_name}`
+- Delete all (admin): `DELETE /api/v1/skills`
+
+### Управление API Tools
+
+Эти endpoints управляют пользовательскими API-инструментами, а не Python Skills и не интеграциями.
+
+- Register: `POST /api/v1/api-tools/register`
+- List: `GET /api/v1/api-tools`
+- Delete one (admin): `DELETE /api/v1/api-tools/{tool_name}`
+- Delete all (admin): `DELETE /api/v1/api-tools`
+
+## Документация
+
+- Полный гайд: [FULLREADME.MD](FULLREADME.MD)
+- Конфигурация (.env): [CONFIGURATION.md](CONFIGURATION.md)
+- Архитектура: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Тесты и smoke: [TESTS.md](TESTS.md)
+- Релизный runbook: [RELEASE.md](RELEASE.md)

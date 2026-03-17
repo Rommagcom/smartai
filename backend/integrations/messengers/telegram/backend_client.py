@@ -178,6 +178,37 @@ class BackendApiClient:
             timeout=get_telegram_settings().TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS,
         )
 
+    async def skills_upload(self, token: str, filename: str, content: bytes) -> dict[str, Any]:
+        files = {"file": (filename, content)}
+        return await self._request(
+            "POST",
+            "/skills/upload",
+            token=token,
+            files=files,
+            timeout=get_telegram_settings().TELEGRAM_DOCUMENT_UPLOAD_TIMEOUT_SECONDS,
+        )
+
+    async def skills_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/skills", token=token)
+
+    async def skills_delete(self, token: str, skill_name: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/skills/{skill_name}", token=token)
+
+    async def skills_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/skills", token=token)
+
+    async def api_tools_register(self, token: str, user_message: str) -> dict[str, Any]:
+        return await self._request("POST", "/api-tools/register", token=token, json={"user_message": user_message})
+
+    async def api_tools_list(self, token: str) -> dict[str, Any]:
+        return await self._request("GET", "/api-tools", token=token)
+
+    async def api_tools_delete(self, token: str, tool_name: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/api-tools/{tool_name}", token=token)
+
+    async def api_tools_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/api-tools", token=token)
+
     async def documents_search(self, token: str, query: str, top_k: int = 5) -> dict[str, Any]:
         return await self._request("GET", "/documents/search", token=token, params={"query": query, "top_k": top_k})
 
@@ -207,6 +238,24 @@ class BackendApiClient:
 
     async def integrations_list(self, token: str) -> dict[str, Any]:
         return await self._request("GET", "/integrations", token=token)
+
+    async def integrations_delete_all(self, token: str) -> dict[str, Any]:
+        return await self._request("DELETE", "/integrations", token=token)
+
+    async def integrations_onboarding_connect(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/integrations/onboarding/connect", token=token, json=body)
+
+    async def integrations_onboarding_test(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/integrations/onboarding/test", token=token, json=body)
+
+    async def integrations_onboarding_save(self, token: str, body: dict) -> dict[str, Any]:
+        return await self._request("POST", "/integrations/onboarding/save", token=token, json=body)
+
+    async def integrations_onboarding_status(self, token: str, draft_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/integrations/onboarding/status/{draft_id}", token=token)
+
+    async def integration_health(self, token: str, integration_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/integrations/{integration_id}/health", token=token)
 
     async def integrations_call(self, token: str, integration_id: str, body: dict) -> dict[str, Any]:
         return await self._request("POST", f"/integrations/{integration_id}/call", token=token, json=body)

@@ -32,11 +32,47 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.graph.node_helpers import (
+    WEB_SEARCH_RE,
+    _build_enriched_system_prompt,
+    _hard_structured_route,
+    _looks_like_incomplete_markdown_answer,
+    _looks_like_small_talk,
+    _sanitize_llm_answer,
+    apply_direct_route_fallback,
+    apply_inline_cron_bridge,
+    apply_inline_integration_bridge,
+    apply_output_guardrail,
+    build_raw_tool_summary,
+    build_raw_web_summary,
+    deterministic_route,
+    enqueue_export_if_needed,
+    extract_artifacts,
+    extract_facts_to_ltm,
+    extract_non_json_answer_from_exception,
+    extract_router_output_from_exception,
+    fallback_explicit_export_route,
+    fallback_live_data_export_route,
+    feedback_requires_web_search,
+    feedback_to_search_query,
+    followup_export_route,
+    format_deterministic_tool_answer,
+    has_successful_export_call,
+    is_live_data_query,
+    is_web_search_intent,
+    load_user_tool_context,
+    requested_export_kind,
+    sanitize_false_attachment_claims,
+    should_reenqueue_export,
+    strip_web_search_prefix,
+    web_result_field,
+)
 from app.schemas.graph import (
     AgentState,
     GuardrailResult,
@@ -50,6 +86,64 @@ from app.schemas.graph import (
 )
 
 logger = logging.getLogger(__name__)
+_WEB_SEARCH_HINT = "Выполни поиск в интернете"
+
+
+async def _recover_truncated_web_answer(
+    *,
+    llm_provider: Any,
+    answer: str,
+    user_message: str,
+    web_fetch_content: str,
+    web_search_results: list[dict],
+    tool_results: list[ToolResult],
+) -> str:
+    sanitized = _sanitize_llm_answer(answer)
+    if not (web_fetch_content or web_search_results):
+        return sanitized
+    if not _looks_like_incomplete_markdown_answer(sanitized):
+        return sanitized
+
+    _dev_log("compose_truncated_markdown_detected", answer_len=len(sanitized))
+
+    web_context = web_fetch_content.strip()
+    if not web_context and web_search_results:
+        web_context = "\n".join(
+            f"- {web_result_field(r, 'title')}: {web_result_field(r, 'snippet')} ({web_result_field(r, 'url')})"
+            for r in web_search_results[:8]
+        )
+
+    try:
+        recovered = await llm_provider.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Сформируй полный ответ по данным ниже. "
+                        "Пиши обычным текстом или коротким маркированным списком. "
+                        "Не используй markdown-таблицы и не оставляй ответ незавершенным."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Вопрос: {user_message}\n\nДанные:\n{web_context[:12000]}",
+                },
+            ],
+            temperature=0.0,
+            max_tokens=settings.OLLAMA_NUM_PREDICT,
+        )
+        recovered = _sanitize_llm_answer(recovered)
+        if recovered and not _looks_like_incomplete_markdown_answer(recovered):
+            return recovered
+    except Exception:
+        logger.debug("truncated web answer recovery failed", exc_info=True)
+
+    return build_raw_web_summary(
+        web_fetch_content=web_fetch_content,
+        web_search_results=web_search_results,
+        tool_results=tool_results,
+        sanitize_answer=_sanitize_llm_answer,
+    )
 
 
 class IntentClassifierOutput(BaseModel):
@@ -128,15 +222,17 @@ async def memory_node(state: dict) -> dict:
     _dev_log("memory_gather_start", user_id=str(user_id))
 
     async with AsyncSessionLocal() as db:
-        context = await memory_manager.gather_context(
-            db=db,
-            user_id=user_id,
-            session_id=session_id,
-            user_message=user_message,
+        # Run context gathering and entity extraction in parallel — they are independent
+        context, entities = await asyncio.gather(
+            memory_manager.gather_context(
+                db=db,
+                user_id=user_id,
+                session_id=session_id,
+                user_message=user_message,
+            ),
+            memory_manager.extract_entities(user_message),
         )
 
-        # Entity extraction (semantic memory)
-        entities = await memory_manager.extract_entities(user_message)
         if entities:
             await memory_manager.store_entities(db, user_id, entities)
             await db.commit()
@@ -166,48 +262,21 @@ async def memory_node(state: dict) -> dict:
 
 
 async def intent_classifier_node(state: dict) -> dict:
-    """Classify if request can skip heavy retrieval/tool routing."""
-    from app.llm import llm_provider
+    """Classify if request can skip heavy retrieval/tool routing.
 
+    Uses only deterministic regex rules to avoid a redundant LLM round-trip.
+    The router_node (which always runs for non-small_talk) has its own LLM-based
+    intent classification, so a second LLM call here adds latency with no benefit.
+    """
     messages: list[str] = state.get("messages") or []
     query = (messages[-1] if messages else state.get("user_message", "")).strip()
     if not query:
         return {"intent": "small_talk", "next_step": "chat"}
 
-    # Deterministic guard for ultra-cheap path.
     if _looks_like_small_talk(query):
         return {"intent": "small_talk", "next_step": "chat"}
 
-    prompt = (
-        "Твоя задача — классифицировать намерение пользователя.\n\n"
-        f"Входящее сообщение: \"{query}\"\n\n"
-        "ПРАВИЛА КЛАССИФИКАЦИИ:\n"
-        "1. \"small_talk\": простое приветствие, прощание, благодарность, "
-        "короткая светская беседа или запрос, который НЕ требует поиска свежих фактов, "
-        "баз данных или вычислений.\n"
-        "2. \"needs_tools\": запрос, требующий поиска информации (интернет), "
-        "корпоративных данных, использования API, аналитики или точных фактов.\n\n"
-        "Ответь СТРОГО валидным JSON формата:\n"
-        '{"intent": "small_talk" | "needs_tools"}'
-    )
-
-    try:
-        out = await llm_provider.chat_structured(
-            messages=[{"role": "system", "content": prompt}],
-            response_model=IntentClassifierOutput,
-            model=settings.LITELLM_PLANNER_MODEL or None,
-            temperature=0.0,
-            max_tokens=120,
-        )
-        intent = out.intent
-    except Exception as exc:
-        logger.warning("Intent classifier failed: %s", exc)
-        intent = "small_talk" if _looks_like_small_talk(query) else "needs_tools"
-
-    return {
-        "intent": intent,
-        "next_step": "chat" if intent == "small_talk" else "retriever",
-    }
+    return {"intent": "needs_tools", "next_step": "retriever"}
 
 
 # ======================================================================
@@ -263,7 +332,7 @@ async def router_node(state: dict) -> dict:
     - **Semantically retrieved tools** (from Milvus via retriever node)
     """
     from app.llm import llm_provider
-    from app.services.skills_registry_service import skills_registry_service
+    from app.services.tool_catalog_service import tool_catalog_service
 
     user_message = state["user_message"]
     user_id = state.get("user_id")
@@ -273,8 +342,8 @@ async def router_node(state: dict) -> dict:
     _dev_log("router_start", message_preview=user_message[:120])
 
     # Reflexion fast-path: follow explicit previous-cycle instruction.
-    if feedback_plan and _feedback_requires_web_search(feedback_plan):
-        query = _feedback_to_search_query(feedback_plan, user_message)
+    if feedback_plan and feedback_requires_web_search(feedback_plan):
+        query = feedback_to_search_query(feedback_plan, user_message)
         reflexion_route = RouterOutput(
             decision=RouterDecision.WEB_SEARCH,
             steps=[ToolStep(tool="web_search", arguments={"query": query})],
@@ -286,22 +355,64 @@ async def router_node(state: dict) -> dict:
             "next_step": "web_search",
         }
 
-    # 1. Try deterministic shortcuts first (fast path, no LLM call)
-    deterministic = _deterministic_route(user_message)
-    if deterministic is not None:
-        _dev_log("router_deterministic", decision=deterministic.decision.value)
+    # 0. Hard structured command fast-path (graph-only command contract).
+    # This path is intentionally independent from generic deterministic shortcuts.
+    hard_route = _hard_structured_route(user_message)
+    if hard_route is not None:
+        _dev_log("router_hard_structured", steps_count=len(hard_route.steps))
         return {
-            "router_output": deterministic,
-            "next_step": deterministic.decision.value,
+            "router_output": hard_route,
+            "next_step": hard_route.decision.value,
         }
 
-    # 2. Load user integrations & dynamic tools for context
+    # 1. History-aware export follow-up should always work, even when generic
+    # deterministic shortcuts are disabled by config.
+    if settings.ROUTER_ENABLE_EXPORT_FOLLOWUP_SHORTCUT:
+        export_followup = followup_export_route(user_message, history)
+        if export_followup is not None:
+            _dev_log("router_deterministic_export_followup", decision=export_followup.decision.value)
+            return {
+                "router_output": export_followup,
+                "next_step": export_followup.decision.value,
+            }
+
+    # 2. Try deterministic shortcuts first (fast path, no LLM call)
+    if settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
+
+        deterministic = deterministic_route(user_message)
+        if deterministic is not None:
+            _dev_log("router_deterministic", decision=deterministic.decision.value)
+            return {
+                "router_output": deterministic,
+                "next_step": deterministic.decision.value,
+            }
+
+    # 3. Load user integrations & dynamic tools for context
     integrations_block = ""
     dynamic_tools_block = ""
     if user_id:
-        integrations_block, dynamic_tools_block = await _load_user_tool_context(user_id)
+        integrations_block, dynamic_tools_block = await load_user_tool_context(user_id)
 
-    # 3. Build retrieved-tools block from Milvus results
+    if (
+        user_id
+        and not integrations_block.strip()
+        and not dynamic_tools_block.strip()
+        and is_live_data_query(user_message)
+    ):
+        query = user_message.strip()
+        live_data_route = RouterOutput(
+            decision=RouterDecision.WEB_SEARCH,
+            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            response_hint="Быстрый путь live-data: web_search без planner LLM",
+            confidence=0.9,
+        )
+        _dev_log("router_fast_live_data", query=query[:120])
+        return {
+            "router_output": live_data_route,
+            "next_step": "web_search",
+        }
+
+    # 4. Build retrieved-tools block from Milvus results
     retrieved_block = ""
     if retrieved_tools:
         from app.schemas.tool_registry import RetrievedTool
@@ -318,14 +429,14 @@ async def router_node(state: dict) -> dict:
                 + "\n".join(lines) + "\n"
             )
 
-    # 4. LLM-based routing via structured output
+    # 5. LLM-based routing via structured output
     planner_model = settings.LITELLM_PLANNER_MODEL or None
     planner_prompt = (
         "Ты — маршрутизатор задач AI-агента.\n"
         "Твоя цель — выбрать правильный инструмент для выполнения запроса.\n\n"
         f"Вопрос пользователя: \"{user_message}\"\n\n"
         "Доступные инструменты:\n"
-        f"{skills_registry_service.planner_signatures()}\n"
+        f"{tool_catalog_service.planner_signatures()}\n"
         f"{dynamic_tools_block}"
         f"{integrations_block}"
         f"{retrieved_block}"
@@ -368,6 +479,12 @@ async def router_node(state: dict) -> dict:
         "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
         "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
         "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
+        "15a) Для одиночного шага pdf_create/excel_create НЕ пиши полный документ в arguments.content. "
+        "Передавай только короткий источник (до 300 символов, без markdown-блоков и длинных переносов). "
+        "Если нужен полный документ, сначала получи/сформируй данные отдельным шагом, затем используй $prev.body.\n"
+        "16) Если пользователь просит актуальные данные (погода, курс валют, новости и т.п.) И одновременно экспорт в PDF/Excel, "
+        "сначала получи данные (decision='web_search' или integration_call), затем сформируй файл по результатам. "
+        "Нельзя сразу делать pdf_create/excel_create только из исходного текста запроса.\n"
     )
 
     # Build messages with recent history for context continuity
@@ -393,26 +510,82 @@ async def router_node(state: dict) -> dict:
             steps_count=len(router_output.steps),
             confidence=router_output.confidence,
         )
+        if (
+            settings.ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT
+            and settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK
+            and router_output.decision in {RouterDecision.CLARIFY, RouterDecision.CHAT}
+        ):
+            live_export_override = fallback_live_data_export_route(user_message)
+            if live_export_override is not None:
+                _dev_log(
+                    "router_override_live_export",
+                    original_decision=router_output.decision.value,
+                    steps_count=len(live_export_override.steps),
+                )
+                return {
+                    "router_output": live_export_override,
+                    "next_step": "tool",
+                }
         return {
             "router_output": router_output,
             "next_step": router_output.decision.value,
         }
     except Exception as exc:
         logger.warning("Router LLM failed: %s, using fallback routing", exc)
-        # If the message clearly asks for web search, don't lose the intent
-        if _is_web_search_intent(user_message):
-            query = _WEB_SEARCH_RE.sub("", user_message).strip() or user_message
-            _dev_log("router_fallback_web_search", query=query[:120])
-            fallback = RouterOutput(
-                decision=RouterDecision.WEB_SEARCH,
-                steps=[ToolStep(tool="web_search", arguments={"query": query})],
-                response_hint="Выполни поиск в интернете",
-                confidence=0.5,
+        salvaged = extract_router_output_from_exception(
+            exc,
+            user_message,
+            web_search_pattern=WEB_SEARCH_RE,
+            web_search_hint=_WEB_SEARCH_HINT,
+        )
+        if salvaged is not None:
+            _dev_log(
+                "router_fallback_salvaged",
+                decision=salvaged.decision.value,
+                steps_count=len(salvaged.steps),
             )
             return {
-                "router_output": fallback,
-                "next_step": "web_search",
+                "router_output": salvaged,
+                "next_step": salvaged.decision.value,
             }
+        explicit_export_fallback = fallback_explicit_export_route(user_message)
+        if explicit_export_fallback is not None:
+            _dev_log(
+                "router_fallback_explicit_export",
+                decision=explicit_export_fallback.decision.value,
+                steps_count=len(explicit_export_fallback.steps),
+            )
+            return {
+                "router_output": explicit_export_fallback,
+                "next_step": explicit_export_fallback.decision.value,
+            }
+        if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
+            if settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK:
+                live_export_fallback = fallback_live_data_export_route(user_message)
+                if live_export_fallback is not None:
+                    _dev_log(
+                        "router_fallback_live_export",
+                        decision=live_export_fallback.decision.value,
+                        steps_count=len(live_export_fallback.steps),
+                    )
+                    return {
+                        "router_output": live_export_fallback,
+                        "next_step": "tool",
+                    }
+            # If the message clearly asks for web search, don't lose the intent
+            if is_web_search_intent(user_message):
+                query = strip_web_search_prefix(user_message)
+                _dev_log("router_fallback_web_search", query=query[:120])
+                fallback = RouterOutput(
+                    decision=RouterDecision.WEB_SEARCH,
+                    steps=[ToolStep(tool="web_search", arguments={"query": query})],
+                    response_hint=_WEB_SEARCH_HINT,
+                    confidence=0.5,
+                )
+                return {
+                    "router_output": fallback,
+                    "next_step": "web_search",
+                }
         fallback = RouterOutput(decision=RouterDecision.CHAT, confidence=0.3)
         return {
             "router_output": fallback,
@@ -459,11 +632,26 @@ async def tool_execution_node(state: dict) -> dict:
                 for step in router_output.steps
             ]
 
+            history_messages = state.get("history_messages") or []
+            fallback_export_content = ""
+            for item in reversed(history_messages):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("role") or "").lower() != "assistant":
+                    continue
+                content = str(item.get("content") or "").strip()
+                if content:
+                    fallback_export_content = content
+                    break
+            if not fallback_export_content:
+                fallback_export_content = str(state.get("user_message") or "").strip()
+
             raw_results = await tool_orchestrator_service.execute_tool_chain(
                 db=db,
                 user=user,
                 steps=steps_dicts,
                 max_steps=settings.LANGGRAPH_MAX_ITERATIONS,
+                initial_context={"_fallback_export_content": fallback_export_content},
             )
             await db.commit()
     except Exception as exc:
@@ -493,7 +681,7 @@ async def tool_execution_node(state: dict) -> dict:
     ]
 
     # Extract artifacts (e.g. PDF base64)
-    artifacts = _extract_artifacts(raw_results)
+    artifacts = extract_artifacts(raw_results)
 
     _dev_log(
         "tool_exec_done",
@@ -688,16 +876,6 @@ async def compose_node(state: dict) -> dict:
             "iteration": iterations,
         }
 
-    deterministic = _format_deterministic_tool_answer(tool_results)
-    if deterministic:
-        return {
-            "final_answer": deterministic,
-            "is_complete": True,
-            "feedback_plan": "",
-            "iterations": iterations,
-            "iteration": iterations,
-        }
-
     doc_ask_result = next(
         (
             tr.result
@@ -775,7 +953,7 @@ async def compose_node(state: dict) -> dict:
         context_chunks.append(web_fetch_content[:12000])
     elif web_search_results:
         snippets = "\n".join(
-            f"- {_web_result_field(r, 'title')}: {_web_result_field(r, 'snippet')} ({_web_result_field(r, 'url')})"
+            f"- {web_result_field(r, 'title')}: {web_result_field(r, 'snippet')} ({web_result_field(r, 'url')})"
             for r in web_search_results[:5]
         )
         if snippets:
@@ -807,6 +985,14 @@ async def compose_node(state: dict) -> dict:
             "Если пользователь просил конкретные данные - выдели их."
         )
 
+    web_formatting_prompt = ""
+    if web_fetch_content or web_search_results:
+        web_formatting_prompt = (
+            "\n\nДОПОЛНИТЕЛЬНО ДЛЯ WEB-ОТВЕТОВ:\n"
+            "Не используй markdown-таблицы. Предпочитай обычный текст и короткие списки. "
+            "Ответ должен быть завершенным, без оборванных строк и незакрытого markdown."
+        )
+
     prompt = (
         "Ты — финальный проверяющий AI-агента. Твоя задача — проанализировать "
         "вопрос пользователя и собранные данные.\n\n"
@@ -823,7 +1009,7 @@ async def compose_node(state: dict) -> dict:
         "   - Не пиши финальный ответ пользователю.\n"
         "   - Напиши четкую инструкцию (feedback_plan), что нужно найти на следующем шаге.\n"
         "   - Установи is_complete: false.\n\n"
-        f"{integration_summary_prompt}\n\n"
+        f"{integration_summary_prompt}{web_formatting_prompt}\n\n"
         "Ответь СТРОГО валидным JSON:\n"
         '{"is_complete": true | false, "answer": "...", "feedback_plan": "..."}'
     )
@@ -843,14 +1029,30 @@ async def compose_node(state: dict) -> dict:
             max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
         )
     except Exception as exc:
-        logger.warning("Compose reflexion failed: %s", exc)
+        err_text = str(exc or "")
+        if "No valid JSON found in LLM response" in err_text:
+            logger.info("Compose reflexion used fallback synthesis (non-JSON output)")
+        else:
+            logger.warning("Compose reflexion failed: %s", exc)
+        recovered = extract_non_json_answer_from_exception(exc)
+        # Only use recovered text as final answer if it looks like a complete response
+        # (long enough to be useful) or there is no web context to synthesize from.
+        _has_web_context = bool(web_fetch_content or web_search_results)
+        if recovered and (len(recovered) >= 300 or not _has_web_context):
+            return {
+                "final_answer": _sanitize_llm_answer(recovered),
+                "is_complete": True,
+                "feedback_plan": "",
+                "iterations": iterations,
+                "iteration": iterations,
+            }
         # 1) If web context exists, run non-structured synthesis first.
-        # Structured parse errors often contain a truncated preview (~200 chars).
+        # Structured parse errors may contain a truncated text preview.
         if web_fetch_content or web_search_results:
             web_context = web_fetch_content.strip()
             if not web_context and web_search_results:
                 web_context = "\n".join(
-                    f"- {_web_result_field(r, 'title')}: {_web_result_field(r, 'snippet')} ({_web_result_field(r, 'url')})"
+                    f"- {web_result_field(r, 'title')}: {web_result_field(r, 'snippet')} ({web_result_field(r, 'url')})"
                     for r in web_search_results[:8]
                 )
             try:
@@ -860,7 +1062,8 @@ async def compose_node(state: dict) -> dict:
                             "role": "system",
                             "content": (
                                 "Сформируй короткий и точный ответ пользователю только по данным ниже. "
-                                "Если данных недостаточно, честно скажи, чего не хватает."
+                                "Если данных недостаточно, честно скажи, чего не хватает. "
+                                "Не используй markdown-таблицы."
                             ),
                         },
                         {
@@ -874,20 +1077,24 @@ async def compose_node(state: dict) -> dict:
                     temperature=0.0,
                     max_tokens=settings.OLLAMA_NUM_PREDICT,
                 )
-                fallback_answer = _sanitize_llm_answer(fallback_answer)
-            except Exception:
-                fallback_answer = existing_answer or _build_raw_web_summary(
+                fallback_answer = await _recover_truncated_web_answer(
+                    llm_provider=llm_provider,
+                    answer=fallback_answer,
+                    user_message=user_message,
                     web_fetch_content=web_fetch_content,
                     web_search_results=web_search_results,
                     tool_results=tool_results,
                 )
+            except Exception:
+                fallback_answer = existing_answer or build_raw_web_summary(
+                    web_fetch_content=web_fetch_content,
+                    web_search_results=web_search_results,
+                    tool_results=tool_results,
+                    sanitize_answer=_sanitize_llm_answer,
+                )
         # 2) Recover plain answer embedded in structured-parse error text.
         else:
-            recovered = _extract_non_json_answer_from_exception(exc)
-            if recovered:
-                fallback_answer = _sanitize_llm_answer(recovered)
-            else:
-                fallback_answer = existing_answer or _build_raw_tool_summary(tool_results)
+            fallback_answer = existing_answer or build_raw_tool_summary(tool_results)
         return {
             "final_answer": fallback_answer,
             "is_complete": True,
@@ -898,14 +1105,22 @@ async def compose_node(state: dict) -> dict:
 
     is_complete = bool(out.is_complete) or iterations >= max_iterations
     if is_complete:
-        answer = _sanitize_llm_answer(
-            out.answer
+        answer = await _recover_truncated_web_answer(
+            llm_provider=llm_provider,
+            answer=(
+                out.answer
             or existing_answer
-            or _build_raw_web_summary(
+            or build_raw_web_summary(
                 web_fetch_content=web_fetch_content,
                 web_search_results=web_search_results,
                 tool_results=tool_results,
+                sanitize_answer=_sanitize_llm_answer,
             )
+            ),
+            user_message=user_message,
+            web_fetch_content=web_fetch_content,
+            web_search_results=web_search_results,
+            tool_results=tool_results,
         )
         return {
             "final_answer": answer,
@@ -940,17 +1155,88 @@ async def output_node(state: dict) -> dict:
     final_answer = state.get("final_answer", "")
     user_message = state.get("user_message", "")
     user_id = state.get("user_id")
+    existing_calls = state.get("tool_calls_log") or []
+    existing_artifacts = state.get("artifacts") or []
 
-    # Output guardrail
-    if settings.GUARDRAILS_ENABLED:
-        from app.guardrails import prompt_shield
-        result = prompt_shield.check_output(final_answer)
-        if result.verdict == GuardrailVerdict.BLOCK:
-            final_answer = "Ответ заблокирован системой безопасности."
-        elif result.modified_text:
-            final_answer = result.modified_text
-    else:
-        result = GuardrailResult(verdict=GuardrailVerdict.PASS)
+    final_answer, result = apply_output_guardrail(final_answer)
+    web_fetch_content = state.get("web_fetch_content") or ""
+    web_search_results = state.get("web_search_results") or []
+    tool_results = state.get("tool_results") or []
+
+    export_kind = requested_export_kind(user_message)
+    should_reenqueue = bool(settings.OUTPUT_ENABLE_AUTO_EXPORT_REENQUEUE) and should_reenqueue_export(
+        export_kind=export_kind,
+        existing_calls=existing_calls,
+        existing_artifacts=existing_artifacts,
+    )
+
+    extra_calls = await enqueue_export_if_needed(
+        user_id=user_id,
+        final_answer=final_answer,
+        export_kind=export_kind,
+        should_reenqueue=should_reenqueue,
+    )
+
+    all_calls = [*existing_calls, *extra_calls]
+    all_artifacts = [*existing_artifacts, *extract_artifacts(extra_calls)]
+
+    final_answer, all_calls, all_artifacts = await apply_direct_route_fallback(
+        user_id=user_id,
+        user_message=user_message,
+        final_answer=final_answer,
+        all_calls=all_calls,
+        all_artifacts=all_artifacts,
+    )
+
+    final_answer, all_calls, all_artifacts = await apply_inline_cron_bridge(
+        user_id=user_id,
+        user_message=user_message,
+        final_answer=final_answer,
+        all_calls=all_calls,
+        all_artifacts=all_artifacts,
+    )
+
+    final_answer, all_calls, all_artifacts = await apply_inline_integration_bridge(
+        user_id=user_id,
+        user_message=user_message,
+        final_answer=final_answer,
+        all_calls=all_calls,
+        all_artifacts=all_artifacts,
+    )
+
+    if extra_calls and export_kind and has_successful_export_call(extra_calls, export_kind):
+        status_text = "PDF" if export_kind == "pdf" else "Excel"
+        final_answer = (
+            f"{final_answer}\n\n"
+            f"{status_text} поставлен в очередь и будет отправлен отдельным сообщением."
+        )
+
+    final_answer = sanitize_false_attachment_claims(
+        answer=final_answer,
+        tool_calls=all_calls,
+        artifacts=all_artifacts,
+    )
+
+    if web_fetch_content or web_search_results:
+        from app.llm import llm_provider
+
+        final_answer = await _recover_truncated_web_answer(
+            llm_provider=llm_provider,
+            answer=final_answer,
+            user_message=user_message,
+            web_fetch_content=web_fetch_content,
+            web_search_results=web_search_results,
+            tool_results=tool_results,
+        )
+
+    sanitized_final = _sanitize_llm_answer(final_answer)
+    if sanitized_final != final_answer:
+        _dev_log(
+            "output_final_answer_sanitized",
+            before_len=len(str(final_answer or "")),
+            after_len=len(str(sanitized_final or "")),
+        )
+    final_answer = sanitized_final
 
     # Append to STM + extract facts to LTM
     if user_id and final_answer:
@@ -959,482 +1245,21 @@ async def output_node(state: dict) -> dict:
         except Exception:
             logger.debug("STM append failed", exc_info=True)
 
-        # Background LTM fact extraction (fire-and-forget)
+        # Background LTM fact extraction — fire-and-forget so the user
+        # gets their answer immediately without waiting for the LLM fact pass.
         try:
-            await _extract_facts_to_ltm(user_id, user_message, final_answer)
+            asyncio.create_task(extract_facts_to_ltm(user_id, user_message, final_answer))
         except Exception:
-            logger.debug("LTM extraction in output_node failed", exc_info=True)
+            logger.debug("LTM extraction scheduling failed", exc_info=True)
 
     return {
         "final_answer": final_answer,
         "output_guardrail": result,
+        "tool_calls_log": all_calls,
+        "artifacts": all_artifacts,
     }
 
 
-# ======================================================================
-# Helper functions (shared across nodes)
-# ======================================================================
-
-
-import re
-
-
-async def _extract_facts_to_ltm(user_id, user_message: str, assistant_response: str) -> None:
-    """Background LTM fact extraction — runs after each response."""
-    try:
-        from app.db.session import AsyncSessionLocal
-        from app.services.memory_service import memory_service
-
-        async with AsyncSessionLocal() as db:
-            await asyncio.wait_for(
-                memory_service.extract_and_store_facts(
-                    db, user_id, user_message, assistant_response
-                ),
-                timeout=15,
-            )
-            await db.commit()
-    except Exception as exc:
-        logger.debug("LTM fact extraction failed: %s", exc)
-
-
-async def _load_user_tool_context(user_id) -> tuple[str, str]:
-    """Load user integrations and dynamic tools for router context.
-
-    Returns (integrations_block, dynamic_tools_block) as prompt fragments.
-    """
-    from app.db.session import AsyncSessionLocal
-    from app.models.api_integration import ApiIntegration
-    from app.services.dynamic_tool_service import dynamic_tool_service
-    from sqlalchemy import select
-
-    integrations_block = ""
-    dynamic_tools_block = ""
-
-    try:
-        async with AsyncSessionLocal() as db:
-            # Load user integrations
-            result = await db.execute(
-                select(ApiIntegration).where(
-                    ApiIntegration.user_id == user_id,
-                    ApiIntegration.is_active.is_(True),
-                )
-            )
-            integrations = result.scalars().all()
-            if integrations:
-                lines: list[str] = []
-                for integ in integrations:
-                    eps = []
-                    for ep in (integ.endpoints or []):
-                        if isinstance(ep, dict) and ep.get("url"):
-                            eps.append(str(ep["url"]))
-                    ep_info = f" (endpoints: {', '.join(eps[:3])})" if eps else ""
-                    lines.append(f"  - {integ.service_name}{ep_info}")
-                integrations_block = (
-                    "\nПодключённые интеграции пользователя "
-                    "(вызывай через integration_call с service_name):\n"
-                    + "\n".join(lines) + "\n"
-                )
-
-            # Load dynamic tools
-            try:
-                dynamic_sigs = await dynamic_tool_service.get_tools_for_planner(db, user_id)
-                if dynamic_sigs:
-                    dynamic_tools_block = (
-                        f"\nПользовательские API-инструменты (динамические): {dynamic_sigs}. "
-                        "Вызывай их точно по имени с префиксом dyn: (например dyn:weather_api).\n"
-                    )
-            except Exception as exc:
-                logger.debug("failed to load dynamic tools for planner: %s", exc)
-    except Exception as exc:
-        logger.debug("failed to load user tool context: %s", exc)
-
-    return integrations_block, dynamic_tools_block
-
-
-# Regex for deterministic web search detection — fast path, no LLM needed
-_WEB_SEARCH_RE = re.compile(
-    r"\b(?:"
-    r"найди\s+в\s+(?:интернет|сет[ий]|гугл|google)"
-    r"|поищи\s+в\s+(?:интернет|сет[ий]|гугл|google)"
-    r"|загугли|погугли"
-    r"|поищи\s+в\s+сети"
-    r"|найди\s+(?:мне\s+)?(?:в\s+)?(?:интернет|онлайн)"
-    r"|search\s+(?:the\s+)?(?:web|internet|online)"
-    r"|web\s*search"
-    r"|поиск\s+в\s+интернет"
-    r"|ищи\s+в\s+(?:интернет|сет[ий])"
-    r"|найди\s+(?:в\s+)?инете"
-    r"|поищи\s+(?:в\s+)?инете"
-    r"|найди\s+информацию"
-    r"|поищи\s+информацию"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def _is_web_search_intent(user_message: str) -> bool:
-    """Check if user message clearly asks for a web search."""
-    return bool(_WEB_SEARCH_RE.search(user_message or ""))
-
-
-_SMALL_TALK_RE = re.compile(
-    r"^(?:"
-    r"hi|hello|hey|thanks|thank you|bye"
-    r"|привет|здравствуй|здравствуйте|спасибо|пока|добрый\s+(?:день|вечер|утро)"
-    r")(?:[!,.\s].*)?$",
-    re.IGNORECASE,
-)
-
-
-def _looks_like_small_talk(text: str) -> bool:
-    """Cheap heuristic for greeting/closing gratitude-style messages."""
-    stripped = str(text or "").strip()
-    if not stripped:
-        return True
-    if len(stripped) <= 24 and _SMALL_TALK_RE.match(stripped):
-        return True
-    # Short courtesy phrases should skip heavy retrieval.
-    return stripped.lower() in {
-        "ok", "okay", "понял", "ясно", "принято", "супер", "отлично", "благодарю"
-    }
-
-
-def _feedback_requires_web_search(feedback_plan: str) -> bool:
-    text = str(feedback_plan or "").lower()
-    markers = (
-        "web_search",
-        "интернет",
-        "в сети",
-        "в интернете",
-        "найти",
-        "поиск",
-        "google",
-        "гугл",
-        "загугл",
-    )
-    return any(marker in text for marker in markers)
-
-
-def _feedback_to_search_query(feedback_plan: str, fallback_query: str) -> str:
-    plan = str(feedback_plan or "").strip()
-    if not plan:
-        return str(fallback_query or "").strip()
-
-    # If planner gave explicit instruction sentence, use it directly as search query.
-    normalized = re.sub(r"^[\-\d\)\.\s]+", "", plan)
-    return normalized[:500] if normalized else str(fallback_query or "").strip()
-
-
-def _deterministic_route(user_message: str) -> RouterOutput | None:
-    """Pattern-match deterministic tool routes without LLM."""
-    from app.services.chat_service import ChatService
-
-    steps = ChatService._deterministic_tool_steps(user_message)
-    if steps:
-        tool_steps = [
-            ToolStep(tool=s["tool"], arguments=s.get("arguments", {}))
-            for s in steps
-        ]
-        return RouterOutput(
-            decision=RouterDecision.TOOL,
-            steps=tool_steps,
-            confidence=0.95,
-        )
-
-    # Deterministic web search: catch obvious "search the web" patterns
-    if _is_web_search_intent(user_message):
-        # Extract search query by stripping the web-search prefix phrases
-        query = _WEB_SEARCH_RE.sub("", user_message).strip()
-        if not query:
-            query = user_message
-        _dev_log("deterministic_web_search", query=query[:120])
-        return RouterOutput(
-            decision=RouterDecision.WEB_SEARCH,
-            steps=[ToolStep(tool="web_search", arguments={"query": query})],
-            response_hint="Выполни поиск в интернете и представь результаты",
-            confidence=0.95,
-        )
-
-    return None
-
-
-def _build_enriched_system_prompt(
-    system_prompt: str,
-    stm: list[str],
-    ltm: list[str],
-    rag: list[str],
-    summary: str | None,
-) -> str:
-    """Enrich system prompt with memory context."""
-    parts = [system_prompt]
-
-    if summary:
-        parts.append(f"\n\n{summary}")
-    if ltm:
-        parts.append("\n\nДолгосрочная память:\n" + "\n".join(f"- {m}" for m in ltm))
-    if stm:
-        parts.append("\n\nКонтекст текущей сессии:\n" + "\n".join(f"- {s}" for s in stm))
-    if rag:
-        parts.append("\n\nРелевантные документы:\n" + "\n".join(f"- {r}" for r in rag))
-
-    return "\n".join(parts)
-
-
-def _sanitize_llm_answer(text: str) -> str:
-    """Remove dangerous patterns from LLM output."""
-    cleaned = str(text or "")
-    if not cleaned.strip():
-        return "Не удалось сформировать ответ. Попробуйте уточнить запрос."
-
-    original = cleaned
-    cleaned = re.sub(r"<function_calls>[\s\S]*?</function_calls>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"<invoke[\s\S]*?</invoke>", "", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.strip()
-    if cleaned:
-        return cleaned
-
-    # Aggressive strip removed all content — fallback: strip only the tags themselves
-    logger.debug("_sanitize_llm_answer: tag strip left empty, original %d chars", len(original))
-    fallback = re.sub(r"</?(?:function_calls|invoke)[^>]*>", "", original, flags=re.IGNORECASE).strip()
-    return fallback or "Не удалось сформировать ответ. Попробуйте уточнить запрос."
-
-
-_COMPLETENESS_RE = re.compile(r"COMPLETENESS:\s*(COMPLETE|INCOMPLETE)", re.IGNORECASE)
-
-
-def _extract_completeness(text: str) -> bool:
-    """Extract the COMPLETENESS marker from LLM response. Defaults to True."""
-    m = _COMPLETENESS_RE.search(text or "")
-    if m:
-        return m.group(1).upper() == "COMPLETE"
-    return True
-
-
-def _strip_completeness_marker(text: str) -> str:
-    """Remove the COMPLETENESS: ... marker line from LLM output."""
-    return _COMPLETENESS_RE.sub("", text or "").strip()
-
-
-def _extract_non_json_answer_from_exception(exc: Exception) -> str:
-    """Extract raw assistant text from structured parse exceptions when possible."""
-    text = str(exc or "")
-    marker = "No valid JSON found in LLM response:"
-    idx = text.find(marker)
-    if idx == -1:
-        return ""
-    candidate = text[idx + len(marker):].strip()
-
-    # Try extracting `answer` field from JSON-like text first.
-    match = re.search(r'"answer"\s*:\s*"([\s\S]*?)"\s*,\s*"feedback_plan"', candidate)
-    if match:
-        extracted = match.group(1)
-        try:
-            # Decode escaped sequences from JSON string body.
-            extracted = bytes(extracted, "utf-8").decode("unicode_escape")
-        except Exception:
-            pass
-        cleaned = extracted.replace('\\"', '"').strip()
-        if cleaned:
-            return cleaned[:12000]
-
-    return candidate[:4000]
-
-
-def _build_raw_web_summary(web_fetch_content: str, web_search_results: list[dict], tool_results: list[ToolResult]) -> str:
-    """Fallback answer when compose JSON mode fails but web/search context exists."""
-    if web_fetch_content and web_fetch_content.strip():
-        return _sanitize_llm_answer(web_fetch_content.strip()[:2500])
-    if web_search_results:
-        lines = ["Найдено в интернете:"]
-        for r in web_search_results[:5]:
-            title = _web_result_field(r, "title") or "Без названия"
-            snippet = _web_result_field(r, "snippet")
-            url = _web_result_field(r, "url")
-            lines.append(f"- {title}: {snippet} ({url})")
-        return "\n".join(lines)
-    return _build_raw_tool_summary(tool_results)
-
-
-def _web_result_field(item: Any, key: str) -> str:
-    """Safe field extraction from web result entries (dict/object/string)."""
-    if isinstance(item, dict):
-        return str(item.get(key) or "").strip()
-    value = getattr(item, key, "")
-    if value:
-        return str(value).strip()
-    if key == "title" and item is not None:
-        return str(item).strip()
-    return ""
-
-
-def _extract_artifacts(tool_calls: list[dict]) -> list[dict]:
-    """Extract artifacts (PDF base64, etc.) from tool results."""
-    artifacts = []
-    for call in tool_calls:
-        if not call.get("success"):
-            continue
-        result = call.get("result") if isinstance(call.get("result"), dict) else {}
-        if result.get("file_base64"):
-            artifacts.append({
-                "file_name": result.get("file_name", "artifact.bin"),
-                "mime_type": result.get("mime_type", "application/octet-stream"),
-                "file_base64": result["file_base64"],
-            })
-    return artifacts
-
-
-def _format_deterministic_tool_answer(tool_results: list[ToolResult]) -> str | None:
-    """Format known tool results without LLM."""
-    # Data-fetching tools should go through compose so LLM can summarize payloads.
-    _data_tools = {"integration_call", "dynamic_tool_call"}
-    tools_in_chain = {tr.tool for tr in tool_results if tr.success}
-    if tools_in_chain & _data_tools:
-        return None
-
-    for tr in tool_results:
-        if not tr.success or not tr.result:
-            continue
-        if tr.tool == "pdf_create":
-            fname = tr.result.get("file_name") or "document.pdf"
-            size = tr.result.get("size_bytes") or 0
-            size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-            return f"Документ {fname} в процессе создания{size_kb}."
-        if tr.tool == "excel_create":
-            fname = tr.result.get("file_name") or "document.xlsx"
-            size = tr.result.get("size_bytes") or 0
-            size_kb = f" ({size / 1024:.1f} KB)" if size else ""
-            return f"Документ {fname} в процессе создания{size_kb}."
-        if tr.tool == "cron_add":
-            payload = tr.result.get("payload", {})
-            if isinstance(payload, dict):
-                task = payload.get("message", "")
-                cron_expr = tr.result.get("cron_expression", "")
-                action = tr.result.get("action_type", "send_message")
-                if task:
-                    suffix = f" ({cron_expr})" if cron_expr else ""
-                    if action == "chat":
-                        return f"Задача запланирована: {task}{suffix}\nПо расписанию я выполню запрос и пришлю результат."
-                    return f"Напоминание создано: {task}{suffix}"
-        if tr.tool == "cron_list":
-            items = tr.result.get("items", [])
-            if isinstance(items, list):
-                if not items:
-                    return "У вас пока нет активных напоминаний."
-                lines = ["Ваши напоминания:"]
-                for item in items[:20]:
-                    if isinstance(item, dict):
-                        name = item.get("name", "")
-                        cron = item.get("cron_expression", "")
-                        lines.append(f"- {name} ({cron})")
-                return "\n".join(lines)
-        if tr.tool == "cron_delete_all":
-            return "Все напоминания удалены."
-        if tr.tool == "memory_delete_all":
-            return "Память очищена."
-        if tr.tool == "doc_list":
-            items = tr.result.get("items", [])
-            if isinstance(items, list):
-                if not items:
-                    return "У вас нет загруженных документов."
-                lines = ["Ваши документы:"]
-                for item in items[:20]:
-                    if isinstance(item, dict):
-                        name = item.get("source_doc") or item.get("name") or "?"
-                        chunks = item.get("chunk_count", "")
-                        suffix = f" ({chunks} частей)" if chunks else ""
-                        lines.append(f"- {name}{suffix}")
-                return "\n".join(lines)
-        if tr.tool == "doc_delete":
-            source = tr.result.get("source_doc", "")
-            deleted_chunks = tr.result.get("deleted_chunks", 0)
-            if not tr.result.get("deleted"):
-                return f"Документ {source} не найден." if source else "Документ не найден."
-            return f"Документ {source} удалён ({deleted_chunks} частей)."
-        if tr.tool == "doc_delete_all":
-            deleted = tr.result.get("deleted_count", 0)
-            if deleted <= 0:
-                return "У вас не было загруженных документов."
-            return f"Все документы удалены ({deleted} частей)."
-        # Dynamic Tool Injection responses
-        if tr.tool == "dynamic_tool_register":
-            msg = tr.result.get("message", "")
-            if msg:
-                return msg
-        # Register API Tool (with Milvus)
-        if tr.tool == "register_api_tool":
-            msg = tr.result.get("message", "")
-            if msg:
-                return msg
-            status = tr.result.get("status", "")
-            tool_info = tr.result.get("tool", {})
-            name = tool_info.get("name", "unknown") if isinstance(tool_info, dict) else "unknown"
-            return f"Инструмент {name} {'обновлён' if status == 'updated' else 'зарегистрирован'}."
-        if tr.tool == "dynamic_tool_list":
-            items = tr.result.get("items", [])
-            if isinstance(items, list):
-                if not items:
-                    return "У вас пока нет зарегистрированных пользовательских API."
-                lines = ["Ваши пользовательские API-инструменты:"]
-                for item in items[:20]:
-                    if isinstance(item, dict):
-                        name = item.get("name", "")
-                        desc = item.get("description", "")
-                        endpoint = item.get("endpoint", "")
-                        lines.append(f"- **{name}**: {desc} ({endpoint})")
-                return "\n".join(lines)
-        if tr.tool == "dynamic_tool_delete":
-            return "Пользовательский API-инструмент удалён."
-        if tr.tool == "dynamic_tool_delete_all":
-            count = tr.result.get("deleted_count", 0)
-            return f"Все пользовательские API-инструменты удалены ({count})."
-        if tr.tool == "dynamic_tool_call" or str(tr.tool).startswith("dyn:") or str(tr.tool).startswith("dyn_"):
-            # Let compose_node handle rich formatting via LLM
-            pass
-        if tr.tool == "memory_list":
-            items = tr.result.get("items", [])
-            if isinstance(items, list):
-                if not items:
-                    return "Память пуста."
-                lines = ["Ваша память:"]
-                for item in items[:20]:
-                    if isinstance(item, dict):
-                        content = item.get("content", "")
-                        lines.append(f"- {content}")
-                return "\n".join(lines)
-    return None
-
-
-def _build_raw_tool_summary(tool_results: list[ToolResult]) -> str:
-    """Last-resort summary from raw tool output."""
-    parts: list[str] = []
-    for tr in tool_results:
-        if not tr.success or not tr.result:
-            continue
-
-        if tr.tool == "integration_call":
-            status_code = int(tr.result.get("status_code") or 0)
-            body = str(tr.result.get("body") or "").strip()
-            if body:
-                parts.append(
-                    f"Интеграция вернула данные (HTTP {status_code}), "
-                    "но авто-форматирование ответа не удалось. "
-                    "Попробуйте уточнить запрос (например: 'покажи только USD')."
-                )
-                continue
-
-        msg = tr.result.get("message", "")
-        if msg:
-            parts.append(str(msg)[:8000])
-        elif tr.result:
-            # Strip headers from HTTP responses to save space for body
-            dump_data = tr.result
-            if "body" in tr.result and "headers" in tr.result:
-                dump_data = {k: v for k, v in tr.result.items() if k != "headers"}
-            parts.append(json.dumps(dump_data, ensure_ascii=False, default=str)[:8000])
-
-    if not parts:
-        return "Не удалось получить данные. Повторите запрос позже."
-    return "Результат:\n\n" + "\n\n".join(parts)
 
 
 

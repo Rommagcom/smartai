@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     OLLAMA_RETRY_ATTEMPTS: int = 3
     OLLAMA_RETRY_BASE_DELAY_SECONDS: float = 0.2
     OLLAMA_MAX_CONCURRENCY: int = 8
-    OLLAMA_NUM_PREDICT: int = 2048
+    OLLAMA_NUM_PREDICT: int = 4096
     OLLAMA_NUM_PREDICT_PLANNER: int = 512
     OLLAMA_KEEP_ALIVE: str = "10m"
     OLLAMA_MODEL_FALLBACK_ENABLED: bool = False
@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     SCHEDULER_ENABLED: bool = True
     SCHEDULER_JOB_MISFIRE_GRACE_SECONDS: int = 300
     SCHEDULER_ONCE_MAX_LAG_SECONDS: int = 300
+    SCHEDULER_INACTIVITY_REMINDER_ENABLED: bool = True
+    SCHEDULER_INACTIVITY_REMINDER_AFTER_HOURS: int = 72
+    SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS: int = 24
+    SCHEDULER_INACTIVITY_REMINDER_BATCH_LIMIT: int = 200
+    SCHEDULER_INACTIVITY_REMINDER_LLM_ENABLED: bool = True
+    SCHEDULER_INACTIVITY_REMINDER_MIN_HOURS: int = 6
+    SCHEDULER_INACTIVITY_REMINDER_MAX_HOURS: int = 168
+    SCHEDULER_INACTIVITY_REMINDER_MESSAGE: str = "Давно не виделись. Если хотите, помогу с задачами на сегодня."
 
     WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
     WS_FANOUT_REDIS_ENABLED: bool = True
@@ -89,6 +97,23 @@ class Settings(BaseSettings):
     RAG_DOC_LARGE_CHUNK_OVERLAP: int = 500
 
     TELEGRAM_BACKEND_BRIDGE_SECRET: str = "change-me-telegram-bridge-secret"
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_VERIFY_TOKEN: str = ""
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_APP_SECRET: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    WHATSAPP_API_VERSION: str = "v21.0"
+    WHATSAPP_ALLOWED_PHONE_NUMBERS: str = ""
+    WHATSAPP_BACKEND_BRIDGE_SECRET: str = "change-me-whatsapp-bridge-secret"
+    WHATSAPP_DEFAULT_TIMEOUT_SECONDS: int = 60
+    WHATSAPP_CHAT_TIMEOUT_SECONDS: int = 300
+    TEAMS_ENABLED: bool = False
+    TEAMS_AUTH_MODE: str = "header-secret"
+    TEAMS_WEBHOOK_SECRET: str = ""
+    TEAMS_ALLOWED_USER_IDS: str = ""
+    TEAMS_BACKEND_BRIDGE_SECRET: str = "change-me-teams-bridge-secret"
+    TEAMS_DEFAULT_TIMEOUT_SECONDS: int = 60
+    TEAMS_CHAT_TIMEOUT_SECONDS: int = 300
 
     AUTH_DATA_ENCRYPTION_KEYS: str = ""
     AUTH_DATA_ACTIVE_KEY_ID: str = ""
@@ -109,6 +134,20 @@ class Settings(BaseSettings):
     SANDBOX_EGRESS_ALLOWED_HOSTS: str = ""
     SANDBOX_EGRESS_DENIED_HOSTS: str = "localhost,127.0.0.1,::1"
     SANDBOX_EGRESS_ALLOWED_PORTS: str = "80,443"
+    DYNAMIC_SKILL_EXECUTION_MODE: str = "runner" # options: local, runner (in docker)
+    DYNAMIC_SKILL_RUNNER_URL: str = "http://skill-runner:8081"
+    DYNAMIC_SKILL_RUNNER_SECRET: str = "change-me-skill-runner-secret"
+    DYNAMIC_SKILL_RUNNER_TIMEOUT_SECONDS: int = 45
+    DYNAMIC_SKILL_SANDBOX_IMAGE: str = "smartai-skill-runner:latest"
+    DYNAMIC_SKILL_SANDBOX_TIMEOUT_SECONDS: int = 30
+    DYNAMIC_SKILL_SANDBOX_NETWORK: str = "smartai-sandbox-net"
+    DYNAMIC_SKILL_LLM_CALLBACK_ENABLED: bool = True
+    DYNAMIC_SKILL_HTTP_CALLBACK_ENABLED: bool = True
+    DYNAMIC_SKILL_HTTP_TIMEOUT_SECONDS: int = 30
+
+    DYNAMIC_SKILL_IMPORT_POLICY: str = "all"
+    DYNAMIC_SKILL_ALLOWED_IMPORTS: str = ""
+    DYNAMIC_SKILL_BLOCKED_IMPORTS: str = ""
 
     MEMORY_DEFAULT_TTL_DAYS: int = 0
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45
@@ -125,8 +164,9 @@ class Settings(BaseSettings):
     LITELLM_TIMEOUT_SECONDS: int = 120
     LITELLM_OPENAI_API_KEY: str = ""
     LITELLM_ANTHROPIC_API_KEY: str = ""
-    LITELLM_TEMPERATURE: float = 0.7
+    LITELLM_TEMPERATURE: float = 0.4
     LITELLM_PLANNER_TEMPERATURE: float = 0.0
+    LITELLM_STRUCTURED_PARSE_LOG_LEVEL: str = "INFO"
 
     # --- Guardrails ---
     GUARDRAILS_ENABLED: bool = True
@@ -134,8 +174,16 @@ class Settings(BaseSettings):
     GUARDRAILS_BLOCK_PROMPT_INJECTION: bool = True
 
     # --- LangGraph ---
-    LANGGRAPH_MAX_ITERATIONS: int = 3
+    LANGGRAPH_MAX_ITERATIONS: int = 5
     LANGGRAPH_TOOL_TIMEOUT_SECONDS: int = 90
+    ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS: bool = False
+    ROUTER_ENABLE_DETERMINISTIC_FALLBACKS: bool = False
+    ROUTER_ENABLE_LLM_PARSE_SALVAGE: bool = True
+    ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT: bool = False
+    ROUTER_ENABLE_EXPORT_FOLLOWUP_SHORTCUT: bool = False
+    ROUTER_ENABLE_LIVE_EXPORT_FALLBACK: bool = False
+    OUTPUT_ENABLE_AUTO_EXPORT_REENQUEUE: bool = False
+    CHAT_ENABLE_DETERMINISTIC_FAST_TOOLS: bool = False
 
     # --- Tool Vector Registry (Milvus semantic tool search) ---
     TOOL_RETRIEVER_TOP_K: int = 5

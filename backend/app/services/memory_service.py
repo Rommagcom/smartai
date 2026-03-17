@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
@@ -18,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryService:
+    _MEMORY_CONTEXT_FACT_TYPES = {"preference", "goal", "constraint", "identity"}
+
+    @staticmethod
+    def _is_expected_llm_call_shutdown_error(exc: Exception) -> bool:
+        if isinstance(exc, asyncio.CancelledError):
+            return True
+        text = str(exc or "").strip().lower()
+        return "event loop is closed" in text
+
+    @staticmethod
+    def _ensure_aware_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     @staticmethod
     def _zero_embedding() -> list[float]:
         dim = max(1, int(settings.EMBEDDING_DIM))
@@ -50,14 +66,16 @@ class MemoryService:
 
     @staticmethod
     def _effective_importance(memory: LongTermMemory, now: datetime) -> float:
+        now_aware = MemoryService._ensure_aware_utc(now)
         base = float(memory.importance_score or 0.0)
         if memory.is_pinned or memory.is_locked:
             return base
 
         half_life_days = max(1, int(settings.MEMORY_DECAY_HALF_LIFE_DAYS))
         min_factor = max(0.0, min(1.0, float(settings.MEMORY_DECAY_MIN_FACTOR)))
-        decay_anchor = memory.last_decay_at or memory.created_at or now
-        age_days = max(0.0, (now - decay_anchor).total_seconds() / 86400.0)
+        decay_anchor = memory.last_decay_at or memory.created_at or now_aware
+        decay_anchor_aware = MemoryService._ensure_aware_utc(decay_anchor)
+        age_days = max(0.0, (now_aware - decay_anchor_aware).total_seconds() / 86400.0)
         if age_days <= 0:
             return base
 
@@ -229,13 +247,28 @@ class MemoryService:
         await db.flush()
         return memory
 
-    async def retrieve_relevant_memories(self, db: AsyncSession, user_id: UUID, query: str, top_k: int = 5) -> list[LongTermMemory]:
+    async def retrieve_relevant_memories(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        query: str,
+        top_k: int = 5,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> list[LongTermMemory]:
+        """Vector-similarity search over long-term memories.
+
+        ``query_embedding`` can be supplied by the caller to avoid a redundant
+        Ollama round-trip when the embedding was already computed for the same
+        query elsewhere in the request pipeline (e.g. ``retrieve_chat_context_memories``).
+        """
         now = datetime.now(timezone.utc)
-        try:
-            query_embedding = await ollama_client.embeddings(query)
-        except Exception:
-            logger.warning("query embedding generation failed, falling back to importance sort", exc_info=True)
-            query_embedding = self._zero_embedding()
+        if query_embedding is None:
+            try:
+                query_embedding = await ollama_client.embeddings(query)
+            except Exception:
+                logger.warning("query embedding generation failed, falling back to importance sort", exc_info=True)
+                query_embedding = self._zero_embedding()
 
         if self._is_zero_vector(query_embedding):
             result = await db.execute(
@@ -267,6 +300,127 @@ class MemoryService:
             rows = result.scalars().all()
         rows.sort(key=lambda row: self._effective_importance(row, now), reverse=True)
         return rows[: max(1, top_k)]
+
+    @staticmethod
+    def _query_keywords(query: str, *, max_items: int = 10) -> list[str]:
+        tokens = re.findall(r"[\wа-яёА-ЯЁ]{3,}", str(query or "").lower())
+        seen: set[str] = set()
+        out: list[str] = []
+        for token in tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+            if len(out) >= max_items:
+                break
+        return out
+
+    @staticmethod
+    def _keyword_overlap_score(content: str, keywords: list[str]) -> float:
+        if not keywords:
+            return 0.0
+        lowered = str(content or "").lower()
+        hits = sum(1 for token in keywords if token in lowered)
+        if hits <= 0:
+            return 0.0
+        return min(1.0, hits / max(1, len(keywords)))
+
+    async def retrieve_chat_context_memories(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        query: str,
+        top_k: int = 5,
+        *,
+        query_embedding: list[float] | None = None,
+    ) -> list[LongTermMemory]:
+        """Retrieve memories optimized for conversational context.
+
+        Combines semantic relevance, pinned/locked facts, key fact types and
+        lightweight lexical matching so high-value user facts are less likely to
+        be missed in regular chat.
+
+        ``query_embedding`` can be passed from the caller to avoid a second
+        Ollama embedding call when the vector was already computed elsewhere.
+        """
+        from app.db.session import AsyncSessionLocal
+
+        limit = max(1, min(top_k, 20))
+        now = datetime.now(timezone.utc)
+        candidates: dict[UUID, LongTermMemory] = {}
+
+        # Run embedding generation and the prioritized (no-vector) DB query in parallel:
+        # - embedding is needed only for the semantic search path
+        # - prioritized query (pinned/locked/fact_type) has no dependency on the embedding
+        async def _get_embedding() -> list[float]:
+            if query_embedding is not None:
+                return query_embedding
+            try:
+                return await ollama_client.embeddings(query)
+            except Exception:
+                logger.warning("query embedding generation failed", exc_info=True)
+                return self._zero_embedding()
+
+        async def _get_prioritized() -> list[LongTermMemory]:
+            async with AsyncSessionLocal() as prio_db:
+                prio_result = await prio_db.execute(
+                    select(LongTermMemory)
+                    .where(
+                        LongTermMemory.user_id == user_id,
+                        self._active_filter(now),
+                        or_(
+                            LongTermMemory.is_pinned.is_(True),
+                            LongTermMemory.is_locked.is_(True),
+                            LongTermMemory.fact_type.in_(tuple(self._MEMORY_CONTEXT_FACT_TYPES)),
+                        ),
+                    )
+                    .order_by(
+                        LongTermMemory.is_pinned.desc(),
+                        LongTermMemory.is_locked.desc(),
+                        LongTermMemory.importance_score.desc(),
+                        LongTermMemory.created_at.desc(),
+                    )
+                    .limit(max(limit * 4, 24))
+                )
+                return list(prio_result.scalars().all())
+
+        embedding_result, prioritized_rows = await asyncio.gather(
+            _get_embedding(),
+            _get_prioritized(),
+        )
+
+        # 1) Semantic candidates from vector retrieval (uses pre-computed embedding).
+        semantic_rows = await self.retrieve_relevant_memories(
+            db=db, user_id=user_id, query=query,
+            top_k=max(limit * 2, 8), query_embedding=embedding_result,
+        )
+        for row in semantic_rows:
+            candidates[row.id] = row
+
+        # 2) Always consider pinned/locked and high-value fact types.
+        for row in prioritized_rows:
+            candidates[row.id] = row
+
+        rows = list(candidates.values())
+        if not rows:
+            return []
+
+        keywords = self._query_keywords(query)
+
+        def _score(memory: LongTermMemory) -> float:
+            score = float(self._effective_importance(memory, now))
+            if memory.is_pinned or memory.is_locked:
+                score += 0.35
+            if str(memory.fact_type or "").lower() in self._MEMORY_CONTEXT_FACT_TYPES:
+                score += 0.20
+            score += 0.30 * self._keyword_overlap_score(memory.content, keywords)
+            created_at = self._ensure_aware_utc(memory.created_at or now)
+            if (self._ensure_aware_utc(now) - created_at).total_seconds() <= 30 * 86400:
+                score += 0.05
+            return score
+
+        rows.sort(key=_score, reverse=True)
+        return rows[:limit]
 
     async def list_memories(self, db: AsyncSession, user_id: UUID, limit: int = 200) -> list[LongTermMemory]:
         now = datetime.now(timezone.utc)
@@ -435,8 +589,11 @@ class MemoryService:
                 ],
                 stream=False,
             )
-        except Exception:
-            logger.warning("LLM fact extraction call failed", exc_info=True)
+        except Exception as exc:
+            if self._is_expected_llm_call_shutdown_error(exc):
+                logger.info("LLM fact extraction skipped during shutdown/cancellation")
+            else:
+                logger.warning("LLM fact extraction call failed", exc_info=True)
             return
 
         if not response or not response.strip():

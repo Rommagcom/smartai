@@ -2,6 +2,39 @@
 
 Детальное описание архитектуры, потоков данных и маршрутизации.
 
+## Как читать этот файл
+
+- Если вы новый в проекте: начните с разделов
+    - `Граф обработки сообщений (LangGraph)`
+    - `Жизненный цикл запроса`
+- Если дебажите инструмент/интеграцию: переходите в
+    - `Маршрутизация инструментов`
+    - `Dynamic Tool Injection`
+- Если дебажите контекст/память: переходите в
+    - `Система памяти`
+
+## Быстрая карта для разработки
+
+Куда смотреть в коде для типовых задач:
+
+| Задача | Главный файл | Что проверять первым |
+|--------|--------------|----------------------|
+| API не отвечает как ожидается | `app/api/v1/endpoints/chat.py` | входной payload, user/session, финальный response |
+| Неверный route `tool/chat` | `app/graph/nodes.py` | `router_node`, `tool_execution_node`, `compose_node` |
+| Tool не вызвался/упал | `app/services/tool_orchestrator_service.py` | planner steps, args validation, handler dispatch |
+| Dynamic Skill не работает | `app/services/dynamic_tool_service.py` | регистрация пакета, `call_dynamic_tool`, sandbox/fallback |
+| Проблемы с памятью | `app/memory/__init__.py`, `app/services/memory_service.py` | gather_context, LTM retrieval, ranking |
+| Интеграция не дергается | `app/services/integration_onboarding_service.py`, `app/services/api_executor.py` | auth_data, endpoint resolve, egress policy |
+| Фоновые задачи не доезжают | `app/workers/worker_service.py`, `app/services/scheduler_service.py` | enqueue, retries, scheduler sync |
+
+## Быстрый путь запроса (сверху вниз)
+
+1. `POST /api/v1/chat` в `app/api/v1/endpoints/chat.py`
+2. `chat_service.graph_respond(...)`
+3. LangGraph в `app/graph/__init__.py` и узлы в `app/graph/nodes.py`
+4. Tool execution через `app/services/tool_orchestrator_service.py`
+5. Ответ и артефакты обратно в endpoint
+
 ## Оглавление
 - [Логическая структура проекта](#логическая-структура-проекта)
 - [Стек технологий](#стек-технологий)
@@ -307,7 +340,7 @@ flowchart TD
     PLAN -.->|"source of truth"| S1
 ```
 
-### Зарегистрированные навыки (27)
+### Каталог инструментов
 
 | Категория | Навыки |
 |-----------|--------|
@@ -319,7 +352,7 @@ flowchart TD
 | **Worker** | `worker_enqueue` |
 | **Интеграции** | `integration_add`, `integrations_list`, `integrations_delete_all`, `integration_call`, `integration_health` |
 | **Onboarding** | `integration_onboarding_connect`, `integration_onboarding_test`, `integration_onboarding_save` |
-| **Dynamic Tools** | `dynamic_tool_register`, `dynamic_tool_call`, `dynamic_tool_list`, `dynamic_tool_delete`, `dynamic_tool_delete_all` |
+| **API Tools** | `register_api_tool`, `dynamic_tool_call`, `dynamic_tool_list`, `dynamic_tool_delete`, `dynamic_tool_delete_all` |
 
 ---
 
@@ -340,7 +373,7 @@ sequenceDiagram
     Note over User,HTTP: Фаза 1: Регистрация
 
     User ->> Chat: "Подключи API курса валют НБ РК:<br/>https://nationalbank.kz/rss/get_rates.cfm"
-    Chat ->> Router: router_node → tool: dynamic_tool_register
+    Chat ->> Router: router_node → tool: register_api_tool
     Router ->> DynSvc: register_from_user_message()
     DynSvc ->> LLM: chat_structured(ApiRegistrationPayload)
     LLM -->> DynSvc: {name, url, method, headers, params, description}

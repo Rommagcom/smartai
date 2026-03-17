@@ -131,6 +131,16 @@ class ScheduleParserService:
         text = self._normalize(schedule_text)
         tz = self._resolve_timezone(timezone_name)
         now = datetime.now(tz)
+
+        relative = self._extract_relative_offset(text, now)
+        if relative is not None:
+            run_utc = relative.astimezone(ZoneInfo("UTC"))
+            return ScheduleParseResult(
+                cron_expression=f"@once:{run_utc.isoformat()}",
+                is_one_time=True,
+                run_at_iso=run_utc.isoformat(),
+            )
+
         hour, minute = self._parse_time(text)
 
         recurring_dow = self._recurring_weekday(text)
@@ -382,10 +392,6 @@ class ScheduleParserService:
         return day, month_expr
 
     def _absolute_or_relative_datetime(self, text: str, now: datetime, hour: int, minute: int) -> datetime | None:
-        relative = self._extract_relative_offset(text, now)
-        if relative is not None:
-            return relative
-
         if "сегодня" in text or "today" in text:
             dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             return dt if dt > now else dt + timedelta(days=1)

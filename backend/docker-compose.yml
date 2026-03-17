@@ -1,4 +1,20 @@
 services:
+  skill-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.skill-runner
+    image: smartai-skill-runner:latest
+    container_name: assistant-skill-runner
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      default:
+      sandbox_net:
+        aliases:
+          - skill-runner
+
   api:
     build: .
     container_name: assistant-api
@@ -7,6 +23,7 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      - skill-runner
       - postgres
       - milvus-standalone
       - ollama
@@ -36,6 +53,7 @@ services:
         "120",
       ]
     depends_on:
+      - skill-runner
       - postgres
       - milvus-standalone
       - ollama
@@ -52,6 +70,7 @@ services:
       - .env
     command: ["python", "-m", "app.workers.run"]
     depends_on:
+      - skill-runner
       - postgres
       - redis
       - milvus-standalone
@@ -153,3 +172,8 @@ volumes:
   postgres_data:
   milvus_data:
   ollama_models:
+
+networks:
+  sandbox_net:
+    name: smartai-sandbox-net
+    internal: true

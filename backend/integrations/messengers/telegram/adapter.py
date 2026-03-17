@@ -45,13 +45,11 @@ SUCCESS_REPLY = "Готово ✅"
 DEFAULT_ARTIFACT_FILENAME = "artifact.bin"
 
 (
-    SOUL_NAME,
-    SOUL_EMOJI,
-    SOUL_STYLE,
-    SOUL_TONE,
-    SOUL_TASK,
     SOUL_DESC,
-) = range(6)
+    SOUL_TASK,
+    SOUL_EMOJI,
+    SOUL_TONE,
+) = range(4)
 
 
 def _safe_json(payload: Any, max_len: int = 3500) -> str:
@@ -64,6 +62,40 @@ def _split_pipe(text: str, expected_min: int) -> list[str]:
     if len(parts) < expected_min:
         raise ValueError("Недостаточно аргументов")
     return parts
+
+
+def _normalize_task_mode(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    mapping = {
+        "1": "business-analysis",
+        "бизнес": "business-analysis",
+        "business": "business-analysis",
+        "business-analysis": "business-analysis",
+        "2": "coding",
+        "разработка": "coding",
+        "dev": "coding",
+        "coding": "coding",
+        "3": "other",
+        "личное": "other",
+        "personal": "other",
+        "other": "other",
+    }
+    return mapping.get(value, "other")
+
+
+def _normalize_emoji(raw: str) -> str:
+    value = str(raw or "").strip()
+    mapping = {
+        "1": "🧠",
+        "2": "💼",
+        "3": "💻",
+        "4": "✨",
+    }
+    if value in mapping:
+        return mapping[value]
+    if value:
+        return value[:2]
+    return "🧠"
 
 
 class TelegramAdapter(MessengerAdapter):
@@ -142,22 +174,33 @@ class TelegramAdapter(MessengerAdapter):
         application.add_handler(CommandHandler("doc_ask", self.doc_ask))
         application.add_handler(CommandHandler("doc_delete", self.doc_delete))
         application.add_handler(CommandHandler("doc_delete_all", self.doc_delete_all))
+        application.add_handler(CommandHandler("skill_list", self.skill_list))
+        application.add_handler(CommandHandler("skill_delete", self.skill_delete))
+        application.add_handler(CommandHandler("skill_delete_all", self.skill_delete_all))
+        application.add_handler(CommandHandler("api_tool_register", self.api_tool_register))
+        application.add_handler(CommandHandler("api_tool_list", self.api_tool_list))
+        application.add_handler(CommandHandler("api_tool_delete", self.api_tool_delete))
+        application.add_handler(CommandHandler("api_tool_delete_all", self.api_tool_delete_all))
         application.add_handler(CommandHandler("cron_add", self.cron_add))
         application.add_handler(CommandHandler("cron_list", self.cron_list))
         application.add_handler(CommandHandler("cron_del", self.cron_del))
         application.add_handler(CommandHandler("integrations_add", self.integrations_add))
         application.add_handler(CommandHandler("integrations_list", self.integrations_list))
+        application.add_handler(CommandHandler("integrations_connect", self.integrations_connect))
+        application.add_handler(CommandHandler("integrations_test", self.integrations_test))
+        application.add_handler(CommandHandler("integrations_save", self.integrations_save))
+        application.add_handler(CommandHandler("integrations_status", self.integrations_status))
+        application.add_handler(CommandHandler("integration_health", self.integration_health))
+        application.add_handler(CommandHandler("integrations_delete_all", self.integrations_delete_all))
         application.add_handler(CommandHandler("integration_call", self.integration_call))
 
         soul_conv = ConversationHandler(
             entry_points=[CommandHandler("soul_setup", self.soul_setup_begin)],
             states={
-                SOUL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_name)],
-                SOUL_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_emoji)],
-                SOUL_STYLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_style)],
-                SOUL_TONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_tone)],
-                SOUL_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_task)],
                 SOUL_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_desc)],
+                SOUL_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_task)],
+                SOUL_EMOJI: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_emoji)],
+                SOUL_TONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.soul_setup_tone)],
             },
             fallbacks=[CommandHandler("cancel", self.soul_setup_cancel)],
         )
@@ -303,7 +346,7 @@ class TelegramAdapter(MessengerAdapter):
                         text="Нужна первичная SOUL-настройка. Используй /start и пройди onboarding.",
                     )
                     if context and context.user_data is not None:
-                        context.user_data.setdefault("soul_setup_auto", {"step": "name", "data": {}})
+                        context.user_data.setdefault("soul_setup_auto", {"step": "desc", "data": {}})
                     return
 
                 session_id = self._direct_session_ids.get(telegram_user_id)
@@ -669,7 +712,8 @@ class TelegramAdapter(MessengerAdapter):
             # Always send the text notification (unless the file was sent and
             # the text would just be a generic "task done" message).
             if not file_sent:
-                await application.bot.send_message(
+                await self._send_long_text(
+                    bot=application.bot,
                     chat_id=chat_id,
                     text=self._format_worker_item(item),
                 )
@@ -681,6 +725,31 @@ class TelegramAdapter(MessengerAdapter):
             latency_ms=(perf_counter() - started_at) * 1000,
         )
         return True
+
+    @staticmethod
+    async def _send_long_text(bot: Bot, chat_id: int, text: str, chunk_size: int = 3500) -> None:
+        """Send long text safely to Telegram by splitting into message-sized chunks."""
+        clean = str(text or "").strip()
+        if not clean:
+            return
+
+        remaining = clean
+        while remaining:
+            if len(remaining) <= chunk_size:
+                await bot.send_message(chat_id=chat_id, text=remaining)
+                return
+
+            split_at = remaining.rfind("\n\n", 0, chunk_size)
+            if split_at < 0:
+                split_at = remaining.rfind("\n", 0, chunk_size)
+            if split_at < 0:
+                split_at = chunk_size
+
+            part = remaining[:split_at].strip()
+            if part:
+                await bot.send_message(chat_id=chat_id, text=part)
+
+            remaining = remaining[split_at:].lstrip()
 
     @staticmethod
     async def _try_send_worker_artifact(
@@ -740,6 +809,10 @@ class TelegramAdapter(MessengerAdapter):
         # For cron_reminder / cron_chat: display the human message directly.
         if job_type in {"cron_reminder", "cron_chat"} and human_message:
             return human_message
+
+        # For background export jobs keep the user-facing message minimal.
+        if job_type in {"pdf_create", "excel_create"}:
+            return "Задача поставлена в очередь."
 
         preview = item.get("result_preview")
         if preview is None:
@@ -838,10 +911,10 @@ class TelegramAdapter(MessengerAdapter):
         return text if len(text) <= 400 else f"{text[:400]}…"
 
     async def _begin_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        context.user_data["soul_setup_auto"] = {"step": "name", "data": {}}
+        context.user_data["soul_setup_auto"] = {"step": "desc", "data": {}}
         await update.effective_message.reply_text(
             "Нужна первичная SOUL-настройка. Запускаю setup автоматически.\n"
-            "Шаг 1/6: выберите имя ассистента (например: Smart Ai)"
+            "Шаг 1/4: кто вы и чем обычно занимаетесь?"
         )
 
     async def _handle_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -861,48 +934,49 @@ class TelegramAdapter(MessengerAdapter):
         step = str(state.get("step") or "")
         data = state.get("data") if isinstance(state.get("data"), dict) else {}
 
-        if step == "name":
-            data["assistant_name"] = text
+        if step == "desc":
+            data["user_description"] = text
+            data.setdefault("assistant_name", "SmartAi")
+            data.setdefault("style", "friendly")
+            state["step"] = "task"
+            state["data"] = data
+            context.user_data["soul_setup_auto"] = state
+            await message.reply_text(
+                "Шаг 2/4: выберите режим ассистента:\n"
+                "1) Бизнес\n"
+                "2) Разработка\n"
+                "3) Личное"
+            )
+            return True
+
+        if step == "task":
+            data["task_mode"] = _normalize_task_mode(text)
             state["step"] = "emoji"
             state["data"] = data
             context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 2/6: эмодзи ассистента? (например: 🧠)")
+            await message.reply_text(
+                "Шаг 3/4: выберите эмодзи ассистента:\n"
+                "1) 🧠\n"
+                "2) 💼\n"
+                "3) 💻\n"
+                "4) ✨\n"
+                "Или отправьте свой эмодзи."
+            )
             return True
 
         if step == "emoji":
-            data["emoji"] = text
-            state["step"] = "style"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 3/6: стиль? one of: direct, business, sarcastic, friendly")
-            return True
-
-        if step == "style":
-            data["style"] = text
+            data["emoji"] = _normalize_emoji(text)
             state["step"] = "tone"
             state["data"] = data
             context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 4/6: тональность (свободный текст), например: Прямой, без воды")
+            await message.reply_text(
+                "Шаг 4/4: какой тон общения предпочитаете?\n"
+                "Например: Коротко и по делу."
+            )
             return True
 
         if step == "tone":
             data["tone_modifier"] = text
-            state["step"] = "task"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 5/6: профиль задач? one of: business-analysis, devops, creativity, coding, other")
-            return True
-
-        if step == "task":
-            data["task_mode"] = text
-            state["step"] = "desc"
-            state["data"] = data
-            context.user_data["soul_setup_auto"] = state
-            await message.reply_text("Шаг 6/6: кто ты и чем занимаемся?")
-            return True
-
-        if step == "desc":
-            data["user_description"] = text
             auth = await self._auth_or_reject(update)
             if not auth:
                 return True
@@ -936,8 +1010,11 @@ class TelegramAdapter(MessengerAdapter):
             result.get("status"),
             _safe_json(payload, max_len=4000),
         )
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        detail_text = _safe_json(detail, max_len=1200) if isinstance(detail, (dict, list)) else str(detail or "")
+        suffix = f"\n{detail_text}" if detail_text else ""
         await update.effective_message.reply_text(
-            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз."
+            f"Ошибка запроса (HTTP {result['status']}). Попробуйте ещё раз.{suffix}"
         )
 
     async def _ensure_soul_ready_for_chat(
@@ -999,11 +1076,25 @@ class TelegramAdapter(MessengerAdapter):
             "/doc_ask <question>\n"
             "/doc_delete <filename>\n"
             "/doc_delete_all\n"
+            "/skill_list (Python Skills)\n"
+            "/skill_delete <skill_name>\n"
+            "/skill_delete_all\n"
+            "/api_tool_register <natural_language_api_description>\n"
+            "/api_tool_list\n"
+            "/api_tool_delete <tool_name>\n"
+            "/api_tool_delete_all\n"
             "/cron_add <name>|<cron>|<action_type>|<payload_json>\n"
             "/cron_list, /cron_del <job_id>\n"
             "/integrations_add <service>|<auth_json>|<endpoints_json>\n"
             "/integrations_list\n"
-            "/integration_call <integration_id>|<url>|<method>|<payload_json_optional>"
+            "/integrations_connect <service>|<token_optional>|<base_url_optional>|<endpoints_json_optional>|<healthcheck_json_optional>\n"
+            "/integrations_test <draft_id>\n"
+            "/integrations_save <draft_id>|<is_active_optional>|<require_successful_test_optional>\n"
+            "/integrations_status <draft_id>\n"
+            "/integration_health <integration_id>\n"
+            "/integrations_delete_all\n"
+            "/integration_call <integration_id>|<url>|<method>|<payload_json_optional>\n"
+            "Файл add_skill.zip загружает Python Skill. Интеграции и пользовательские API-инструменты управляются отдельно."
         )
 
     async def me(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1285,21 +1376,42 @@ class TelegramAdapter(MessengerAdapter):
         doc = update.effective_message.document
         tg_file = await context.bot.get_file(doc.file_id)
         content = await tg_file.download_as_bytearray()
+        filename = str(doc.file_name or "document.bin").strip() or "document.bin"
+        lowered_name = filename.lower()
+        is_skill_archive = lowered_name.endswith(".zip") and (
+            lowered_name == "add_skill.zip" or "skill" in lowered_name
+        )
         try:
-            res = await self.client.documents_upload(token, doc.file_name or "document.bin", bytes(content))
+            if is_skill_archive:
+                res = await self.client.skills_upload(token, filename, bytes(content))
+            else:
+                res = await self.client.documents_upload(token, filename, bytes(content))
         except httpx.TimeoutException:
-            await update.effective_message.reply_text(
-                "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+            timeout_message = (
+                "Регистрация Python Skill заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
+                if is_skill_archive
+                else "Индексация документа заняла слишком много времени. Попробуйте ещё раз через 1-2 минуты."
             )
+            await update.effective_message.reply_text(timeout_message)
             return
         except Exception:
             logger.exception("telegram document upload failed")
-            await update.effective_message.reply_text(
-                "Внутренняя ошибка при загрузке документа. Попробуйте позже."
+            fail_message = (
+                "Внутренняя ошибка при регистрации Python Skill. Попробуйте позже."
+                if is_skill_archive
+                else "Внутренняя ошибка при загрузке документа. Попробуйте позже."
             )
+            await update.effective_message.reply_text(fail_message)
             return
         if res.get("status") != 200:
             await self._reply_api_result(update, res)
+            return
+
+        if is_skill_archive:
+            payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+            tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
+            tool_name = str(tool.get("name") or "skill")
+            await update.effective_message.reply_text(f"Python Skill зарегистрирован ✅ Имя: {tool_name}")
             return
 
         payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
@@ -1471,6 +1583,151 @@ class TelegramAdapter(MessengerAdapter):
             f"Удалены все загруженные документы. Удалено чанков: {deleted_count}."
         )
 
+    async def skill_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_list(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            await update.effective_message.reply_text("Python Skills пока не зарегистрированы.")
+            return
+
+        lines = ["Python Skills:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or "skill"
+            method = str(item.get("method") or "").strip() or "UNKNOWN"
+            lines.append(f"- {name} ({method})")
+        if len(items) > 30:
+            lines.append(f"- ...и еще {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def skill_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        skill_name = " ".join(context.args).strip()
+        if not skill_name:
+            await update.effective_message.reply_text("Использование: /skill_delete <skill_name>")
+            return
+
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete(token, skill_name)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        await update.effective_message.reply_text(f"Python Skill '{skill_name}' удален ✅")
+
+    async def skill_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.skills_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        await update.effective_message.reply_text(
+            f"Удалены все Python Skills. Количество: {deleted_count}."
+        )
+
+    async def api_tool_register(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_message = " ".join(context.args).strip()
+        if not user_message:
+            await update.effective_message.reply_text("Использование: /api_tool_register <описание API естественным языком>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.api_tools_register(token, user_message)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        message = str(payload.get("message") or "").strip()
+        if message:
+            await update.effective_message.reply_text(message)
+            return
+        await self._reply_api_result(update, res)
+
+    async def api_tool_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.api_tools_list(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            await update.effective_message.reply_text("Пользовательские API-инструменты пока не зарегистрированы.")
+            return
+        lines = ["Пользовательские API-инструменты:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip() or "tool"
+            method = str(item.get("method") or "").strip() or "UNKNOWN"
+            endpoint = str(item.get("endpoint") or "").strip()
+            endpoint_suffix = f" -> {endpoint}" if endpoint else ""
+            lines.append(f"- {name} ({method}){endpoint_suffix}")
+        if len(items) > 30:
+            lines.append(f"- ...и еще {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def api_tool_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        tool_name = " ".join(context.args).strip()
+        if not tool_name:
+            await update.effective_message.reply_text("Использование: /api_tool_delete <tool_name>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.api_tools_delete(token, tool_name)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        if str(payload.get("status") or "") == "not_found":
+            await update.effective_message.reply_text(f"Пользовательский API-инструмент '{tool_name}' не найден.")
+            return
+        await update.effective_message.reply_text(f"Пользовательский API-инструмент '{tool_name}' удален ✅")
+
+    async def api_tool_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.api_tools_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        await update.effective_message.reply_text(
+            f"Удалены все пользовательские API-инструменты. Количество: {deleted_count}."
+        )
+
     async def cron_add(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(context.args).strip()
         if not text:
@@ -1553,12 +1810,179 @@ class TelegramAdapter(MessengerAdapter):
         await self._reply_api_result(update, res)
 
     async def integrations_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
         auth = await self._auth_or_reject(update)
         if not auth:
             return
         token, _ = auth
         res = await self.client.integrations_list(token)
-        await self._reply_api_result(update, res)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload")
+        items = payload if isinstance(payload, list) else []
+        if not items:
+            await update.effective_message.reply_text("Интеграции пока не подключены.")
+            return
+        lines = ["Интеграции:"]
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            integration_id = str(item.get("id") or "").strip()
+            service_name = str(item.get("service_name") or "integration").strip()
+            is_active = bool(item.get("is_active"))
+            suffix = "active" if is_active else "inactive"
+            lines.append(f"- {service_name} [{suffix}] {integration_id}")
+        if len(items) > 30:
+            lines.append(f"- ...и еще {len(items) - 30}")
+        await update.effective_message.reply_text("\n".join(lines))
+
+    async def integrations_connect(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = " ".join(context.args).strip()
+        if not text:
+            await update.effective_message.reply_text(
+                "Использование: /integrations_connect <service>|<token_optional>|<base_url_optional>|<endpoints_json_optional>|<healthcheck_json_optional>"
+            )
+            return
+        parts = [part.strip() for part in text.split("|", 4)]
+        while len(parts) < 5:
+            parts.append("")
+        endpoints: list[dict] = []
+        healthcheck: dict | None = None
+        try:
+            if parts[3]:
+                parsed_endpoints = json.loads(parts[3])
+                endpoints = parsed_endpoints if isinstance(parsed_endpoints, list) else []
+            if parts[4]:
+                parsed_healthcheck = json.loads(parts[4])
+                healthcheck = parsed_healthcheck if isinstance(parsed_healthcheck, dict) else None
+        except json.JSONDecodeError:
+            await update.effective_message.reply_text("endpoints_json_optional/healthcheck_json_optional должны быть валидными JSON")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integrations_onboarding_connect(
+            token,
+            {
+                "service_name": parts[0],
+                "token": parts[1] or None,
+                "base_url": parts[2] or None,
+                "endpoints": endpoints,
+                "healthcheck": healthcheck,
+            },
+        )
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        await update.effective_message.reply_text(
+            "Черновик интеграции подготовлен. "
+            f"draft_id={payload.get('draft_id')} step={payload.get('step')}"
+        )
+
+    async def integrations_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        draft_id = " ".join(context.args).strip()
+        if not draft_id:
+            await update.effective_message.reply_text("Использование: /integrations_test <draft_id>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integrations_onboarding_test(token, {"draft_id": draft_id})
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        test = payload.get("test") if isinstance(payload.get("test"), dict) else {}
+        await update.effective_message.reply_text(
+            f"Проверка интеграции: success={bool(test.get('success'))}, status={test.get('status_code')}, message={test.get('message')}"
+        )
+
+    async def integrations_save(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = " ".join(context.args).strip()
+        if not text:
+            await update.effective_message.reply_text(
+                "Использование: /integrations_save <draft_id>|<is_active_optional>|<require_successful_test_optional>"
+            )
+            return
+        parts = [part.strip() for part in text.split("|", 2)]
+        draft_id = parts[0]
+        is_active = True if len(parts) < 2 or not parts[1] else parts[1].lower() in {"1", "true", "yes", "y", "on"}
+        require_successful_test = False if len(parts) < 3 or not parts[2] else parts[2].lower() in {"1", "true", "yes", "y", "on"}
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integrations_onboarding_save(
+            token,
+            {
+                "draft_id": draft_id,
+                "is_active": is_active,
+                "require_successful_test": require_successful_test,
+            },
+        )
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        integration = payload.get("integration") if isinstance(payload.get("integration"), dict) else {}
+        await update.effective_message.reply_text(
+            f"Интеграция сохранена: {integration.get('service_name')} id={integration.get('id')}"
+        )
+
+    async def integrations_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        draft_id = " ".join(context.args).strip()
+        if not draft_id:
+            await update.effective_message.reply_text("Использование: /integrations_status <draft_id>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integrations_onboarding_status(token, draft_id)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        await update.effective_message.reply_text(
+            f"Статус onboarding: draft_id={payload.get('draft_id')} step={payload.get('step')} saved_integration_id={payload.get('saved_integration_id')}"
+        )
+
+    async def integration_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        integration_id = " ".join(context.args).strip()
+        if not integration_id:
+            await update.effective_message.reply_text("Использование: /integration_health <integration_id>")
+            return
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integration_health(token, integration_id)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        health = payload.get("health") if isinstance(payload.get("health"), dict) else {}
+        await update.effective_message.reply_text(
+            f"Health {payload.get('service_name')}: success={bool(health.get('success'))}, status={health.get('status_code')}, message={health.get('message')}"
+        )
+
+    async def integrations_delete_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        auth = await self._auth_or_reject(update)
+        if not auth:
+            return
+        token, _ = auth
+        res = await self.client.integrations_delete_all(token)
+        if res.get("status") != 200:
+            await self._reply_api_result(update, res)
+            return
+        payload = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+        deleted_count = int(payload.get("deleted_count") or 0)
+        await update.effective_message.reply_text(f"Удалены все интеграции. Количество: {deleted_count}.")
 
     async def integration_call(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = " ".join(context.args).strip()
@@ -1593,37 +2017,49 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return ConversationHandler.END
         context.user_data["soul_setup"] = {}
-        await update.effective_message.reply_text("SOUL setup: выберите имя ассистента (например: SOUL)")
-        return SOUL_NAME
-
-    async def soul_setup_name(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["assistant_name"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Эмодзи ассистента? (например: 🧠)")
-        return SOUL_EMOJI
-
-    async def soul_setup_emoji(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["emoji"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Стиль? one of: direct, business, sarcastic, friendly")
-        return SOUL_STYLE
-
-    async def soul_setup_style(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["style"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Тональность (свободный текст), например: Прямой, без воды")
-        return SOUL_TONE
-
-    async def soul_setup_tone(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["tone_modifier"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Профиль задач? one of: business-analysis, devops, creativity, coding, other")
-        return SOUL_TASK
+        await update.effective_message.reply_text("SOUL setup (быстрый):\nШаг 1/4: кто вы и чем обычно занимаетесь?")
+        return SOUL_DESC
 
     async def soul_setup_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        context.user_data["soul_setup"]["task_mode"] = update.effective_message.text.strip()
-        await update.effective_message.reply_text("Последний шаг: Кто ты и чем занимаемся?")
-        return SOUL_DESC
+        context.user_data["soul_setup"]["task_mode"] = _normalize_task_mode(update.effective_message.text.strip())
+        await update.effective_message.reply_text(
+            "Шаг 3/4: выберите эмодзи ассистента:\n"
+            "1) 🧠\n"
+            "2) 💼\n"
+            "3) 💻\n"
+            "4) ✨\n"
+            "Или отправьте свой эмодзи."
+        )
+        return SOUL_EMOJI
 
     async def soul_setup_desc(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         setup_data = context.user_data.get("soul_setup", {})
         setup_data["user_description"] = update.effective_message.text.strip()
+        setup_data.setdefault("assistant_name", "SmartAi")
+        setup_data.setdefault("style", "friendly")
+
+        context.user_data["soul_setup"] = setup_data
+        await update.effective_message.reply_text(
+            "Шаг 2/4: выберите режим ассистента:\n"
+            "1) Бизнес\n"
+            "2) Разработка\n"
+            "3) Личное"
+        )
+        return SOUL_TASK
+
+    async def soul_setup_emoji(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        setup_data = context.user_data.get("soul_setup", {})
+        setup_data["emoji"] = _normalize_emoji(update.effective_message.text.strip())
+        context.user_data["soul_setup"] = setup_data
+        await update.effective_message.reply_text(
+            "Шаг 4/4: какой тон общения предпочитаете?\n"
+            "Например: Коротко и по делу."
+        )
+        return SOUL_TONE
+
+    async def soul_setup_tone(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        setup_data = context.user_data.get("soul_setup", {})
+        setup_data["tone_modifier"] = update.effective_message.text.strip()
 
         auth = await self._auth_or_reject(update)
         if not auth:

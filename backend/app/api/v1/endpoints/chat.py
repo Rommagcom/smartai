@@ -19,11 +19,9 @@ from app.schemas.chat import (
     TaskHistoryResponse,
     WorkerResultsPollResponse,
 )
-from app.schemas.skills import SkillsRegistryResponse
 from app.services.chat_service import chat_service
 from app.services.memory_service import memory_service
 from app.services.pdf_service import pdf_service
-from app.services.skills_registry_service import skills_registry_service
 from app.services.self_improvement_service import self_improvement_service
 from app.services.soul_service import soul_service
 from app.services.worker_result_service import worker_result_service
@@ -158,17 +156,6 @@ async def chat(
         used_memory_ids=[UUID(mid) for mid in used_memory_ids],
         tool_calls=tool_calls,
         artifacts=artifacts,
-    )
-
-
-@router.get("/skills", response_model=SkillsRegistryResponse)
-async def skills_registry(
-    current_user: CurrentUser,
-) -> SkillsRegistryResponse:
-    del current_user
-    return SkillsRegistryResponse(
-        registry_version=skills_registry_service.REGISTRY_VERSION,
-        skills=skills_registry_service.list_contracts(),
     )
 
 

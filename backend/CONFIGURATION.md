@@ -1,0 +1,323 @@
+# SmartAI Configuration Reference
+
+Детальный справочник по конфигурации SmartAI Backend.
+
+Источник default-значений: [app/core/config.py](app/core/config.py)
+
+## 1. Базовые принципы
+
+- Все настройки читаются через Settings в app/core/config.py.
+- Формат: env-переменные из .env переопределяют default.
+- Неиспользуемые extra-поля в .env игнорируются.
+
+### 1.1 Быстрый чеклист перед запуском
+
+Минимум для старта Docker-стека:
+
+- `DATABASE_URL`
+- `REDIS_URL`
+- `OLLAMA_BASE_URL` (или внешний LLM через LiteLLM)
+- `JWT_SECRET_KEY`
+
+Рекомендуемый быстрый self-check:
+
+1. `docker compose up -d --build`
+2. `docker compose exec api alembic upgrade head`
+3. `GET /health`
+4. `python -m scripts.smoke_all`
+
+### 1.2 Готовые профили `.env`
+
+Ниже стартовые профили, которые можно копировать и адаптировать.
+
+#### Профиль A: Local Docker Dev (single instance)
+
+```env
+# Core
+JWT_SECRET_KEY=change-me
+API_V1_PREFIX=/api/v1
+
+# Storage
+DATABASE_URL=postgresql+asyncpg://assistant:assistant@postgres:5432/assistant
+REDIS_URL=redis://redis:6379/0
+
+# LLM
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL_NAME=kimi-k2.5:cloud
+
+# Vector / RAG
+MILVUS_HOST=milvus
+MILVUS_PORT=19530
+EMBEDDING_DIM=768
+
+# Runtime toggles (single instance)
+WORKER_ENABLED=1
+SCHEDULER_ENABLED=1
+WS_FANOUT_REDIS_ENABLED=1
+
+# Security for integration secrets
+AUTH_DATA_ENCRYPTION_KEYS=v1:replace-with-strong-random-key
+AUTH_DATA_ACTIVE_KEY_ID=v1
+```
+
+#### Профиль B: Docker + Ollama на хосте (GPU)
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+Остальные значения - как в профиле A.
+
+#### Профиль C: Multi-instance роли
+
+`api` роль:
+
+```env
+WORKER_ENABLED=0
+SCHEDULER_ENABLED=0
+WS_FANOUT_REDIS_ENABLED=1
+```
+
+`scheduler-leader` роль:
+
+```env
+WORKER_ENABLED=0
+SCHEDULER_ENABLED=1
+WS_FANOUT_REDIS_ENABLED=0
+```
+
+`worker` роль:
+
+```env
+WORKER_ENABLED=1
+SCHEDULER_ENABLED=0
+WS_FANOUT_REDIS_ENABLED=0
+```
+
+### 1.3 Частые симптомы и что проверять первым
+
+- `Connection refused` к Ollama из `api` контейнера:
+	- проверьте `OLLAMA_BASE_URL`
+	- для host-режима нужен bind Ollama на `0.0.0.0:11434`
+- Ошибки интеграций/skill вызовов:
+	- проверьте `AUTH_DATA_ENCRYPTION_KEYS` и `AUTH_DATA_ACTIVE_KEY_ID`
+- Нет фоновой обработки задач:
+	- проверьте `WORKER_ENABLED`
+- Cron/напоминания не срабатывают:
+	- проверьте `SCHEDULER_ENABLED`
+
+## 2. Core и Auth
+
+- APP_NAME: название приложения.
+- APP_VERSION: версия API.
+- API_V1_PREFIX: префикс маршрутов API (обычно /api/v1).
+- JWT_SECRET_KEY: секрет подписи JWT.
+- JWT_ALGORITHM: алгоритм подписи JWT.
+- ACCESS_TOKEN_EXPIRE_MINUTES: TTL access токена.
+- REFRESH_TOKEN_EXPIRE_MINUTES: TTL refresh токена.
+
+## 3. Database
+
+- DATABASE_URL: DSN для PostgreSQL (asyncpg).
+- DB_POOL_SIZE: базовый размер пула.
+- DB_MAX_OVERFLOW: доп. соединения сверх пула.
+- DB_POOL_TIMEOUT_SECONDS: timeout ожидания соединения.
+- DB_POOL_RECYCLE_SECONDS: recycle lifetime подключения.
+
+## 4. LLM, Ollama, LiteLLM
+
+### Ollama
+
+- OLLAMA_BASE_URL
+- OLLAMA_MODEL_NAME
+- OLLAMA_TIMEOUT_SECONDS
+- OLLAMA_RETRY_ATTEMPTS
+- OLLAMA_RETRY_BASE_DELAY_SECONDS
+- OLLAMA_MAX_CONCURRENCY
+- OLLAMA_NUM_PREDICT
+- OLLAMA_NUM_PREDICT_PLANNER
+- OLLAMA_KEEP_ALIVE
+- OLLAMA_MODEL_FALLBACK_ENABLED
+
+### LiteLLM
+
+- LITELLM_MODEL
+- LITELLM_PLANNER_MODEL
+- LITELLM_EMBEDDING_MODEL
+- LITELLM_TIMEOUT_SECONDS
+- LITELLM_OPENAI_API_KEY
+- LITELLM_ANTHROPIC_API_KEY
+- LITELLM_TEMPERATURE
+- LITELLM_PLANNER_TEMPERATURE
+- LITELLM_STRUCTURED_PARSE_LOG_LEVEL
+
+### Контекст и ограничения prompt
+
+- CONTEXT_MAX_PROMPT_TOKENS
+- CONTEXT_ALWAYS_KEEP_LAST_MESSAGES
+- CONTEXT_SUMMARY_MAX_ITEMS
+- CONTEXT_SUMMARY_ITEM_MAX_CHARS
+- CONTEXT_MESSAGE_MAX_CHARS
+
+## 5. Memory и RAG
+
+### Milvus
+
+- MILVUS_HOST
+- MILVUS_PORT
+- MILVUS_COLLECTION
+- EMBEDDING_DIM
+
+### Memory lifecycle
+
+- MEMORY_DEFAULT_TTL_DAYS
+- MEMORY_DECAY_HALF_LIFE_DAYS
+- MEMORY_DECAY_MIN_FACTOR
+- STM_TTL_SECONDS
+- STM_MAX_ITEMS
+- STM_REDIS_KEY_PREFIX
+
+### RAG tuning
+
+- RAG_EMBEDDING_CONCURRENCY
+- RAG_EMBEDDING_TIMEOUT_SECONDS
+- RAG_EMBEDDING_COOLDOWN_SECONDS
+- RAG_QUERY_EMBED_CACHE_TTL_SECONDS
+- RAG_QUERY_EMBED_CACHE_MAX_ITEMS
+- RAG_DOC_CHUNK_SIZE
+- RAG_DOC_CHUNK_OVERLAP
+- RAG_DOC_LARGE_TEXT_THRESHOLD_CHARS
+- RAG_DOC_LARGE_CHUNK_SIZE
+- RAG_DOC_LARGE_CHUNK_OVERLAP
+
+## 6. Worker queue и delivery
+
+### Queue keys
+
+- WORKER_QUEUE_KEY
+- WORKER_QUEUE_HIGH_KEY
+- WORKER_PROCESSING_QUEUE_KEY
+- WORKER_RETRY_ZSET_KEY
+
+### Retry/recovery
+
+- WORKER_BRPOP_TIMEOUT_SECONDS
+- WORKER_MAX_RETRIES
+- WORKER_DEDUPE_WINDOW_SECONDS
+- WORKER_RETRY_BASE_DELAY_SECONDS
+- WORKER_RETRY_MAX_DELAY_SECONDS
+- WORKER_RUNNING_LEASE_SECONDS
+- WORKER_PROCESSING_RECOVERY_BATCH
+
+### Result delivery
+
+- WORKER_RESULT_QUEUE_PREFIX
+- WORKER_RESULT_QUEUE_MAX_ITEMS
+- WORKER_RESULT_TTL_SECONDS
+- WORKER_RESULT_REDIS_TIMEOUT_SECONDS
+
+### Runtime toggles
+
+- WORKER_ENABLED
+- SCHEDULER_ENABLED
+
+## 7. Scheduler
+
+- SCHEDULER_JOB_MISFIRE_GRACE_SECONDS
+- SCHEDULER_ONCE_MAX_LAG_SECONDS
+- SCHEDULER_INACTIVITY_REMINDER_ENABLED
+- SCHEDULER_INACTIVITY_REMINDER_AFTER_HOURS
+- SCHEDULER_INACTIVITY_REMINDER_COOLDOWN_HOURS
+- SCHEDULER_INACTIVITY_REMINDER_BATCH_LIMIT
+- SCHEDULER_INACTIVITY_REMINDER_LLM_ENABLED
+- SCHEDULER_INACTIVITY_REMINDER_MIN_HOURS
+- SCHEDULER_INACTIVITY_REMINDER_MAX_HOURS
+- SCHEDULER_INACTIVITY_REMINDER_MESSAGE
+
+## 8. WebSocket и fanout
+
+- WEBSOCKET_SEND_TIMEOUT_SECONDS
+- WS_FANOUT_REDIS_ENABLED
+- WS_FANOUT_CHANNEL_PREFIX
+
+## 9. Telegram bridge
+
+- TELEGRAM_BOT_TOKEN
+- BACKEND_API_BASE_URL
+- TELEGRAM_BACKEND_BRIDGE_SECRET
+- TELEGRAM_POLL_CONCURRENCY
+- TELEGRAM_KNOWN_USER_TTL_SECONDS
+
+## 10. HTTP client tuning
+
+- HTTP_CLIENT_MAX_CONNECTIONS
+- HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS
+- HTTP_CLIENT_KEEPALIVE_EXPIRY_SECONDS
+
+## 11. Integrations и secrets
+
+- INTEGRATION_ONBOARDING_SESSION_TTL_SECONDS
+- AUTH_DATA_ENCRYPTION_KEYS
+- AUTH_DATA_ACTIVE_KEY_ID
+
+Рекомендации:
+
+- Всегда задавайте AUTH_DATA_ENCRYPTION_KEYS и AUTH_DATA_ACTIVE_KEY_ID в production.
+- Выполняйте ротацию ключей по runbook из [README.md](README.md) и [RELEASE.md](RELEASE.md).
+
+## 12. Sandbox и сетевые ограничения
+
+- SANDBOX_TIMEOUT_SECONDS
+- SANDBOX_MEMORY_LIMIT
+- SANDBOX_CPU_LIMIT
+- SANDBOX_IMAGE
+- SANDBOX_EGRESS_ENABLED
+- SANDBOX_EGRESS_BLOCK_PRIVATE_NETWORKS
+- SANDBOX_EGRESS_ALLOWLIST_MODE
+- SANDBOX_EGRESS_ALLOWED_HOSTS
+- SANDBOX_EGRESS_DENIED_HOSTS
+- SANDBOX_EGRESS_ALLOWED_PORTS
+
+## 13. Graph и guardrails
+
+- GUARDRAILS_ENABLED
+- GUARDRAILS_MAX_INPUT_LENGTH
+- GUARDRAILS_BLOCK_PROMPT_INJECTION
+- LANGGRAPH_MAX_ITERATIONS
+- LANGGRAPH_TOOL_TIMEOUT_SECONDS
+- ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS
+- ROUTER_ENABLE_DETERMINISTIC_FALLBACKS
+- ROUTER_OVERRIDE_CLARIFY_LIVE_EXPORT
+
+## 14. Tool vector registry
+
+- TOOL_RETRIEVER_TOP_K
+- TOOL_VECTOR_COLLECTION
+
+## 15. Логирование и observability
+
+- OBS_LOG_JSON
+- OBS_LOG_LEVEL
+- OBS_THIRD_PARTY_LOG_LEVEL
+- DEV_VERBOSE_LOGGING
+- OBS_ALERT_BUFFER_SIZE
+
+## 16. Минимальный production baseline
+
+Рекомендуемый минимум в .env:
+
+- JWT_SECRET_KEY
+- DATABASE_URL
+- REDIS_URL
+- OLLAMA_BASE_URL или внешний LLM через LiteLLM переменные
+- TELEGRAM_BACKEND_BRIDGE_SECRET (если включен Telegram)
+- AUTH_DATA_ENCRYPTION_KEYS
+- AUTH_DATA_ACTIVE_KEY_ID
+- WORKER_ENABLED/SCHEDULER_ENABLED согласно роли сервиса
+
+## 17. Связанные документы
+
+- Архитектура: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Тесты: [TESTS.md](TESTS.md)
+- Релизный runbook: [RELEASE.md](RELEASE.md)
+- Полная документация: [FULLREADME.MD](FULLREADME.MD)

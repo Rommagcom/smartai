@@ -13,6 +13,16 @@ PERMISSION_DYNAMIC_TOOLS_CALL = "dynamic_tools.call"
 
 class SkillsRegistryService:
     REGISTRY_VERSION = "1.0.0"
+    _LEGACY_ALIAS_NAMES = {"dynamic_tool_register"}
+    _INTEGRATION_PREFIXES = ("integration_", "integrations_")
+    _DYNAMIC_TOOL_NAMES = {
+        "dynamic_tool_register",
+        "dynamic_tool_call",
+        "dynamic_tool_list",
+        "dynamic_tool_delete",
+        "dynamic_tool_delete_all",
+        "register_api_tool",
+    }
 
     def __init__(self) -> None:
         self._skills: list[dict] = self._build_default_skills()
@@ -522,15 +532,17 @@ class SkillsRegistryService:
                 "manifest": {
                     "name": "dynamic_tool_delete",
                     "title": "Dynamic Tool Delete",
-                    "description": "Удалить зарегистрированный пользовательский API-инструмент",
+                    "description": "Удалить один зарегистрированный пользовательский API-инструмент (по tool_id или имени)",
                     "version": "1.0.0",
                 },
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "tool_id": {"type": "string", "description": "UUID инструмента для удаления"},
+                        "tool_name": {"type": "string", "description": "Имя инструмента для удаления"},
+                        "skill_name": {"type": "string", "description": "Алиас имени инструмента для удаления"},
                     },
-                    "required": ["tool_id"],
+                    "required": [],
                     "additionalProperties": False,
                 },
                 "permissions": [PERMISSION_DYNAMIC_TOOLS_WRITE],
@@ -571,6 +583,39 @@ class SkillsRegistryService:
 
     def list_contracts(self) -> list[dict]:
         return deepcopy(self._skills)
+
+    def list_skills(self) -> list[dict]:
+        return deepcopy([item for item in self._skills if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES])
+
+    def list_skill_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "skill"
+        ])
+
+    def list_integration_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "integration"
+        ])
+
+    def list_dynamic_tool_contracts(self) -> list[dict]:
+        return deepcopy([
+            item for item in self._skills
+            if self._contract_name(item) not in self._LEGACY_ALIAS_NAMES and self._contract_category(item) == "dynamic_tool"
+        ])
+
+    @staticmethod
+    def _contract_name(item: dict) -> str:
+        return str(item.get("manifest", {}).get("name") or "").strip()
+
+    def _contract_category(self, item: dict) -> str:
+        name = self._contract_name(item)
+        if name in self._DYNAMIC_TOOL_NAMES:
+            return "dynamic_tool"
+        if any(name.startswith(prefix) for prefix in self._INTEGRATION_PREFIXES):
+            return "integration"
+        return "skill"
 
     def get_contract(self, skill_name: str) -> dict | None:
         target = str(skill_name or "").strip()
@@ -724,7 +769,12 @@ class SkillsRegistryService:
     # worker_enqueue is retained for backward compatibility in legacy paths.
     _PLANNER_HIDDEN_TOOLS: set[str] = {"worker_enqueue"}
 
+    # Cached result of planner_signatures() — the skill registry is static after startup.
+    _planner_signatures_cache: str | None = None
+
     def planner_signatures(self) -> str:
+        if self._planner_signatures_cache is not None:
+            return self._planner_signatures_cache
         signatures: list[str] = []
         for item in self._skills:
             manifest = item.get("manifest", {})
@@ -742,7 +792,8 @@ class SkillsRegistryService:
                 if not (isinstance(meta, dict) and bool(meta.get("_planner_hidden")))
             )
             signatures.append(f"{name}({args})")
-        return ", ".join(signatures)
+        self._planner_signatures_cache = ", ".join(signatures)
+        return self._planner_signatures_cache
 
 
 skills_registry_service = SkillsRegistryService()
