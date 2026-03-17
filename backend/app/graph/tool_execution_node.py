@@ -6,7 +6,8 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.graph.node_helpers import extract_artifacts
+from app.graph.artifact_utils import extract_artifacts
+from app.graph.orchestration_types import NextStep, ToolExecutionNodeUpdate
 from app.schemas.graph import RouterOutput, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,10 @@ async def tool_execution_node(state: dict) -> dict:
 
     router_output: RouterOutput | None = state.get("router_output")
     if not router_output or not router_output.steps:
-        return {"tool_results": [], "next_step": "chat"}
+        return ToolExecutionNodeUpdate(
+            tool_results=[],
+            next_step=NextStep.CHAT,
+        ).to_state_update()
 
     user_id = state["user_id"]
     _dev_log(
@@ -69,11 +73,11 @@ async def tool_execution_node(state: dict) -> dict:
             result = await db.execute(select(User).where(User.id == user_id))
             user = result.scalar_one_or_none()
             if not user:
-                return {
-                    "tool_results": [],
-                    "error": "User not found",
-                    "next_step": "chat",
-                }
+                return ToolExecutionNodeUpdate(
+                    tool_results=[],
+                    next_step=NextStep.CHAT,
+                    error="User not found",
+                ).to_state_update()
 
             steps_dicts = [
                 {"tool": step.tool, "arguments": step.arguments}
@@ -89,8 +93,8 @@ async def tool_execution_node(state: dict) -> dict:
             await db.commit()
     except Exception as exc:
         logger.warning("tool_execution_node failed: %s", exc)
-        return {
-            "tool_results": [
+        return ToolExecutionNodeUpdate(
+            tool_results=[
                 ToolResult(
                     tool="system_error",
                     arguments={},
@@ -98,9 +102,9 @@ async def tool_execution_node(state: dict) -> dict:
                     error="Tool execution unavailable",
                 )
             ],
-            "error": str(exc),
-            "next_step": "compose",
-        }
+            next_step=NextStep.COMPOSE,
+            error=str(exc),
+        ).to_state_update()
 
     tool_results = _build_tool_results(raw_results)
     artifacts = extract_artifacts(raw_results)
@@ -109,9 +113,9 @@ async def tool_execution_node(state: dict) -> dict:
         success_count=sum(1 for item in tool_results if item.success),
         total_count=len(tool_results),
     )
-    return {
-        "tool_results": tool_results,
-        "artifacts": artifacts,
-        "tool_calls_log": raw_results,
-        "next_step": "compose",
-    }
+    return ToolExecutionNodeUpdate(
+        tool_results=tool_results,
+        next_step=NextStep.COMPOSE,
+        artifacts=artifacts,
+        tool_calls_log=raw_results,
+    ).to_state_update()

@@ -5,6 +5,11 @@ from contextlib import suppress
 from typing import Any
 
 from app.graph.artifact_utils import extract_artifacts
+from app.graph.output_postprocess_policy import (
+    should_attempt_direct_route,
+    should_apply_export_success_claim_sanitization,
+    should_reenqueue_artifact_export,
+)
 from app.core.config import settings
 from app.schemas.graph import GuardrailResult, GuardrailVerdict
 
@@ -117,7 +122,8 @@ async def apply_direct_route_fallback(
     from app.services.tool_orchestrator_service import tool_orchestrator_service
     from sqlalchemy import select
 
-    if all_calls or not user_id:
+    # Policy decision: Should we try direct route fallback?
+    if not should_attempt_direct_route(user_id, user_message, all_calls):
         return final_answer, all_calls, all_artifacts
 
     direct_steps = ChatService._direct_route_from_message(user_message)

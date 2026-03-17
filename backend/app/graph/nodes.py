@@ -35,10 +35,13 @@ from typing import Any
 
 from app.core.config import settings
 from app.graph.compose_node import _recover_truncated_web_answer, compose_node
-from app.graph.node_helpers import (
-    _build_enriched_system_prompt,
-    _looks_like_small_talk,
-    _sanitize_llm_answer,
+from app.graph.orchestration_types import GuardrailNodeUpdate, IntentLabel, NextStep, NodeUpdate
+from app.graph.prompt_routing_policy import (
+    build_enriched_system_prompt as _build_enriched_system_prompt,
+)
+from app.graph.text_policy import (
+    looks_like_small_talk as _looks_like_small_talk,
+    sanitize_llm_answer as _sanitize_llm_answer,
 )
 from app.graph.output_node import output_node
 from app.graph.router_node import router_node
@@ -69,34 +72,38 @@ def _dev_log(event: str, **ctx: Any) -> None:
 def input_guardrail_node(state: dict) -> dict:
     """Check user input for safety issues before processing."""
     if not settings.GUARDRAILS_ENABLED:
-        return {"input_guardrail": GuardrailResult(verdict=GuardrailVerdict.PASS)}
+        return GuardrailNodeUpdate(
+            input_guardrail=GuardrailResult(verdict=GuardrailVerdict.PASS)
+        ).to_state_update()
 
     user_message = state.get("user_message", "")
 
     # Length check
     if len(user_message) > settings.GUARDRAILS_MAX_INPUT_LENGTH:
-        return {
-            "input_guardrail": GuardrailResult(
+        return GuardrailNodeUpdate(
+            input_guardrail=GuardrailResult(
                 verdict=GuardrailVerdict.BLOCK,
                 reason=f"Message exceeds max length ({settings.GUARDRAILS_MAX_INPUT_LENGTH} chars)",
             ),
-            "final_answer": "Сообщение слишком длинное. Пожалуйста, сократите запрос.",
-            "next_step": "end",
-        }
+            final_answer="Сообщение слишком длинное. Пожалуйста, сократите запрос.",
+            next_step=NextStep.END,
+        ).to_state_update()
 
     # Prompt injection detection
     if settings.GUARDRAILS_BLOCK_PROMPT_INJECTION:
         from app.guardrails import prompt_shield
         result = prompt_shield.check_input(user_message)
         if result.verdict == GuardrailVerdict.BLOCK:
-            return {
-                "input_guardrail": result,
-                "final_answer": "Запрос отклонён системой безопасности.",
-                "next_step": "end",
-            }
-        return {"input_guardrail": result}
+            return GuardrailNodeUpdate(
+                input_guardrail=result,
+                final_answer="Запрос отклонён системой безопасности.",
+                next_step=NextStep.END,
+            ).to_state_update()
+        return GuardrailNodeUpdate(input_guardrail=result).to_state_update()
 
-    return {"input_guardrail": GuardrailResult(verdict=GuardrailVerdict.PASS)}
+    return GuardrailNodeUpdate(
+        input_guardrail=GuardrailResult(verdict=GuardrailVerdict.PASS)
+    ).to_state_update()
 
 
 # ======================================================================
@@ -140,14 +147,16 @@ async def memory_node(state: dict) -> dict:
         entities_count=len(entities),
     )
 
-    return {
-        "history_messages": context["history_messages"],
-        "stm_context": context["stm_context"],
-        "ltm_context": context["ltm_context"],
-        "rag_context": context["rag_context"],
-        "history_summary": context["history_summary"],
-        "extracted_entities": entities,
-    }
+    return NodeUpdate(
+        values={
+            "history_messages": context["history_messages"],
+            "stm_context": context["stm_context"],
+            "ltm_context": context["ltm_context"],
+            "rag_context": context["rag_context"],
+            "history_summary": context["history_summary"],
+            "extracted_entities": entities,
+        }
+    ).to_state_update()
 
 
 # ======================================================================
@@ -165,12 +174,21 @@ def intent_classifier_node(state: dict) -> dict:
     messages: list[str] = state.get("messages") or []
     query = (messages[-1] if messages else state.get("user_message", "")).strip()
     if not query:
-        return {"intent": "small_talk", "next_step": "chat"}
+        return NodeUpdate(
+            values={"intent": IntentLabel.SMALL_TALK},
+            next_step=NextStep.CHAT,
+        ).to_state_update()
 
     if _looks_like_small_talk(query):
-        return {"intent": "small_talk", "next_step": "chat"}
+        return NodeUpdate(
+            values={"intent": IntentLabel.SMALL_TALK},
+            next_step=NextStep.CHAT,
+        ).to_state_update()
 
-    return {"intent": "needs_tools", "next_step": "retriever"}
+    return NodeUpdate(
+        values={"intent": IntentLabel.NEEDS_TOOLS},
+        next_step=NextStep.RETRIEVER,
+    ).to_state_update()
 
 
 # ======================================================================
@@ -191,7 +209,7 @@ async def tool_retriever_node(state: dict) -> dict:
     user_id = state.get("user_id")
 
     if not user_id:
-        return {"retrieved_tools": []}
+        return NodeUpdate(values={"retrieved_tools": []}).to_state_update()
 
     _dev_log("retriever_start", user_id=str(user_id))
 
@@ -202,10 +220,10 @@ async def tool_retriever_node(state: dict) -> dict:
             top_k=settings.TOOL_RETRIEVER_TOP_K,
         )
         _dev_log("retriever_done", hits_count=len(hits))
-        return {"retrieved_tools": hits}
+        return NodeUpdate(values={"retrieved_tools": hits}).to_state_update()
     except Exception as exc:
         logger.warning("Tool retriever failed: %s", exc)
-        return {"retrieved_tools": []}
+        return NodeUpdate(values={"retrieved_tools": []}).to_state_update()
 
 
 # ======================================================================
@@ -263,7 +281,10 @@ async def chat_node(state: dict) -> dict:
         )
 
     _dev_log("chat_done", answer_length=len(answer))
-    return {"final_answer": answer, "next_step": "output", "is_complete": True}
+    return NodeUpdate(
+        values={"final_answer": answer, "is_complete": True},
+        next_step=NextStep.OUTPUT,
+    ).to_state_update()
 
 
 # ======================================================================
@@ -294,10 +315,10 @@ async def web_search_node(state: dict) -> dict:
     results = result.get("results") or []
     _dev_log("web_search_done", results_count=len(results))
 
-    return {
-        "web_search_results": results,
-        "next_step": "web_fetch",
-    }
+    return NodeUpdate(
+        values={"web_search_results": results},
+        next_step=NextStep.WEB_FETCH,
+    ).to_state_update()
 
 
 # ======================================================================
@@ -317,7 +338,10 @@ async def web_fetch_node(state: dict) -> dict:
     results: list[dict] = state.get("web_search_results") or []
     if not results:
         _dev_log("web_fetch_skip", reason="no search results")
-        return {"web_fetch_content": "", "next_step": "compose"}
+        return NodeUpdate(
+            values={"web_fetch_content": ""},
+            next_step=NextStep.COMPOSE,
+        ).to_state_update()
 
     urls = [r["url"] for r in results[:_MAX_FETCH_PAGES] if r.get("url")]
     _dev_log("web_fetch_start", urls=urls)
@@ -359,7 +383,10 @@ async def web_fetch_node(state: dict) -> dict:
     combined = "\n\n".join(parts) if parts else ""
     _dev_log("web_fetch_done", pages_ok=len(parts), total_len=len(combined))
 
-    return {"web_fetch_content": combined, "next_step": "compose"}
+    return NodeUpdate(
+        values={"web_fetch_content": combined},
+        next_step=NextStep.COMPOSE,
+    ).to_state_update()
 
 
 # ======================================================================

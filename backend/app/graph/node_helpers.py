@@ -1,3 +1,14 @@
+"""
+DEPRECATED: This module is a compatibility layer that re-exports functions from domain modules.
+
+DO NOT USE for new code. Instead, import functions directly from their source modules:
+- routing_policy.py - for routing decision functions
+- output_postprocess.py - for output processing functions
+- text_policy.py - for text analysis functions
+- etc.
+
+This module will be removed in a future version.
+"""
 from __future__ import annotations
 
 from app.graph.artifact_utils import extract_artifacts
