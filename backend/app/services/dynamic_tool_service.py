@@ -11,19 +11,14 @@ Implements the *Dynamic Tool Injection* pattern:
 
 from __future__ import annotations
 
-import ast
-import asyncio
-import builtins
-import hashlib
 import io
 import json
 import logging
-from pathlib import Path
 import re
 import shutil
 import zipfile
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,10 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.dynamic_tool import DynamicTool
 from app.models.user import User
-from app.services.api_executor import api_executor, resolve_url_template
 from app.services.auth_data_security_service import auth_data_security_service
+from app.services.dynamic_python_skill_support import (
+    SKILL_CODE_FILE,
+    SKILL_MANIFEST_FILE,
+    SKILL_README_FILE,
+    build_runner_context,
+    dynamic_skill_storage_root,
+    extract_description_from_md,
+    store_skill_package,
+    validate_python_skill_code,
+)
 from app.services.dynamic_skill_audit_service import dynamic_skill_audit_service
-from app.services.dynamic_skill_runner_client import dynamic_skill_runner_client
 from app.services.egress_policy_service import egress_policy_service
 
 logger = logging.getLogger(__name__)
@@ -42,10 +45,7 @@ logger = logging.getLogger(__name__)
 # Allowed characters in tool names (prevents LLM injection in tool names)
 _SAFE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _DYNAMIC_SKILL_MAX_ZIP_BYTES = 2 * 1024 * 1024
-_DYNAMIC_SKILL_REQUIRED_FILES = {"manifest.json", "skill.py", "skill.md"}
-_SKILL_RUNNER_FAILED = "Skill runner failed"
-
-
+_DYNAMIC_SKILL_REQUIRED_FILES = {SKILL_MANIFEST_FILE, SKILL_CODE_FILE, SKILL_README_FILE}
 def _normalize_tool_name(name: str) -> str:
     return str(name or "").removeprefix("dyn:").removeprefix("dyn_").strip().lower().replace("-", "_").replace(" ", "_")
 
@@ -168,120 +168,16 @@ class DynamicToolService:
         Returns a dict with ``status``, ``tool`` (DynamicToolOut-like), and
         ``message`` for the final answer composer.
         """
-        from app.llm import llm_provider
-        from app.schemas.dynamic_tool import ApiRegistrationPayload
+        from app.services.dynamic_tool_registration_helpers import register_from_user_message
 
-        # Ask LLM to extract structured API spec from the user's message
-        payload = await llm_provider.chat_structured(
-            response_model=ApiRegistrationPayload,
-            messages=[
-                {"role": "system", "content": META_REGISTRATION_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.0,
+        return await register_from_user_message(
+            self,
+            db=db,
+            user_id=user_id,
+            user_message=user_message,
+            meta_registration_prompt=META_REGISTRATION_PROMPT,
+            safe_name_pattern=_SAFE_NAME_RE,
         )
-
-        if not payload:
-            return {
-                "status": "failed",
-                "message": "Не удалось извлечь описание API из сообщения. Укажите URL, параметры и название.",
-            }
-
-        # Validate tool name
-        name = payload.tool_name.strip().lower().replace("-", "_").replace(" ", "_")
-        if not _SAFE_NAME_RE.match(name):
-            return {
-                "status": "failed",
-                "message": f"Некорректное имя инструмента: '{name}'. Используйте латиницу, snake_case, 2-63 символа.",
-            }
-
-        # Validate endpoint URL (egress policy)
-        try:
-            egress_policy_service.validate_url(payload.api_endpoint)
-        except ValueError as exc:
-            return {
-                "status": "failed",
-                "message": f"URL заблокирован политикой безопасности: {exc}",
-            }
-
-        # Encrypt auth data if token provided
-        auth_data: dict = {}
-        if payload.auth_token:
-            auth_data = auth_data_security_service.encrypt({"token": payload.auth_token})
-
-        # Upsert — update if tool with same name exists for this user
-        existing = await self._get_by_name(db, user_id, name)
-        if existing:
-            existing.description = payload.description
-            existing.endpoint = payload.api_endpoint
-            existing.method = (payload.method or "GET").upper()
-            existing.headers = payload.headers or {}
-            existing.auth_data = auth_data
-            existing.parameters_schema = payload.parameters_schema or {}
-            existing.response_hint = payload.response_hint or ""
-            existing.is_active = True
-            db.add(existing)
-            await db.commit()
-            await db.refresh(existing)
-            tool = existing
-            status = "updated"
-        else:
-            tool = DynamicTool(
-                user_id=user_id,
-                name=name,
-                description=payload.description,
-                endpoint=payload.api_endpoint,
-                method=(payload.method or "GET").upper(),
-                headers=payload.headers or {},
-                auth_data=auth_data,
-                parameters_schema=payload.parameters_schema or {},
-                response_hint=payload.response_hint or "",
-                is_active=True,
-            )
-            db.add(tool)
-            await db.commit()
-            await db.refresh(tool)
-            status = "registered"
-
-        logger.info(
-            "dynamic tool %s: %s (user=%s, endpoint=%s)",
-            status,
-            name,
-            user_id,
-            payload.api_endpoint,
-        )
-
-        # Sync to Milvus for semantic retrieval
-        try:
-            from app.services.vector_tool_registry import vector_tool_registry
-            await vector_tool_registry.register_tool(
-                user_id=str(user_id),
-                tool_name=f"dyn:{name}",
-                tool_type="dynamic",
-                description=payload.description,
-                endpoint=payload.api_endpoint,
-                method=(payload.method or "GET").upper(),
-                parameters_schema=payload.parameters_schema or {},
-                metadata={"response_hint": payload.response_hint or ""},
-            )
-        except Exception as exc:
-            logger.debug("failed to sync dynamic tool to Milvus: %s", exc)
-
-        return {
-            "status": status,
-            "tool": {
-                "id": str(tool.id),
-                "name": tool.name,
-                "description": tool.description,
-                "endpoint": tool.endpoint,
-                "method": tool.method,
-                "parameters_schema": tool.parameters_schema,
-            },
-            "message": (
-                f"Инструмент **{name}** {'обновлён' if status == 'updated' else 'зарегистрирован'}. "
-                f"Теперь я могу использовать его для запросов к {payload.api_endpoint}."
-            ),
-        }
 
     async def register_skill_package(
         self,
@@ -292,144 +188,17 @@ class DynamicToolService:
         content: bytes,
     ) -> dict:
         """Register a Python Dynamic Skill from add_skill.zip payload."""
-        user_row = (
-            await db.execute(select(User).where(User.id == user_id))
-        ).scalar_one_or_none()
-        if not user_row or not bool(getattr(user_row, "is_admin", False)):
-            return {"status": "failed", "message": "Only administrators can upload Dynamic Skills"}
+        from app.services.dynamic_tool_registration_helpers import register_skill_package
 
-        safe_filename = str(filename or "add_skill.zip").strip() or "add_skill.zip"
-        if not safe_filename.lower().endswith(".zip"):
-            return {"status": "failed", "message": "Skill package must be a .zip archive."}
-
-        if not isinstance(content, (bytes, bytearray)) or not content:
-            return {"status": "failed", "message": "Skill package is empty."}
-
-        if len(content) > _DYNAMIC_SKILL_MAX_ZIP_BYTES:
-            return {
-                "status": "failed",
-                "message": f"Skill package is too large ({len(content)} bytes). Max: {_DYNAMIC_SKILL_MAX_ZIP_BYTES} bytes.",
-            }
-
-        try:
-            parsed = self._parse_skill_zip(content)
-        except ValueError as exc:
-            return {"status": "failed", "message": f"Invalid skill package: {exc}"}
-
-        manifest = parsed["manifest"]
-        skill_code = parsed["skill_py"]
-        skill_md = parsed["skill_md"]
-
-        name = str(manifest.get("name") or "").strip().lower()
-        if not _SAFE_NAME_RE.match(name):
-            return {
-                "status": "failed",
-                "message": f"Invalid skill name '{name}'. Use latin snake_case, 2-63 chars.",
-            }
-
-        entrypoint = str(manifest.get("entrypoint") or "skill.py").strip() or "skill.py"
-        function_name = str(manifest.get("function") or "run").strip() or "run"
-        description = str(manifest.get("description") or "").strip() or self._extract_description_from_md(skill_md)
-        parameters_schema = manifest.get("input_schema") if isinstance(manifest.get("input_schema"), dict) else {}
-        capabilities = manifest.get("capabilities") if isinstance(manifest.get("capabilities"), dict) else {}
-
-        # Dry-run compile + contract validation before persisting.
-        try:
-            self._validate_python_skill_code(skill_code=skill_code, function_name=function_name)
-        except ValueError as exc:
-            return {"status": "failed", "message": f"Skill code validation failed: {exc}"}
-
-        storage_meta = self._store_skill_package(
+        return await register_skill_package(
+            self,
+            db=db,
             user_id=user_id,
-            name=name,
-            version=str(manifest.get("version") or "1.0.0"),
-            skill_code=skill_code,
-            skill_md=skill_md,
-            manifest=manifest,
-            zip_payload=bytes(content),
+            filename=filename,
+            content=content,
+            safe_name_pattern=_SAFE_NAME_RE,
+            max_zip_bytes=_DYNAMIC_SKILL_MAX_ZIP_BYTES,
         )
-
-        existing = await self._get_by_name(db, user_id, name)
-        method = "PYTHON"
-        endpoint = f"python://{name}"
-        headers = {
-            "skill_type": "python_zip",
-            "entrypoint": entrypoint,
-            "function": function_name,
-            "capabilities": capabilities,
-            "manifest_version": str(manifest.get("version") or "1.0.0"),
-        }
-        auth_data = {
-            "storage_dir": storage_meta["storage_dir"],
-            "manifest_path": storage_meta["manifest_path"],
-            "skill_path": storage_meta["skill_path"],
-            "readme_path": storage_meta["readme_path"],
-            "zip_sha256": storage_meta["zip_sha256"],
-            # Fallback for container restarts/path drift: execute directly from DB
-            # if the skill file is no longer present on disk.
-            "skill_code_inline": skill_code,
-        }
-
-        if existing:
-            existing.description = description
-            existing.endpoint = endpoint
-            existing.method = method
-            existing.headers = headers
-            existing.auth_data = auth_data
-            existing.parameters_schema = parameters_schema
-            existing.response_hint = str(manifest.get("response_hint") or "")
-            existing.is_active = True
-            db.add(existing)
-            await db.commit()
-            await db.refresh(existing)
-            tool = existing
-            status = "updated"
-        else:
-            tool = DynamicTool(
-                user_id=user_id,
-                name=name,
-                description=description,
-                endpoint=endpoint,
-                method=method,
-                headers=headers,
-                auth_data=auth_data,
-                parameters_schema=parameters_schema,
-                response_hint=str(manifest.get("response_hint") or ""),
-                is_active=True,
-            )
-            db.add(tool)
-            await db.commit()
-            await db.refresh(tool)
-            status = "registered"
-
-        try:
-            from app.services.vector_tool_registry import vector_tool_registry
-
-            await vector_tool_registry.register_tool(
-                user_id=str(user_id),
-                tool_name=f"dyn:{name}",
-                tool_type="dynamic_python_skill",
-                description=description,
-                endpoint=endpoint,
-                method=method,
-                parameters_schema=parameters_schema,
-                metadata={"capabilities": capabilities, "manifest_version": str(manifest.get("version") or "1.0.0")},
-            )
-        except Exception as exc:
-            logger.debug("failed to sync dynamic python skill to Milvus: %s", exc)
-
-        return {
-            "status": status,
-            "tool": {
-                "id": str(tool.id),
-                "name": tool.name,
-                "description": tool.description,
-                "endpoint": tool.endpoint,
-                "method": tool.method,
-                "parameters_schema": tool.parameters_schema,
-            },
-            "message": f"Dynamic Skill '{name}' {'updated' if status == 'updated' else 'registered'}.",
-        }
 
     # ------------------------------------------------------------------ #
     # Manual CRUD
@@ -641,297 +410,24 @@ class DynamicToolService:
         Performs the HTTP request to the registered endpoint with the given
         arguments as query params (GET) or JSON body (POST/PUT/PATCH).
         """
-        # Strip dyn: prefix if present
-        clean_name = _normalize_tool_name(tool_name)
+        from app.services.dynamic_python_skill_runtime import call_dynamic_tool
 
-        tool = await self._get_by_name(db, user_id, clean_name)
-        if not tool:
-            return {"success": False, "error": f"Dynamic tool '{clean_name}' not found"}
-
-        if not tool.is_active:
-            return {"success": False, "error": f"Dynamic tool '{clean_name}' is disabled"}
-
-        method = (tool.method or "GET").upper()
-        endpoint = str(tool.endpoint or "").strip()
-        if method == "PYTHON" or endpoint.startswith("python://"):
-            return await self._call_python_skill(user_id=user_id, tool=tool, arguments=arguments)
-
-        # Resolve auth
-        headers = dict(tool.headers) if tool.headers else {}
-        auth_data_raw = tool.auth_data or {}
-        if auth_data_raw:
-            auth_data, _ = auth_data_security_service.resolve_for_runtime(auth_data_raw)
-            if token := auth_data.get("token"):
-                headers["Authorization"] = f"Bearer {token}"
-
-        # Build URL with params
-        url = resolve_url_template(tool.endpoint, arguments if tool.method == "GET" else {})
-
-        # Execute
-        method = tool.method or "GET"
-        body = arguments if method in ("POST", "PUT", "PATCH") else None
-
-        try:
-            async with asyncio.timeout(30):
-                result = await api_executor.call(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    body=body,
-                )
-
-            # Try to parse JSON body
-            body_text = result.get("body", "")
-            try:
-                parsed_body = json.loads(body_text)
-            except (json.JSONDecodeError, TypeError):
-                parsed_body = body_text
-
-            return {
-                "success": result.get("status_code", 0) < 400,
-                "status_code": result.get("status_code"),
-                "data": parsed_body,
-                "tool_name": clean_name,
-                "endpoint": tool.endpoint,
-            }
-        except asyncio.TimeoutError:
-            return {"success": False, "error": f"Timeout calling {tool.endpoint}"}
-        except Exception as exc:
-            logger.warning("dynamic tool call failed: %s — %s", clean_name, exc)
-            return {"success": False, "error": str(exc)}
+        return await call_dynamic_tool(
+            self,
+            db=db,
+            user_id=user_id,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
 
     async def _call_python_skill(self, *, user_id: UUID, tool: DynamicTool, arguments: dict) -> dict:
-        auth_data = tool.auth_data if isinstance(tool.auth_data, dict) else {}
-        headers = tool.headers if isinstance(tool.headers, dict) else {}
-        skill_path = str(auth_data.get("skill_path") or "").strip()
-        skill_code_inline = str(auth_data.get("skill_code_inline") or "").strip()
+        from app.services.dynamic_python_skill_runtime import call_python_skill
 
-        skill_code = ""
-        if skill_path:
-            path_obj = Path(skill_path)
-            if path_obj.exists() and path_obj.is_file():
-                try:
-                    skill_code = path_obj.read_text(encoding="utf-8")
-                except Exception as exc:
-                    return {"success": False, "error": f"Failed to read skill code: {exc}"}
+        return await call_python_skill(self, user_id=user_id, tool=tool, arguments=arguments)
 
-        if not skill_code:
-            storage_dir = str(auth_data.get("storage_dir") or "").strip()
-            if storage_dir:
-                fallback_path = Path(storage_dir) / "skill.py"
-                if fallback_path.exists() and fallback_path.is_file():
-                    try:
-                        skill_code = fallback_path.read_text(encoding="utf-8")
-                    except Exception as exc:
-                        return {"success": False, "error": f"Failed to read fallback skill code: {exc}"}
-
-        if not skill_code and skill_code_inline:
-            logger.info(
-                "dynamic python skill fallback to inline code: tool=%s user_id=%s",
-                tool.name,
-                user_id,
-            )
-            skill_code = skill_code_inline
-
-        if not skill_code:
-            if not skill_path:
-                return {
-                    "success": False,
-                    "error": (
-                        "Dynamic Python Skill is not installed correctly "
-                        "(missing skill_path and inline backup code)."
-                    ),
-                }
-            return {
-                "success": False,
-                "error": (
-                    "Dynamic Python Skill code file is missing. "
-                    "Re-upload the skill package to restore local runtime files."
-                ),
-            }
-
-        function_name = str(headers.get("function") or "run").strip() or "run"
-        capabilities = headers.get("capabilities") if isinstance(headers.get("capabilities"), dict) else {}
-        execution_mode = str(getattr(settings, "DYNAMIC_SKILL_EXECUTION_MODE", "local") or "local").strip().lower()
-        execution_id = uuid4().hex
-        self._log_skill_execution_event(
-            event="execute_start",
-            user_id=user_id,
-            tool_name=str(tool.name),
-            execution_mode=execution_mode,
-        )
-        await self._persist_skill_execution_event(
-            event="execute_start",
-            user_id=user_id,
-            tool_name=str(tool.name),
-            execution_mode=execution_mode,
-            execution_id=execution_id,
-            payload={"function_name": function_name},
-        )
-
-        try:
-            self._validate_python_skill_code(skill_code=skill_code, function_name=function_name)
-        except ValueError as exc:
-            return {"success": False, "error": f"Skill validation failed: {exc}"}
-
-        runtime_context = self._build_python_skill_context(
-            user_id=user_id,
-            tool_name=str(tool.name),
-            capabilities=capabilities,
-        )
-
-        timeout_seconds = 30
-        llm_caps = capabilities.get("llm") if isinstance(capabilities, dict) else None
-        if isinstance(llm_caps, dict):
-            timeout_candidate = llm_caps.get("timeout_seconds")
-            if isinstance(timeout_candidate, int) and 1 <= timeout_candidate <= 60:
-                timeout_seconds = timeout_candidate
-
-        if execution_mode == "runner":
-            try:
-                serializable_context = self._build_runner_context(
-                    user_id=user_id,
-                    tool_name=str(tool.name),
-                    capabilities=capabilities,
-                    execution_id=execution_id,
-                )
-                runner_result = await dynamic_skill_runner_client.execute_skill(
-                    skill_code=skill_code,
-                    function_name=function_name,
-                    params=dict(arguments or {}),
-                    context=serializable_context,
-                    timeout_seconds=timeout_seconds,
-                )
-                success = bool(runner_result.get("success"))
-                if not success:
-                    self._log_skill_execution_event(
-                        event="execute_finish",
-                        user_id=user_id,
-                        tool_name=str(tool.name),
-                        execution_mode="runner",
-                        success=False,
-                        error=str(runner_result.get("error") or _SKILL_RUNNER_FAILED),
-                    )
-                    await self._persist_skill_execution_event(
-                        event="execute_finish",
-                        user_id=user_id,
-                        tool_name=str(tool.name),
-                        execution_mode="runner",
-                        execution_id=execution_id,
-                        success=False,
-                        error=str(runner_result.get("error") or _SKILL_RUNNER_FAILED),
-                    )
-                    return {"success": False, "error": str(runner_result.get("error") or _SKILL_RUNNER_FAILED)}
-                data = runner_result.get("result") if isinstance(runner_result.get("result"), dict) else {
-                    "result": runner_result.get("result")
-                }
-                self._log_skill_execution_event(
-                    event="execute_finish",
-                    user_id=user_id,
-                    tool_name=str(tool.name),
-                    execution_mode="runner",
-                    success=True,
-                )
-                await self._persist_skill_execution_event(
-                    event="execute_finish",
-                    user_id=user_id,
-                    tool_name=str(tool.name),
-                    execution_mode="runner",
-                    execution_id=execution_id,
-                    success=True,
-                )
-                return {"success": True, "tool_name": str(tool.name), "data": data}
-            except Exception as exc:
-                logger.warning("dynamic python skill runner mode failed: %s — %s", tool.name, exc)
-                self._log_skill_execution_event(
-                    event="execute_finish",
-                    user_id=user_id,
-                    tool_name=str(tool.name),
-                    execution_mode="runner",
-                    success=False,
-                    error=str(exc),
-                )
-                await self._persist_skill_execution_event(
-                    event="execute_finish",
-                    user_id=user_id,
-                    tool_name=str(tool.name),
-                    execution_mode="runner",
-                    execution_id=execution_id,
-                    success=False,
-                    error=str(exc),
-                )
-                return {"success": False, "error": str(exc)}
-
-        try:
-            call_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._execute_python_skill_sync,
-                    skill_code,
-                    function_name,
-                    dict(arguments or {}),
-                    runtime_context,
-                ),
-                timeout=timeout_seconds,
-            )
-            if isinstance(call_result, dict):
-                data = call_result
-            else:
-                data = {"result": call_result}
-            self._log_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                success=True,
-            )
-            await self._persist_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                execution_id=execution_id,
-                success=True,
-            )
-            return {"success": True, "tool_name": str(tool.name), "data": data}
-        except asyncio.TimeoutError:
-            self._log_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                success=False,
-                error=f"Dynamic Python Skill timeout after {timeout_seconds}s",
-            )
-            await self._persist_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                execution_id=execution_id,
-                success=False,
-                error=f"Dynamic Python Skill timeout after {timeout_seconds}s",
-            )
-            return {"success": False, "error": f"Dynamic Python Skill timeout after {timeout_seconds}s"}
-        except Exception as exc:
-            logger.warning("dynamic python skill execution failed: %s — %s", tool.name, exc)
-            self._log_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                success=False,
-                error=str(exc),
-            )
-            await self._persist_skill_execution_event(
-                event="execute_finish",
-                user_id=user_id,
-                tool_name=str(tool.name),
-                execution_mode="local",
-                execution_id=execution_id,
-                success=False,
-                error=str(exc),
-            )
-            return {"success": False, "error": str(exc)}
+    @staticmethod
+    def _user_select(user_id: UUID):
+        return select(User).where(User.id == user_id)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1046,46 +542,15 @@ class DynamicToolService:
 
     @staticmethod
     def _validate_python_skill_code(*, skill_code: str, function_name: str) -> None:
-        try:
-            module_ast = ast.parse(skill_code, filename="skill.py")
-        except SyntaxError as exc:
-            raise ValueError(f"syntax error: {exc}") from exc
-
-        has_function = False
-        for node in ast.walk(module_ast):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                if isinstance(node, ast.Import):
-                    module_roots = [
-                        str(alias.name or "").split(".")[0]
-                        for alias in node.names
-                        if str(alias.name or "").strip()
-                    ]
-                else:
-                    module_roots = [str(node.module or "").split(".")[0]] if str(node.module or "").strip() else []
-
-                for root in module_roots:
-                    if root and not DynamicToolService._is_import_allowed(root):
-                        raise ValueError(f"import '{root}' is not allowed")
-            if isinstance(node, ast.FunctionDef) and node.name == function_name:
-                has_function = True
-
-        if not has_function:
-            raise ValueError(f"function '{function_name}' not found in skill.py")
+        validate_python_skill_code(skill_code=skill_code, function_name=function_name)
 
     @staticmethod
     def _extract_description_from_md(skill_md: str) -> str:
-        lines = [line.strip() for line in str(skill_md or "").splitlines() if line.strip()]
-        if not lines:
-            return "Dynamic Python Skill"
-        head = lines[0].lstrip("# ").strip()
-        return head[:240] if head else "Dynamic Python Skill"
+        return extract_description_from_md(skill_md)
 
     @staticmethod
     def _dynamic_skill_storage_root() -> Path:
-        backend_root = Path(__file__).resolve().parents[2]
-        root = backend_root / "data" / "dynamic_skills"
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        return dynamic_skill_storage_root()
 
     @classmethod
     def _store_skill_package(
@@ -1099,191 +564,27 @@ class DynamicToolService:
         manifest: dict,
         zip_payload: bytes,
     ) -> dict[str, str]:
-        storage_root = cls._dynamic_skill_storage_root()
-        safe_version = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(version or "1.0.0"))
-        skill_dir = storage_root / str(user_id) / name / safe_version
-        skill_dir.mkdir(parents=True, exist_ok=True)
-
-        skill_path = skill_dir / "skill.py"
-        readme_path = skill_dir / "skill.md"
-        manifest_path = skill_dir / "manifest.json"
-        zip_sha256 = hashlib.sha256(zip_payload).hexdigest()
-
-        skill_path.write_text(skill_code, encoding="utf-8")
-        readme_path.write_text(skill_md, encoding="utf-8")
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        return {
-            "storage_dir": str(skill_dir),
-            "skill_path": str(skill_path),
-            "readme_path": str(readme_path),
-            "manifest_path": str(manifest_path),
-            "zip_sha256": zip_sha256,
-        }
+        return store_skill_package(
+            user_id=user_id,
+            name=name,
+            version=version,
+            skill_code=skill_code,
+            skill_md=skill_md,
+            manifest=manifest,
+            zip_payload=zip_payload,
+        )
 
     def _build_python_skill_context(self, *, user_id: UUID, tool_name: str, capabilities: dict) -> dict:
-        context: dict[str, Any] = {
-            "user_id": str(user_id),
-            "tool_name": tool_name,
-            "capabilities": capabilities,
-        }
-
-        llm_caps = capabilities.get("llm") if isinstance(capabilities, dict) else None
-        if not (isinstance(llm_caps, dict) and bool(llm_caps.get("enabled"))):
-            return context
-
-        max_tokens = llm_caps.get("max_tokens")
-        max_tokens_int = max_tokens if isinstance(max_tokens, int) and 32 <= max_tokens <= 4096 else 1024
-        base_temperature = llm_caps.get("temperature")
-        base_temperature_float = (
-            float(base_temperature)
-            if isinstance(base_temperature, (int, float)) and 0 <= float(base_temperature) <= 1
-            else 0.2
-        )
-        allowed_models = llm_caps.get("allowed_models") if isinstance(llm_caps.get("allowed_models"), list) else []
-        selected_model = None
-        if allowed_models:
-            first_model = str(allowed_models[0] or "").strip()
-            if first_model and first_model != "default":
-                selected_model = first_model
-
-        def llm_chat(*args: Any, **kwargs: Any) -> dict | str:
-            # Support both styles used by skills:
-            # 1) llm.chat(system="...", user="...", options={}) -> {"text": "..."}
-            # 2) llm.chat("...") -> "..."
-            payload_options = kwargs.get("options") if isinstance(kwargs.get("options"), dict) else {}
-            simple_prompt_mode = False
-
-            if "system" in kwargs or "user" in kwargs:
-                system = str(kwargs.get("system") or "")
-                user = str(kwargs.get("user") or "")
-                if not user and args:
-                    user = str(args[0] or "")
-            else:
-                if len(args) == 1:
-                    system = ""
-                    user = str(args[0] or "")
-                    simple_prompt_mode = True
-                elif len(args) >= 2:
-                    system = str(args[0] or "")
-                    user = str(args[1] or "")
-                    if len(args) >= 3 and isinstance(args[2], dict):
-                        payload_options = args[2]
-                else:
-                    raise TypeError("llm.chat expects either (prompt) or (system, user, options)")
-
-            requested_tokens = payload_options.get("max_tokens")
-            requested_temperature = payload_options.get("temperature")
-            max_t = requested_tokens if isinstance(requested_tokens, int) and 16 <= requested_tokens <= 4096 else max_tokens_int
-            temp = (
-                float(requested_temperature)
-                if isinstance(requested_temperature, (int, float)) and 0 <= float(requested_temperature) <= 1
-                else base_temperature_float
-            )
-
-            async def _run() -> dict:
-                from app.llm import llm_provider
-
-                text = await llm_provider.chat(
-                    messages=[
-                        {"role": "system", "content": str(system or "")[:8000]},
-                        {"role": "user", "content": str(user or "")[:12000]},
-                    ],
-                    model=selected_model,
-                    temperature=temp,
-                    max_tokens=max_t,
-                )
-                return {"text": str(text or "")}
-
-            out = asyncio.run(_run())
-            text = str(out.get("text") or "")
-            return text if simple_prompt_mode else {"text": text}
-
-        context["llm"] = {"chat": llm_chat}
-        return context
+        return build_python_skill_context(user_id=user_id, tool_name=tool_name, capabilities=capabilities)
 
     @staticmethod
     def _build_runner_context(*, user_id: UUID, tool_name: str, capabilities: dict, execution_id: str) -> dict[str, Any]:
-        return {
-            "user_id": str(user_id),
-            "tool_name": tool_name,
-            "capabilities": capabilities if isinstance(capabilities, dict) else {},
-            "execution_id": execution_id,
-        }
-
-    @staticmethod
-    def _parse_csv_set(raw: str) -> set[str]:
-        parts = [chunk.strip() for chunk in str(raw or "").split(",")]
-        return {part for part in parts if part}
-
-    @classmethod
-    def _is_import_allowed(cls, root: str) -> bool:
-        policy = str(getattr(settings, "DYNAMIC_SKILL_IMPORT_POLICY", "all") or "all").strip().lower()
-        allowed = cls._parse_csv_set(getattr(settings, "DYNAMIC_SKILL_ALLOWED_IMPORTS", ""))
-        blocked = cls._parse_csv_set(getattr(settings, "DYNAMIC_SKILL_BLOCKED_IMPORTS", ""))
-
-        if policy == "allowlist":
-            return root in allowed
-        if policy == "blocklist":
-            return root not in blocked
-        return True
-
-    @classmethod
-    def _safe_import(
-        cls,
-        name: str,
-        globals_: dict | None = None,
-        locals_: dict | None = None,
-        fromlist=(),
-        level: int = 0,
-    ):
-        root = str(name or "").split(".")[0]
-        if root and not cls._is_import_allowed(root):
-            raise ImportError(f"import '{root}' is not allowed in Dynamic Skill")
-        return builtins.__import__(name, globals_, locals_, fromlist, level)
-
-    @classmethod
-    def _execute_python_skill_sync(
-        cls,
-        skill_code: str,
-        function_name: str,
-        params: dict,
-        context: dict,
-    ) -> Any:
-        safe_builtins = {
-            "str": str,
-            "int": int,
-            "float": float,
-            "bool": bool,
-            "type": type,
-            "dict": dict,
-            "list": list,
-            "tuple": tuple,
-            "set": set,
-            "len": len,
-            "min": min,
-            "max": max,
-            "sum": sum,
-            "abs": abs,
-            "range": range,
-            "enumerate": enumerate,
-            "zip": zip,
-            "sorted": sorted,
-            "any": any,
-            "all": all,
-            "isinstance": isinstance,
-            "callable": callable,
-            "print": print,
-            "__import__": cls._safe_import,
-        }
-        runtime_globals: dict[str, Any] = {"__builtins__": safe_builtins}
-        exec(compile(skill_code, "skill.py", "exec"), runtime_globals, runtime_globals)  # noqa: S102
-
-        fn = runtime_globals.get(function_name)
-        if not callable(fn):
-            raise RuntimeError(f"Skill function '{function_name}' is not callable")
-
-        return fn(params, context)
+        return build_runner_context(
+            user_id=user_id,
+            tool_name=tool_name,
+            capabilities=capabilities,
+            execution_id=execution_id,
+        )
 
 
 dynamic_tool_service = DynamicToolService()
