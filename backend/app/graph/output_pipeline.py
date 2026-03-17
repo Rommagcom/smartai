@@ -19,7 +19,10 @@ from app.graph.output_policy import (
     requested_export_kind,
     sanitize_false_attachment_claims,
 )
-from app.graph.output_postprocess import apply_output_guardrail
+from app.graph.output_postprocess import (
+    apply_output_guardrail,
+    enqueue_export_if_needed,
+)
 from app.graph.output_helpers import (
     _dev_log,
     append_export_status,
