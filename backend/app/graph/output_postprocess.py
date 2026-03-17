@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from typing import Any
 
 from app.graph.artifact_utils import extract_artifacts
@@ -8,6 +9,40 @@ from app.core.config import settings
 from app.schemas.graph import GuardrailResult, GuardrailVerdict
 
 logger = logging.getLogger(__name__)
+
+
+async def _load_user_via_dependency_db(user_id: Any) -> tuple[Any | None, Any, Any] | None:
+    from app.db.session import get_db
+    from app.main import app
+    from app.models.user import User
+    from sqlalchemy import select
+
+    provider = app.dependency_overrides.get(get_db) or get_db
+    db_gen = provider()
+    db = None
+    try:
+        db = await anext(db_gen)
+    except StopAsyncIteration:
+        with suppress(Exception):
+            await db_gen.aclose()
+        return None
+    except Exception:
+        with suppress(Exception):
+            await db_gen.aclose()
+        return None
+
+    try:
+        user_res = await db.execute(select(User).where(User.id == user_id))
+        user = user_res.scalar_one_or_none()
+        if user is None:
+            with suppress(Exception):
+                await db_gen.aclose()
+            return None
+        return user, db, db_gen
+    except Exception:
+        with suppress(Exception):
+            await db_gen.aclose()
+        return None
 
 
 def apply_output_guardrail(final_answer: str) -> tuple[str, GuardrailResult]:
@@ -110,7 +145,32 @@ async def apply_direct_route_fallback(
                 if direct_answer:
                     final_answer = direct_answer
     except Exception:
-        logger.warning("output direct-route fallback failed", exc_info=True)
+        logger.warning("output direct-route fallback primary-db failed", exc_info=True)
+        override_bundle = await _load_user_via_dependency_db(user_id)
+        if override_bundle is None:
+            return final_answer, all_calls, all_artifacts
+
+        user, db, db_gen = override_bundle
+        try:
+            direct_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=direct_steps,
+                max_steps=max(1, len(direct_steps)),
+            )
+            with suppress(Exception):
+                await db.commit()
+            if direct_calls and any(bool(c.get("success")) for c in direct_calls):
+                all_calls = [*all_calls, *direct_calls]
+                all_artifacts = [*all_artifacts, *extract_artifacts(direct_calls)]
+                direct_answer = ChatService._format_deterministic_tool_answer(direct_calls)
+                if direct_answer:
+                    final_answer = direct_answer
+        except Exception:
+            logger.warning("output direct-route fallback override-db failed", exc_info=True)
+        finally:
+            with suppress(Exception):
+                await db_gen.aclose()
 
     return final_answer, all_calls, all_artifacts
 

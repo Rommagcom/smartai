@@ -169,7 +169,7 @@ def run(params, context):
 
   ### Sandbox callbacks
 
-  В режиме `DYNAMIC_SKILL_EXECUTION_MODE=runner` skill исполняется в отдельном краткоживущем контейнере.
+  Dynamic Skill всегда исполняется в отдельном краткоживущем контейнере `skill-runner`.
 
   - `context["llm"]["chat"](...)` вызывает LLM через callback в `skill-runner`
   - `context["http"]` даёт безопасный HTTP proxy через `skill-runner`
