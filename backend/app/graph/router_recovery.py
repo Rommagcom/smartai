@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from re import Pattern
 
+from app.graph.orchestration_types import SystemToolName
 from app.schemas.graph import RouterDecision, RouterOutput, ToolStep
 
 _STRUCTURED_PARSE_MARKERS = (
@@ -93,7 +94,7 @@ def _is_web_search_salvage(candidate: str, decision_match: re.Match[str] | None)
         return True
     # Sometimes JSON is truncated before the decision field closes.
     return (not decision_match) and bool(
-        re.search(r'"tool"\s*:\s*"web_search"', candidate, re.IGNORECASE)
+        re.search(rf'"tool"\s*:\s*"{SystemToolName.WEB_SEARCH.value}"', candidate, re.IGNORECASE)
     )
 
 
@@ -108,7 +109,7 @@ def _build_web_search_output(
     query = query or web_search_pattern.sub("", user_message).strip() or user_message
     return RouterOutput(
         decision=RouterDecision.WEB_SEARCH,
-        steps=[ToolStep(tool="web_search", arguments={"query": query})],
+        steps=[ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query})],
         response_hint=web_search_hint,
         confidence=0.45,
     )
@@ -125,17 +126,17 @@ def _salvage_safe_export_tool_step(candidate: str, user_message: str) -> RouterO
         return None
 
     tool_name: str | None = None
-    if re.search(r'"tool"\s*:\s*"pdf_create"', lowered):
-        tool_name = "pdf_create"
-    elif re.search(r'"tool"\s*:\s*"excel_create"', lowered):
-        tool_name = "excel_create"
+    if re.search(rf'"tool"\s*:\s*"{SystemToolName.PDF_CREATE.value}"', lowered):
+        tool_name = SystemToolName.PDF_CREATE.value
+    elif re.search(rf'"tool"\s*:\s*"{SystemToolName.EXCEL_CREATE.value}"', lowered):
+        tool_name = SystemToolName.EXCEL_CREATE.value
     if not tool_name:
         return None
 
     title_match = re.search(r'"title"\s*:\s*"([\s\S]*?)"', candidate, re.IGNORECASE)
     title = (title_match.group(1) if title_match else "").replace('\\"', '"').strip()
     if not title:
-        title = "Документ" if tool_name == "pdf_create" else "Таблица"
+        title = "Документ" if tool_name == SystemToolName.PDF_CREATE.value else "Таблица"
 
     # If content is truncated or missing, safely fall back to original user request;
     # downstream document pipeline expands prompt-like text via LLM.
@@ -146,7 +147,7 @@ def _salvage_safe_export_tool_step(candidate: str, user_message: str) -> RouterO
     if not content:
         content = "Сформируй содержимое документа по запросу пользователя."
 
-    filename = "generated-document.pdf" if tool_name == "pdf_create" else "generated-document.xlsx"
+    filename = "generated-document.pdf" if tool_name == SystemToolName.PDF_CREATE.value else "generated-document.xlsx"
     return RouterOutput(
         decision=RouterDecision.TOOL,
         steps=[

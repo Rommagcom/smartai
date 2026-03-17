@@ -7,35 +7,43 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.graph.node_helpers import (
-    _looks_like_incomplete_markdown_answer,
-    _sanitize_llm_answer,
-    build_raw_tool_summary,
-    build_raw_web_summary,
+from app.graph.compose_helpers import (
+    ReflexionComposeOutput,
+    _build_complete_result,
+    _build_context_text,
+    _build_doc_context,
+    _build_incomplete_result,
+    _build_web_context,
+    _dev_log,
+    _extract_doc_ask_result,
+    _recover_truncated_web_answer,
+    _should_use_recovered_answer,
+    _synthesize_web_fallback,
+)
+from app.graph.router_recovery import (
     extract_non_json_answer_from_exception,
+)
+from app.graph.text_policy import (
+    looks_like_incomplete_markdown_answer as _looks_like_incomplete_markdown_answer,
+    sanitize_llm_answer as _sanitize_llm_answer,
+)
+from app.graph.tool_result_formatter import build_raw_tool_summary
+from app.graph.web_fallback import (
+    build_raw_web_summary,
     web_result_field,
+)
+from app.graph.prompt_builders import (
+    build_compose_prompt,
+    build_doc_ask_compose_prompt,
+    build_recovered_answer_prompt,
+    build_web_fallback_prompt,
 )
 from app.schemas.graph import ToolResult
 
 logger = logging.getLogger(__name__)
 
 
-def _dev_log(event: str, **ctx: Any) -> None:
-    if not settings.DEV_VERBOSE_LOGGING:
-        return
-    logger.info(
-        f"graph node: {event}",
-        extra={"context": {"component": "langgraph", "event": event, **ctx}},
-    )
-
-
-class ReflexionComposeOutput(BaseModel):
-    is_complete: bool
-    answer: str = ""
-    feedback_plan: str = ""
-
-
-async def _recover_truncated_web_answer(
+async def _recover_compose_failure(
     *,
     llm_provider: Any,
     answer: str,
@@ -60,21 +68,9 @@ async def _recover_truncated_web_answer(
         )
 
     try:
+        messages, _ = build_recovered_answer_prompt(user_message, web_context[:12000])
         recovered = await llm_provider.chat(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Сформируй полный ответ по данным ниже. "
-                        "Пиши обычным текстом или коротким маркированным списком. "
-                        "Не используй markdown-таблицы и не оставляй ответ незавершенным."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Вопрос: {user_message}\n\nДанные:\n{web_context[:12000]}",
-                },
-            ],
+            messages=messages,
             temperature=0.0,
             max_tokens=settings.OLLAMA_NUM_PREDICT,
         )
@@ -137,27 +133,9 @@ async def _compose_doc_ask_answer(
     doc_answer = str(doc_ask_result.get("answer") or "").strip()
     doc_context = _build_doc_context(doc_ask_result.get("items", []))
     try:
+        messages, _ = build_doc_ask_compose_prompt(user_message, doc_answer, doc_context)
         llm_doc_answer = await llm_provider.chat(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты формируешь финальный ответ пользователю на основе результатов поиска по его документам. "
-                        "Учитывай формулировку вопроса пользователя. "
-                        "Не выдумывай факты вне предоставленного контекста. "
-                        "Пиши подробно и структурировано. "
-                        "В конце добавь раздел 'Источники' с кратким перечислением документов, на которые опираешься."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"Вопрос пользователя:\n{user_message}\n\n"
-                        f"Черновой ответ инструмента doc_ask:\n{doc_answer or '(пусто)'}\n\n"
-                        f"Фрагменты источников:\n{doc_context or '(источники не переданы)'}"
-                    ),
-                },
-            ],
+            messages=messages,
             temperature=0.0,
             max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
         )
@@ -219,58 +197,6 @@ def _build_context_text(
     return "\n\n".join([chunk for chunk in context_chunks if str(chunk).strip()])
 
 
-def _build_compose_prompt(
-    *,
-    user_message: str,
-    context_text: str,
-    iterations: int,
-    max_iterations: int,
-    has_integration: bool,
-    all_failed: bool,
-    has_web_context: bool,
-) -> str:
-    integration_summary_prompt = ""
-    if has_integration and not all_failed:
-        integration_summary_prompt = (
-            "\n\nДОПОЛНИТЕЛЬНО ДЛЯ ОТВЕТОВ ИНТЕГРАЦИЙ:\n"
-            "Ты получил ответ от внешнего API (интеграции). "
-            "Проанализируй тело ответа и сформируй ЧЕЛОВЕКОЧИТАЕМЫЙ ответ. "
-            "Если данные в XML/JSON - извлеки ключевые значения и представь "
-            "в удобном виде (таблица, список, текст). "
-            "НЕ выводи сырой XML/JSON. НЕ обрезай данные - покажи ВСЕ основные записи. "
-            "Если пользователь просил конкретные данные - выдели их."
-        )
-
-    web_formatting_prompt = ""
-    if has_web_context:
-        web_formatting_prompt = (
-            "\n\nДОПОЛНИТЕЛЬНО ДЛЯ WEB-ОТВЕТОВ:\n"
-            "Не используй markdown-таблицы. Предпочитай обычный текст и короткие списки. "
-            "Ответ должен быть завершенным, без оборванных строк и незакрытого markdown."
-        )
-
-    return (
-        "Ты — финальный проверяющий AI-агента. Твоя задача — проанализировать "
-        "вопрос пользователя и собранные данные.\n\n"
-        f"Вопрос пользователя: \"{user_message}\"\n"
-        f"Собранные данные:\n{context_text if context_text else '(данные отсутствуют)'}\n\n"
-        f"Текущая итерация поиска: {iterations} из {max_iterations}.\n\n"
-        "ИНСТРУКЦИЯ:\n"
-        "1. Оцени, достаточно ли собранных данных для точного, полного и правдивого ответа.\n"
-        "2. Если данных ДОСТАТОЧНО (или итерация достигла лимита):\n"
-        "   - Сформируй итоговый ответ.\n"
-        "   - Установи is_complete: true.\n"
-        "   - feedback_plan оставь пустым.\n"
-        "3. Если данных НЕДОСТАТОЧНО:\n"
-        "   - Не пиши финальный ответ пользователю.\n"
-        "   - Напиши четкую инструкцию (feedback_plan), что нужно найти на следующем шаге.\n"
-        "   - Установи is_complete: false.\n\n"
-        f"{integration_summary_prompt}{web_formatting_prompt}\n\n"
-        "Ответь СТРОГО валидным JSON:\n"
-        '{"is_complete": true | false, "answer": "...", "feedback_plan": "..."}'
-    )
-
-
 def _build_web_context(web_fetch_content: str, web_search_results: list[dict], *, limit: int = 8) -> str:
     web_context = web_fetch_content.strip()
     if web_context or not web_search_results:
@@ -323,21 +249,9 @@ async def _synthesize_web_fallback(
 ) -> str:
     web_context = _build_web_context(web_fetch_content, web_search_results)
     try:
+        messages, _ = build_web_fallback_prompt(user_message, web_context)
         fallback_answer = await llm_provider.chat(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Сформируй короткий и точный ответ пользователю только по данным ниже. "
-                        "Если данных недостаточно, честно скажи, чего не хватает. "
-                        "Не используй markdown-таблицы."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Вопрос: {user_message}\n\nДанные:\n{web_context[:12000]}",
-                },
-            ],
+            messages=messages,
             temperature=0.0,
             max_tokens=settings.OLLAMA_NUM_PREDICT,
         )
@@ -458,80 +372,11 @@ async def _finalize_complete_compose(
 
 
 async def compose_node(state: dict) -> dict:
-    """Reflexion synth node: either finalize answer or return explicit feedback plan."""
-    from app.llm import llm_provider
-
-    inputs = _extract_compose_inputs(state)
-    short_circuit = _try_existing_answer_short_circuit(inputs)
-    if short_circuit is not None:
-        return short_circuit
-
-    doc_ask_answer = await _compose_doc_ask_answer(
-        llm_provider=llm_provider,
-        user_message=inputs["user_message"],
-        tool_results=inputs["tool_results"],
-        iterations=inputs["iterations"],
-    )
-    if doc_ask_answer is not None:
-        return doc_ask_answer
-
-    context_text = _build_context_text(
-        state_context=inputs["state_context"],
-        web_fetch_content=inputs["web_fetch_content"],
-        web_search_results=inputs["web_search_results"],
-        tool_results=inputs["tool_results"],
-    )
-    prompt = _build_compose_prompt(
-        user_message=inputs["user_message"],
-        context_text=context_text,
-        iterations=inputs["iterations"],
-        max_iterations=inputs["max_iterations"],
-        has_integration=inputs["has_integration"],
-        all_failed=inputs["all_failed"],
-        has_web_context=bool(inputs["web_fetch_content"] or inputs["web_search_results"]),
-    )
-
-    compose_messages = _build_compose_messages(
-        prompt=prompt,
-        history=inputs["history"],
-        user_message=inputs["user_message"],
-    )
-
-    try:
-        output = await llm_provider.chat_structured(
-            messages=compose_messages,
-            response_model=ReflexionComposeOutput,
-            model=settings.LITELLM_PLANNER_MODEL or None,
-            temperature=0.0,
-            max_tokens=max(int(settings.OLLAMA_NUM_PREDICT), int(settings.OLLAMA_NUM_PREDICT_PLANNER)),
-        )
-    except Exception as exc:
-        return await _recover_compose_failure(
-            llm_provider=llm_provider,
-            exc=exc,
-            user_message=inputs["user_message"],
-            existing_answer=inputs["existing_answer"],
-            iterations=inputs["iterations"],
-            web_fetch_content=inputs["web_fetch_content"],
-            web_search_results=inputs["web_search_results"],
-            tool_results=inputs["tool_results"],
-        )
-
-    is_complete = bool(output.is_complete) or inputs["iterations"] >= inputs["max_iterations"]
-    if is_complete:
-        return await _finalize_complete_compose(
-            llm_provider=llm_provider,
-            output=output,
-            existing_answer=inputs["existing_answer"],
-            iterations=inputs["iterations"],
-            user_message=inputs["user_message"],
-            web_fetch_content=inputs["web_fetch_content"],
-            web_search_results=inputs["web_search_results"],
-            tool_results=inputs["tool_results"],
-        )
-
-    feedback_plan = str(output.feedback_plan or "").strip()
-    if not feedback_plan:
-        feedback_plan = "Нужен дополнительный поиск данных: уточнить недостающие факты и источники."
-
-    return _build_incomplete_result(feedback_plan=feedback_plan, iterations=inputs["iterations"])
+    """Reflexion synth node using new pipeline.
+    
+    Delegates to compose_pipeline for clean orchestration:
+    input extraction → short-circuit → doc_ask → structure → post-process
+    """
+    from app.graph.compose_pipeline import run_compose_pipeline
+    
+    return await run_compose_pipeline(state)

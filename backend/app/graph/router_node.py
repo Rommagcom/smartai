@@ -4,11 +4,29 @@ import logging
 from typing import Any
 
 from app.core.config import settings
-from app.graph.node_helpers import (
+from app.graph.graph_contexts import RouterContext
+from app.graph.orchestration_types import (
+    FallbackMode,
+    NextStep,
+    RouterNodeUpdate,
+    SystemToolName,
+    next_step_from_router_decision,
+)
+from app.graph.router_helpers import (
+    _build_retrieved_tools_block,
+    _dev_log,
+    build_web_search_fallback,
+    try_deterministic_route,
+    try_export_followup_route,
+    try_feedback_web_search_route,
+    try_hard_route,
+    try_live_data_route,
+    try_live_export_override,
+)
+from app.graph.router_types import RouterResult
+from app.graph.routing_policy import (
     WEB_SEARCH_RE,
-    _hard_structured_route,
     deterministic_route,
-    extract_router_output_from_exception,
     fallback_explicit_export_route,
     fallback_live_data_export_route,
     feedback_requires_web_search,
@@ -16,8 +34,20 @@ from app.graph.node_helpers import (
     followup_export_route,
     is_live_data_query,
     is_web_search_intent,
-    load_user_tool_context,
     strip_web_search_prefix,
+)
+from app.graph.prompt_routing_policy import (
+    hard_structured_route as _hard_structured_route,
+)
+from app.graph.router_recovery import (
+    extract_router_output_from_exception,
+)
+from app.graph.user_tool_context import load_user_tool_context
+from app.graph.prompt_builders import build_router_prompt as _build_router_prompt
+from app.graph.router_decision_policy import (
+    decide_fallback_mode,
+    extract_router_decision_intent,
+    should_skip_router_llm,
 )
 from app.schemas.graph import RouterDecision, RouterOutput, ToolStep
 
@@ -63,83 +93,20 @@ def _build_retrieved_tools_block(retrieved_tools: list[dict]) -> str:
     )
 
 
-def _build_router_prompt(
-    *,
-    user_message: str,
-    feedback_plan: str,
-    tool_catalog_signatures: str,
-    dynamic_tools_block: str,
-    integrations_block: str,
-    retrieved_block: str,
-) -> str:
-    return (
-        "Ты — маршрутизатор задач AI-агента.\n"
-        "Твоя цель — выбрать правильный инструмент для выполнения запроса.\n\n"
-        f"Вопрос пользователя: \"{user_message}\"\n\n"
-        "Доступные инструменты:\n"
-        f"{tool_catalog_signatures}\n"
-        f"{dynamic_tools_block}"
-        f"{integrations_block}"
-        f"{retrieved_block}"
-        "(Также всегда доступен инструмент 'web_search' для поиска в интернете)\n\n"
-        "ОБРАТИ ВНИМАНИЕ НА ЗАМЕЧАНИЯ ПРЕДЫДУЩЕГО ШАГА:\n"
-        f"{feedback_plan if feedback_plan else 'Это первый проход, замечаний нет.'}\n\n"
-        "ИНСТРУКЦИЯ:\n"
-        "Если в замечаниях сказано искать в интернете — выбирай decision='web_search' "
-        "и формируй оптимальный query в steps.\n"
-        "Если нужно дернуть внутреннее API/инструменты — выбирай decision='tool'.\n"
-        "Если нужен обычный ответ без инструментов — decision='chat'.\n\n"
-        "Верни JSON с полями: decision, steps, response_hint, confidence.\n"
-        "decision: 'tool' — нужен инструмент, 'chat' — обычный разговор, "
-        "'memory' — операция с памятью, 'clarify' — нужно уточнение, "
-        "'web_search' — поиск информации в интернете.\n"
-        "Правила:\n"
-        "1) Для напоминаний используй cron_add с schedule_text и task_text. "
-        "Если задача требует вызова API/интеграции (курс валют, погода и т.д.) — добавь action_type='chat'. "
-        "Если обычное текстовое напоминание — action_type не нужен.\n"
-        "2) Для PDF — pdf_create.\n"
-        "2a) Для Excel/таблицы — excel_create.\n"
-        "3) Если просит подключить API — register_api_tool с user_message (полным сообщением пользователя).\n"
-        "4) Для удаления всех напоминаний — cron_delete_all.\n"
-        "5) Не выдумывай аргументы.\n"
-        "6) steps — максимум 5 шагов.\n"
-        "7) Для удаления факта: memory_search → memory_delete.\n"
-        "8) Для ВЫЗОВА подключённой интеграции используй integration_call "
-        "с service_name из списка интеграций пользователя. "
-        "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют из nationalbank' — "
-        "это integration_call с service_name=X.\n"
-        "9) Для пользовательских динамических API используй dyn:<имя> с нужными аргументами.\n"
-        "10) Если в 'семантически найденных инструментах' есть подходящий — предпочитай его.\n"
-        "11) Для списка загруженных документов — doc_list.\n"
-        "12) Для удаления одного документа — doc_delete с source_doc (имя файла).\n"
-        "13) Для удаления всех документов — doc_delete_all.\n"
-        "14) Для поиска информации в интернете используй decision='web_search' с query в steps. "
-        "Если пользователь просит 'найди в интернете', 'загугли', 'поищи в сети' — это web_search. "
-        "Для регулярного получения данных из интернета — cron_add с action_type='chat' и task_text='найди в интернете ...'. \n"
-        "15) Если шаг зависит от результата предыдущего, используй плейсхолдеры: "
-        "$prev.body — тело ответа предыдущего шага, $prev.items, $prev.content и т.д. "
-        "Пример: [{\"tool\": \"integration_call\", \"arguments\": {\"service_name\": \"X\"}}, "
-        "{\"tool\": \"pdf_create\", \"arguments\": {\"title\": \"Отчёт\", \"content\": \"$prev.body\"}}].\n"
-        "15a) Для одиночного шага pdf_create/excel_create НЕ пиши полный документ в arguments.content. "
-        "Передавай только короткий источник (до 300 символов, без markdown-блоков и длинных переносов). "
-        "Если нужен полный документ, сначала получи/сформируй данные отдельным шагом, затем используй $prev.body.\n"
-        "16) Если пользователь просит актуальные данные (погода, курс валют, новости и т.п.) И одновременно экспорт в PDF/Excel, "
-        "сначала получи данные (decision='web_search' или integration_call), затем сформируй файл по результатам. "
-        "Нельзя сразу делать pdf_create/excel_create только из исходного текста запроса.\n"
-    )
-
-
 def _try_feedback_web_search_route(user_message: str, feedback_plan: str) -> dict | None:
     if not (feedback_plan and feedback_requires_web_search(feedback_plan)):
         return None
     query = feedback_to_search_query(feedback_plan, user_message)
     reflexion_route = RouterOutput(
         decision=RouterDecision.WEB_SEARCH,
-        steps=[ToolStep(tool="web_search", arguments={"query": query})],
+        steps=[ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query})],
         response_hint="Следующий цикл: web_search по плану доработки",
         confidence=0.95,
     )
-    return {"router_output": reflexion_route, "next_step": "web_search"}
+    return RouterNodeUpdate(
+        router_output=reflexion_route,
+        next_step=NextStep.WEB_SEARCH,
+    ).to_state_update()
 
 
 def _try_hard_route(user_message: str) -> dict | None:
@@ -147,10 +114,10 @@ def _try_hard_route(user_message: str) -> dict | None:
     if hard_route is None:
         return None
     _dev_log("router_hard_structured", steps_count=len(hard_route.steps))
-    return {
-        "router_output": hard_route,
-        "next_step": hard_route.decision.value,
-    }
+    return RouterNodeUpdate(
+        router_output=hard_route,
+        next_step=next_step_from_router_decision(hard_route.decision),
+    ).to_state_update()
 
 
 def _try_export_followup_route(user_message: str, history: list[dict]) -> dict | None:
@@ -160,10 +127,10 @@ def _try_export_followup_route(user_message: str, history: list[dict]) -> dict |
     if export_followup is None:
         return None
     _dev_log("router_deterministic_export_followup", decision=export_followup.decision.value)
-    return {
-        "router_output": export_followup,
-        "next_step": export_followup.decision.value,
-    }
+    return RouterNodeUpdate(
+        router_output=export_followup,
+        next_step=next_step_from_router_decision(export_followup.decision),
+    ).to_state_update()
 
 
 def _try_deterministic_route(user_message: str) -> dict | None:
@@ -173,10 +140,10 @@ def _try_deterministic_route(user_message: str) -> dict | None:
     if deterministic is None:
         return None
     _dev_log("router_deterministic", decision=deterministic.decision.value)
-    return {
-        "router_output": deterministic,
-        "next_step": deterministic.decision.value,
-    }
+    return RouterNodeUpdate(
+        router_output=deterministic,
+        next_step=next_step_from_router_decision(deterministic.decision),
+    ).to_state_update()
 
 
 async def _load_router_context(user_id: Any) -> tuple[str, str]:
@@ -202,12 +169,15 @@ def _try_live_data_route(
     query = user_message.strip()
     live_data_route = RouterOutput(
         decision=RouterDecision.WEB_SEARCH,
-        steps=[ToolStep(tool="web_search", arguments={"query": query})],
+        steps=[ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query})],
         response_hint="Быстрый путь live-data: web_search без planner LLM",
         confidence=0.9,
     )
     _dev_log("router_fast_live_data", query=query[:120])
-    return {"router_output": live_data_route, "next_step": "web_search"}
+    return RouterNodeUpdate(
+        router_output=live_data_route,
+        next_step=NextStep.WEB_SEARCH,
+    ).to_state_update()
 
 
 def _build_router_messages(*, planner_prompt: str, history: list[dict], user_message: str) -> list[dict[str, str]]:
@@ -234,10 +204,10 @@ def _try_live_export_override(user_message: str, router_output: RouterOutput) ->
         original_decision=router_output.decision.value,
         steps_count=len(live_export_override.steps),
     )
-    return {
-        "router_output": live_export_override,
-        "next_step": "tool",
-    }
+    return RouterNodeUpdate(
+        router_output=live_export_override,
+        next_step=NextStep.TOOL,
+    ).to_state_update()
 
 
 async def _run_router_llm(
@@ -260,68 +230,95 @@ def _build_web_search_fallback(user_message: str) -> dict:
     _dev_log("router_fallback_web_search", query=query[:120])
     fallback = RouterOutput(
         decision=RouterDecision.WEB_SEARCH,
-        steps=[ToolStep(tool="web_search", arguments={"query": query})],
+        steps=[ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query})],
         response_hint=_WEB_SEARCH_HINT,
         confidence=0.5,
     )
-    return {
-        "router_output": fallback,
-        "next_step": "web_search",
-    }
+    return RouterNodeUpdate(
+        router_output=fallback,
+        next_step=NextStep.WEB_SEARCH,
+    ).to_state_update()
 
 
 def _handle_router_fallback(exc: Exception, *, user_message: str) -> dict:
     logger.warning("Router LLM failed: %s, using fallback routing", exc)
+    
+    # Side effect: Extract router output from malformed JSON exception
     salvaged = extract_router_output_from_exception(
         exc,
         user_message,
         web_search_pattern=WEB_SEARCH_RE,
         web_search_hint=_WEB_SEARCH_HINT,
     )
-    if salvaged is not None:
+    
+    # Policy: Determine which fallback mode to use (salvage, export, live_export, web_search, chat)
+    has_salvage = salvaged is not None
+    has_explicit_export = fallback_explicit_export_route(user_message) is not None
+    has_live_export = (
+        settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS 
+        and settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK
+        and fallback_live_data_export_route(user_message) is not None
+    )
+    is_web_search = settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS and is_web_search_intent(user_message)
+    
+    fallback_mode = decide_fallback_mode(
+        has_salvage=has_salvage,
+        has_explicit_export=has_explicit_export,
+        has_live_export=has_live_export,
+        is_web_search_intent=is_web_search,
+    )
+    _dev_log("router_fallback_mode_selected", mode=fallback_mode)
+    
+    # Side effect: Execute the selected fallback mode
+    if fallback_mode == "salvaged" and salvaged is not None:
         _dev_log(
             "router_fallback_salvaged",
+            mode=FallbackMode.JSON_SALVAGE.value,
             decision=salvaged.decision.value,
             steps_count=len(salvaged.steps),
         )
-        return {
-            "router_output": salvaged,
-            "next_step": salvaged.decision.value,
-        }
-
-    explicit_export_fallback = fallback_explicit_export_route(user_message)
-    if explicit_export_fallback is not None:
-        _dev_log(
-            "router_fallback_explicit_export",
-            decision=explicit_export_fallback.decision.value,
-            steps_count=len(explicit_export_fallback.steps),
-        )
-        return {
-            "router_output": explicit_export_fallback,
-            "next_step": explicit_export_fallback.decision.value,
-        }
-
-    if settings.ROUTER_ENABLE_DETERMINISTIC_FALLBACKS:
-        if settings.ROUTER_ENABLE_LIVE_EXPORT_FALLBACK:
-            live_export_fallback = fallback_live_data_export_route(user_message)
-            if live_export_fallback is not None:
-                _dev_log(
-                    "router_fallback_live_export",
-                    decision=live_export_fallback.decision.value,
-                    steps_count=len(live_export_fallback.steps),
-                )
-                return {
-                    "router_output": live_export_fallback,
-                    "next_step": "tool",
-                }
-        if is_web_search_intent(user_message):
-            return _build_web_search_fallback(user_message)
-
+        return RouterNodeUpdate(
+            router_output=salvaged,
+            next_step=next_step_from_router_decision(salvaged.decision),
+        ).to_state_update()
+    
+    if fallback_mode == "explicit_export":
+        explicit_export_fallback = fallback_explicit_export_route(user_message)
+        if explicit_export_fallback is not None:
+            _dev_log(
+                "router_fallback_explicit_export",
+                mode=FallbackMode.EXPLICIT_EXPORT.value,
+                decision=explicit_export_fallback.decision.value,
+                steps_count=len(explicit_export_fallback.steps),
+            )
+            return RouterNodeUpdate(
+                router_output=explicit_export_fallback,
+                next_step=next_step_from_router_decision(explicit_export_fallback.decision),
+            ).to_state_update()
+    
+    if fallback_mode == "live_export":
+        live_export_fallback = fallback_live_data_export_route(user_message)
+        if live_export_fallback is not None:
+            _dev_log(
+                "router_fallback_live_export",
+                mode=FallbackMode.LIVE_EXPORT.value,
+                decision=live_export_fallback.decision.value,
+                steps_count=len(live_export_fallback.steps),
+            )
+            return RouterNodeUpdate(
+                router_output=live_export_fallback,
+                next_step=NextStep.TOOL,
+            ).to_state_update()
+    
+    if fallback_mode == "web_search":
+        return _build_web_search_fallback(user_message)
+    
+    # Default: Chat fallback
     fallback = RouterOutput(decision=RouterDecision.CHAT, confidence=0.3)
-    return {
-        "router_output": fallback,
-        "next_step": "chat",
-    }
+    return RouterNodeUpdate(
+        router_output=fallback,
+        next_step=NextStep.CHAT,
+    ).to_state_update()
 
 
 async def router_node(state: dict) -> dict:
@@ -329,12 +326,17 @@ async def router_node(state: dict) -> dict:
     from app.llm import llm_provider
     from app.services.tool_catalog_service import tool_catalog_service
 
-    user_message = state["user_message"]
-    user_id = state.get("user_id")
-    feedback_plan = str(state.get("feedback_plan") or "").strip()
-    retrieved_tools: list[dict] = state.get("retrieved_tools") or []
-    history: list[dict] = state.get("history_messages") or []
+    context = RouterContext.from_state(state)
+    user_message = context.user_message
+    user_id = context.user_id
+    feedback_plan = context.feedback_plan
+    retrieved_tools = context.retrieved_tools
+    history = context.history_messages
     _dev_log("router_start", message_preview=user_message[:120])
+
+    # Policy decision: Should we skip expensive LLM call with fast-path logic?
+    if should_skip_router_llm(feedback_plan, user_message):
+        _dev_log("router_policy_skip_llm", reason="feedback_plan or empty_message")
 
     for fast_path in (
         _try_feedback_web_search_route(user_message, feedback_plan),
@@ -387,9 +389,9 @@ async def router_node(state: dict) -> dict:
         live_export_override = _try_live_export_override(user_message, router_output)
         if live_export_override is not None:
             return live_export_override
-        return {
-            "router_output": router_output,
-            "next_step": router_output.decision.value,
-        }
+        return RouterNodeUpdate(
+            router_output=router_output,
+            next_step=next_step_from_router_decision(router_output.decision),
+        ).to_state_update()
     except Exception as exc:
         return _handle_router_fallback(exc, user_message=user_message)
