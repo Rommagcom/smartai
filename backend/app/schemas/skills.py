@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SkillManifest(BaseModel):
@@ -17,3 +17,5 @@ class SkillContract(BaseModel):
 class SkillsRegistryResponse(BaseModel):
     registry_version: str
     skills: list[SkillContract]
+    integration_tools: list[SkillContract] = Field(default_factory=list)
+    dynamic_tool_operations: list[SkillContract] = Field(default_factory=list)

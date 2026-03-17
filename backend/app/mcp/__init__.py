@@ -28,17 +28,17 @@ mcp_server = Server("smartai-assistant")
 
 
 # ---------------------------------------------------------------------------
-# Tool discovery — expose registered skills as MCP tools
+# Tool discovery — expose cataloged tools as MCP tools
 # ---------------------------------------------------------------------------
 
 
 @mcp_server.list_tools()
 async def list_tools() -> list[Tool]:
     """Return all available tools in MCP format."""
-    from app.services.skills_registry_service import skills_registry_service
+    from app.services.tool_catalog_service import tool_catalog_service
 
     tools: list[Tool] = []
-    for skill in skills_registry_service.list_skills():
+    for skill in tool_catalog_service.list_skills():
         manifest = skill.get("manifest", {})
         input_schema = skill.get("input_schema", {})
         tools.append(Tool(

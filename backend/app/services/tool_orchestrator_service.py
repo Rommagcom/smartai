@@ -26,13 +26,13 @@ from app.services.pdf_service import pdf_service
 from app.services.rag_service import rag_service
 from app.services.schedule_parser_service import schedule_parser_service
 from app.services.scheduler_service import scheduler_service
-from app.services.skills_registry_service import skills_registry_service
+from app.services.tool_catalog_service import tool_catalog_service
 from app.workers.models import WorkerJobType
 from app.workers.worker_service import worker_service
 
 logger = logging.getLogger(__name__)
 
-TOOL_NAMES = skills_registry_service.tool_names()
+TOOL_NAMES = tool_catalog_service.tool_names()
 
 TOOL_STEP_TIMEOUT_SECONDS = 90
 
@@ -393,7 +393,7 @@ class ToolOrchestratorService:
             "Если инструменты не нужны: use_tools=false и steps=[]. "
             "Если нужны: 1..5 шага в порядке выполнения. "
             "Доступные инструменты: "
-            f"{skills_registry_service.planner_signatures()}. "
+            f"{tool_catalog_service.planner_signatures()}. "
             f"{dynamic_tools_block}"
             f"{integrations_block}"
             "Правила: "
@@ -402,7 +402,7 @@ class ToolOrchestratorService:
             "2) Для напоминаний из естественного языка (например 'завтра в 9:00 к врачу', 'каждый день в 9:00 курс валют') используй cron_add с schedule_text и task_text. "
             "Если задача требует выполнения инструмента (integration_call, API-вызов, получение данных) — устанавливай action_type='chat'. "
             "Если задача — простое текстовое напоминание, action_type не указывай (по умолчанию send_message). "
-            "3) Если пользователь просит 'подключить API' или 'запомни мой API', используй dynamic_tool_register с user_message. "
+            "3) Если пользователь просит 'подключить API' или 'запомни мой API', используй register_api_tool с user_message. "
             "4) Для запросов 'возьми данные из моего API' или использования ранее подключённого API используй dyn:<имя_инструмента> с нужными аргументами. "
             "5) НИКОГДА не используй worker_enqueue для отключённых инструментов. "
             "6) Для пошагового onboarding интеграции используй цепочку integration_onboarding_connect -> integration_onboarding_test -> integration_onboarding_save. "
@@ -413,7 +413,7 @@ class ToolOrchestratorService:
             "11) Для удаления одного факта из памяти: memory_search, затем memory_delete с memory_id. "
             "12) Для очистки памяти пользователя используй memory_delete_all. "
             "13) Для просмотра подключённых пользовательских API используй dynamic_tool_list. "
-            "14) Для удаления одного пользовательского API используй dynamic_tool_delete с tool_id или tool_name (можно skill_name как алиас). "
+            "14) Для удаления одного пользовательского API используй dynamic_tool_delete с tool_id или tool_name (можно skill_name как алиас для обратной совместимости). "
             "15) Для ВЫЗОВА подключённой интеграции используй integration_call с service_name. "
             "Если пользователь пишет 'вызови интеграцию X', 'данные из X', 'курс валют' — это integration_call. "
             "16) Для вопроса по содержимому документов с готовым ответом используй doc_ask (query, top_k). "
@@ -530,13 +530,13 @@ class ToolOrchestratorService:
 
         arguments = self._augment_step_arguments(tool=tool, arguments=raw_arguments, context=context)
         arguments = await self._enrich_document_arguments(tool=tool, arguments=arguments, context=context)
-        arguments = skills_registry_service.strip_unknown_properties(tool, arguments)
+        arguments = tool_catalog_service.strip_unknown_properties(tool, arguments)
         arguments = self._coerce_argument_types(tool, arguments)
 
         if tool not in handlers:
             return {"tool": tool, "arguments": arguments, "success": False, "error": f"Unsupported tool: {tool}"}
 
-        validation_error = skills_registry_service.validate_input(tool, arguments)
+        validation_error = tool_catalog_service.validate_input(tool, arguments)
         if validation_error:
             _dev_verbose_log("step_validation_error", tool=tool, error=validation_error, arguments=arguments)
             return {"tool": tool, "arguments": arguments, "success": False, "error": f"Invalid arguments: {validation_error}"}
@@ -815,7 +815,7 @@ class ToolOrchestratorService:
         step drops boolean values for string-typed schema properties so the
         downstream ``validate_input`` doesn't reject them.
         """
-        contract = skills_registry_service.get_contract(tool)
+        contract = tool_catalog_service.get_contract(tool)
         if not contract:
             return arguments
 
@@ -2168,7 +2168,7 @@ class ToolOrchestratorService:
     async def _dynamic_tool_list(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """List all registered dynamic tools for the user."""
         del arguments
-        tools = await dynamic_tool_service.list_tools(db=db, user_id=user.id)
+        tools = await dynamic_tool_service.list_tools(db=db, user_id=user.id, kind="api_tool")
         return {
             "items": [
                 {
@@ -2187,7 +2187,7 @@ class ToolOrchestratorService:
     async def _dynamic_tool_delete(self, db: AsyncSession, user: User, arguments: dict) -> dict:
         """Delete a specific dynamic tool by id or name."""
         if not bool(getattr(user, "is_admin", False)):
-            return {"status": "forbidden", "error": "Only administrators can delete Dynamic Skills"}
+            return {"status": "forbidden", "error": "Only administrators can delete user API tools"}
 
         tool_id_raw = str(arguments.get("tool_id") or "").strip()
         tool_name_raw = str(
@@ -2202,9 +2202,10 @@ class ToolOrchestratorService:
                 db=db,
                 user_id=user.id,
                 tool_name=tool_name_raw,
+                kind="api_tool",
             )
             if not deleted:
-                raise ValueError(f"Dynamic Skill '{tool_name_raw}' not found")
+                raise ValueError(f"User API tool '{tool_name_raw}' not found")
             return {"deleted": True, "tool_name": tool_name_raw, "skill_name": tool_name_raw}
 
         if tool_id_raw:
@@ -2217,7 +2218,7 @@ class ToolOrchestratorService:
             except ValueError as exc:
                 raise ValueError(f"Invalid tool_id: {exc}") from exc
             if not deleted:
-                raise ValueError("Dynamic Skill not found")
+                raise ValueError("User API tool not found")
             return {"deleted": True, "tool_id": tool_id_raw}
 
         raise ValueError("dynamic_tool_delete requires tool_id or tool_name/skill_name")
@@ -2226,9 +2227,9 @@ class ToolOrchestratorService:
         """Delete all dynamic tools for the user."""
         del arguments
         if not bool(getattr(user, "is_admin", False)):
-            return {"status": "forbidden", "error": "Only administrators can delete Dynamic Skills"}
+            return {"status": "forbidden", "error": "Only administrators can delete user API tools"}
 
-        count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id)
+        count = await dynamic_tool_service.delete_all_tools(db=db, user_id=user.id, kind="api_tool")
         return {"deleted_count": count}
 
     # ------------------------------------------------------------------ #

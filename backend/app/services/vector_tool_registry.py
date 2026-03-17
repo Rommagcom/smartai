@@ -23,8 +23,8 @@ Milvus collection schema::
 
 from __future__ import annotations
 
-import json
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -42,6 +42,15 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _COLLECTION_NAME = "tool_vectors"
+_FULL_OUTPUT_FIELDS = [
+    "tool_name", "user_id", "tool_type", "description",
+    "endpoint", "method", "param_schema", "metadata",
+]
+_BASIC_OUTPUT_FIELDS = [
+    "tool_name", "user_id", "tool_type", "description",
+    "endpoint", "method",
+]
+_TOKEN_RE = re.compile(r"[a-zA-Zа-яА-Я0-9_]+")
 
 
 class VectorToolRegistry:
@@ -180,17 +189,41 @@ class VectorToolRegistry:
 
         safe_uid = uid.replace("\\", "\\\\").replace('"', '\\"')
 
-        results = collection.search(
-            data=[query_vector],
-            anns_field="vector",
-            param={"metric_type": "COSINE", "params": {"ef": 64}},
-            limit=max(1, min(top_k, 50)),
-            output_fields=[
-                "tool_name", "user_id", "tool_type", "description",
-                "endpoint", "method", "param_schema", "metadata",
-            ],
-            expr=f'user_id == "{safe_uid}"',
-        )
+        search_kwargs = {
+            "data": [query_vector],
+            "anns_field": "vector",
+            "param": {"metric_type": "COSINE", "params": {"ef": 64}},
+            "limit": max(1, min(top_k, 50)),
+            "expr": f'user_id == "{safe_uid}"',
+        }
+        try:
+            results = collection.search(
+                output_fields=_FULL_OUTPUT_FIELDS,
+                **search_kwargs,
+            )
+        except Exception as exc:
+            if not self._is_output_field_compatibility_error(exc):
+                raise
+            logger.info(
+                "Milvus search fallback: JSON output fields unsupported, retrying with basic fields"
+            )
+            try:
+                results = collection.search(
+                    output_fields=_BASIC_OUTPUT_FIELDS,
+                    **search_kwargs,
+                )
+            except Exception as fallback_exc:
+                if not self._is_output_field_compatibility_error(fallback_exc):
+                    raise
+                logger.info(
+                    "Milvus search fallback: vector search unsupported, querying user tools without vectors"
+                )
+                return self._query_tools_without_vector_search(
+                    collection=collection,
+                    safe_uid=safe_uid,
+                    user_query=user_query,
+                    top_k=top_k,
+                )
 
         items: list[dict[str, Any]] = []
         for hit in results[0]:
@@ -202,10 +235,60 @@ class VectorToolRegistry:
                 "description": entity.get("description"),
                 "endpoint": entity.get("endpoint"),
                 "method": entity.get("method"),
-                "parameters_schema": entity.get("param_schema"),
-                "metadata": entity.get("metadata"),
+                "parameters_schema": entity.get("param_schema") if isinstance(entity.get("param_schema"), dict) else {},
+                "metadata": entity.get("metadata") if isinstance(entity.get("metadata"), dict) else {},
             })
         return items
+
+    @staticmethod
+    def _is_output_field_compatibility_error(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return "unsupported field type" in text or "field type: 0" in text
+
+    @classmethod
+    def _query_tools_without_vector_search(
+        cls,
+        *,
+        collection: Collection,
+        safe_uid: str,
+        user_query: str,
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        rows = collection.query(
+            expr=f'user_id == "{safe_uid}"',
+            output_fields=_BASIC_OUTPUT_FIELDS,
+            limit=max(1, min(max(top_k * 5, top_k), 200)),
+        )
+        scored = sorted(
+            (cls._score_plain_tool_row(user_query=user_query, row=row) for row in (rows or [])),
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+        positive = [item for item in scored if float(item.get("score") or 0.0) > 0.0]
+        if positive:
+            scored = positive
+        return scored[: max(1, min(top_k, 50))]
+
+    @staticmethod
+    def _score_plain_tool_row(*, user_query: str, row: dict[str, Any]) -> dict[str, Any]:
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("tool_name", "description", "endpoint", "method")
+        ).lower()
+        row_tokens = set(_TOKEN_RE.findall(text))
+        query_tokens = set(_TOKEN_RE.findall(str(user_query or "").lower()))
+        overlap = len(query_tokens & row_tokens)
+        score = float(overlap) / float(max(1, len(query_tokens)))
+        return {
+            "score": score,
+            "tool_name": row.get("tool_name"),
+            "tool_type": row.get("tool_type"),
+            "description": row.get("description"),
+            "endpoint": row.get("endpoint"),
+            "method": row.get("method"),
+            "parameters_schema": {},
+            "metadata": {},
+        }
 
     # -------------------------------------------------------------- #
     # Deletion

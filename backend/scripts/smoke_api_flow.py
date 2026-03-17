@@ -94,13 +94,21 @@ async def run() -> None:
             soul_setup = client.post("/api/v1/users/me/soul/setup", json=soul_setup_payload, headers=headers)
             ensure(soul_setup.status_code == 200, f"soul setup failed: {soul_setup.text}")
 
-            skills = client.get("/api/v1/chat/skills", headers=headers)
+            skills = client.get("/api/v1/skills/registry", headers=headers)
             ensure(skills.status_code == 200, f"skills registry failed: {skills.text}")
             skills_payload = skills.json()
             skill_items = skills_payload.get("skills") or []
             ensure(isinstance(skill_items, list) and len(skill_items) > 0, f"skills registry is empty: {skills_payload}")
+            ensure(isinstance(skills_payload.get("integration_tools"), list), f"integration_tools missing: {skills_payload}")
+            ensure(isinstance(skills_payload.get("dynamic_tool_operations"), list), f"dynamic_tool_operations missing: {skills_payload}")
             first = skill_items[0]
             ensure("manifest" in first and "input_schema" in first and "permissions" in first, f"invalid skill contract: {first}")
+            ensure(all(item.get("manifest", {}).get("name") != "dynamic_tool_register" for item in (skills_payload.get("dynamic_tool_operations") or [])), f"legacy alias leaked into public registry: {skills_payload}")
+
+            api_tools = client.get("/api/v1/api-tools", headers=headers)
+            ensure(api_tools.status_code == 200, f"api-tools list failed: {api_tools.text}")
+            api_tools_payload = api_tools.json()
+            ensure(api_tools_payload.get("count") == 0, f"expected empty api-tools list: {api_tools_payload}")
 
             chat = client.post("/api/v1/chat", json={"message": "Привет"}, headers=headers)
             ensure(chat.status_code == 200, f"chat failed: {chat.text}")

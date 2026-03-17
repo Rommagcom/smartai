@@ -340,7 +340,7 @@ flowchart TD
     PLAN -.->|"source of truth"| S1
 ```
 
-### Зарегистрированные навыки (27)
+### Каталог инструментов
 
 | Категория | Навыки |
 |-----------|--------|
@@ -352,7 +352,7 @@ flowchart TD
 | **Worker** | `worker_enqueue` |
 | **Интеграции** | `integration_add`, `integrations_list`, `integrations_delete_all`, `integration_call`, `integration_health` |
 | **Onboarding** | `integration_onboarding_connect`, `integration_onboarding_test`, `integration_onboarding_save` |
-| **Dynamic Tools** | `dynamic_tool_register`, `dynamic_tool_call`, `dynamic_tool_list`, `dynamic_tool_delete`, `dynamic_tool_delete_all` |
+| **API Tools** | `register_api_tool`, `dynamic_tool_call`, `dynamic_tool_list`, `dynamic_tool_delete`, `dynamic_tool_delete_all` |
 
 ---
 
@@ -373,7 +373,7 @@ sequenceDiagram
     Note over User,HTTP: Фаза 1: Регистрация
 
     User ->> Chat: "Подключи API курса валют НБ РК:<br/>https://nationalbank.kz/rss/get_rates.cfm"
-    Chat ->> Router: router_node → tool: dynamic_tool_register
+    Chat ->> Router: router_node → tool: register_api_tool
     Router ->> DynSvc: register_from_user_message()
     DynSvc ->> LLM: chat_structured(ApiRegistrationPayload)
     LLM -->> DynSvc: {name, url, method, headers, params, description}
