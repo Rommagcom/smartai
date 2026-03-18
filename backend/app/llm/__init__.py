@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from typing import Any, AsyncGenerator, Type, TypeVar
 
 import httpx
@@ -18,14 +17,17 @@ import litellm
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import settings
+from app.llm.structured_parser import (
+    StructuredParseError,
+    _is_expected_structured_parse_error,
+    _is_tool_payload_schema_mismatch,
+    _log_structured_parse_failure,
+    parse_structured_response,
+)
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
-
-
-class StructuredParseError(Exception):
-    """Raised when structured JSON payload cannot be extracted from LLM text."""
 
 # Suppress verbose litellm logging
 litellm.suppress_debug_info = True
@@ -211,75 +213,6 @@ class LLMProvider:
     # Structured output (Pydantic v2)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _is_tool_payload_schema_mismatch(exc: Exception) -> bool:
-        """Detect cases where model returned a tool call object for a non-tool schema."""
-        if not isinstance(exc, ValidationError):
-            return False
-        try:
-            for item in exc.errors() or []:
-                payload = item.get("input")
-                if isinstance(payload, dict) and "tool" in payload:
-                    return True
-        except Exception:
-            return False
-        return False
-
-    @staticmethod
-    def _compact_structured_parse_error(exc: Exception) -> str:
-        """Return a short, redacted parse error summary for logs."""
-        if isinstance(exc, ValidationError):
-            try:
-                first = (exc.errors() or [{}])[0]
-                code = str(first.get("type") or "validation_error")
-                msg = str(first.get("msg") or "validation failed")
-                return f"{code}: {msg}"
-            except Exception:
-                pass
-
-        text = str(exc or "").strip()
-        if not text:
-            return "structured parse failed"
-
-        # Hide verbose payload snippets often present in pydantic/litellm errors.
-        text = re.sub(r"input_value\s*=\s*'[^']*'", "input_value='<redacted>'", text, flags=re.IGNORECASE)
-        text = re.sub(r"input_value\s*=\s*\"[^\"]*\"", "input_value=\"<redacted>\"", text, flags=re.IGNORECASE)
-        return text[:240]
-
-    @staticmethod
-    def _is_expected_structured_parse_error(exc: Exception) -> bool:
-        text = str(exc or "").lower()
-        if isinstance(exc, ValidationError):
-            try:
-                for item in exc.errors() or []:
-                    if str(item.get("type") or "").lower() == "json_invalid":
-                        return True
-            except Exception:
-                pass
-        return (
-            "structured json payload not found" in text
-            or "invalid json" in text
-            or "json_invalid" in text
-        )
-
-    @staticmethod
-    def _log_structured_parse_failure(attempt: int, retries: int, exc: Exception) -> None:
-        configured = str(getattr(settings, "LITELLM_STRUCTURED_PARSE_LOG_LEVEL", "INFO") or "INFO").upper()
-        expected = LLMProvider._is_expected_structured_parse_error(exc)
-        compact = LLMProvider._compact_structured_parse_error(exc)
-        message = "structured parse attempt %d/%d failed: %s"
-        if configured == "DEBUG":
-            logger.debug(message, attempt, retries, compact)
-            return
-        if configured == "WARNING":
-            logger.warning(message, attempt, retries, compact)
-            return
-        # INFO (default): keep expected parser misses less noisy.
-        if expected:
-            logger.info(message, attempt, retries, compact)
-        else:
-            logger.warning(message, attempt, retries, compact)
-
     async def chat_structured(
         self,
         messages: list[dict[str, str]],
@@ -323,17 +256,17 @@ class LLMProvider:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-                parsed = self._parse_structured_response(raw, response_model)
+                parsed = parse_structured_response(raw, response_model)
                 return parsed
             except (ValidationError, json.JSONDecodeError, StructuredParseError) as exc:
-                if self._is_tool_payload_schema_mismatch(exc):
+                if _is_tool_payload_schema_mismatch(exc):
                     last_exc = StructuredParseError(
                         "Structured schema mismatch: got tool payload for non-tool response model"
                     )
-                    self._log_structured_parse_failure(attempt, retries, last_exc)
+                    _log_structured_parse_failure(attempt, retries, last_exc)
                     break
                 last_exc = exc
-                self._log_structured_parse_failure(attempt, retries, exc)
+                _log_structured_parse_failure(attempt, retries, exc)
                 if attempt < retries:
                     await asyncio.sleep(0.1 * attempt)
 
@@ -341,35 +274,6 @@ class LLMProvider:
             f"Failed to parse LLM response into {response_model.__name__} "
             f"after {retries} attempts: {last_exc}"
         )
-
-    @staticmethod
-    def _parse_structured_response(raw: str, model: Type[T]) -> T:
-        """Extract and validate JSON from LLM response text."""
-        text = raw.strip()
-
-        # Try direct parse
-        try:
-            return model.model_validate_json(text)
-        except (ValidationError, json.JSONDecodeError):
-            pass
-
-        # Strip markdown fences
-        import re
-        fenced = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text, re.IGNORECASE)
-        if fenced:
-            try:
-                return model.model_validate_json(fenced.group(1).strip())
-            except (ValidationError, json.JSONDecodeError):
-                pass
-
-        # Find first JSON object
-        brace_start = text.find("{")
-        brace_end = text.rfind("}")
-        if brace_start != -1 and brace_end > brace_start:
-            candidate = text[brace_start: brace_end + 1]
-            return model.model_validate_json(candidate)
-
-        raise StructuredParseError(f"Structured JSON payload not found in LLM response: {text[:8000]}")
 
     # ------------------------------------------------------------------
     # Embeddings

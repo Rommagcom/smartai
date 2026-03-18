@@ -67,6 +67,16 @@ from uuid import UUID
 
 from langgraph.graph import END, StateGraph
 
+from app.graph.orchestration_types import (
+    ComposeLoopDecision,
+    IntentLabel,
+    NextStep,
+    SystemToolName,
+    coerce_intent_label,
+    coerce_next_step,
+    coerce_tool_name,
+    next_step_from_router_decision,
+)
 from app.graph.nodes import (
     chat_node,
     compose_node,
@@ -111,7 +121,7 @@ class GraphState(TypedDict, total=False):
     permissions: list[str]
 
     # Router
-    intent: Annotated[str, _replace_value]
+    intent: Annotated[IntentLabel, _replace_value]
     router_output: Annotated[RouterOutput | None, _replace_value]
     feedback_plan: Annotated[str, _replace_value]
 
@@ -143,7 +153,7 @@ class GraphState(TypedDict, total=False):
     tool_calls_log: Annotated[list[dict], _replace_value]
 
     # Control
-    next_step: Annotated[str, _replace_value]
+    next_step: Annotated[NextStep, _replace_value]
     iteration: Annotated[int, _replace_value]
     iterations: Annotated[int, _replace_value]
     max_iterations: Annotated[int, _replace_value]
@@ -161,40 +171,43 @@ def _route_after_guardrail(state: dict) -> str:
 
 def _route_after_router(state: dict) -> str:
     """Route based on the router decision."""
-    next_step = state.get("next_step", "chat")
+    next_step = coerce_next_step(state.get("next_step"), default=NextStep.CHAT)
     router_output = state.get("router_output")
 
-    if next_step == "end":
+    if next_step == NextStep.END:
         return "output"
 
+    if next_step == NextStep.TOOL:
+        return "tool_exec"
+    if next_step == NextStep.WEB_SEARCH:
+        return "web_search"
+    if next_step == NextStep.CHAT:
+        return "chat"
+
     if router_output:
-        decision = router_output.decision.value
-        if decision == "tool":
+        mapped = next_step_from_router_decision(router_output.decision)
+        if mapped == NextStep.TOOL:
             return "tool_exec"
-        if decision == "web_search":
+        if mapped == NextStep.WEB_SEARCH:
             return "web_search"
-        if decision == "memory":
-            return "chat"
-        if decision == "clarify":
-            return "chat"
     return "chat"
 
 
 def _route_after_intent_classifier(state: dict) -> str:
     """Route lightweight intents directly to chat, others to retriever."""
-    next_step = str(state.get("next_step") or "").strip().lower()
-    if next_step == "chat":
+    next_step = coerce_next_step(state.get("next_step"), default=NextStep.RETRIEVER)
+    if next_step == NextStep.CHAT:
         return "chat"
-    if next_step == "retriever":
+    if next_step == NextStep.RETRIEVER:
         return "retriever"
 
-    intent = str(state.get("intent") or "").strip().lower()
-    if intent == "small_talk":
+    intent = coerce_intent_label(state.get("intent"), default=IntentLabel.NEEDS_TOOLS)
+    if intent == IntentLabel.SMALL_TALK:
         return "chat"
     return "retriever"
 
 
-def _route_after_tool_exec(state: dict) -> str:
+def _route_after_tool_exec(_state: dict) -> str:
     """After tool execution, always compose the final answer."""
     return "compose"
 
@@ -210,12 +223,12 @@ def _should_we_finish(state: dict) -> str:
     max_iterations = int(state.get("max_iterations") or settings.LANGGRAPH_MAX_ITERATIONS)
     if iteration >= max_iterations:
         logger.info("Refinement cap reached (iteration=%d), finishing", iteration)
-        return "finish"
+        return ComposeLoopDecision.FINISH.value
 
     if state.get("is_complete", True):
-        return "finish"
+        return ComposeLoopDecision.FINISH.value
 
-    return "continue"
+    return ComposeLoopDecision.CONTINUE.value
 
 
 def build_agent_graph() -> StateGraph:

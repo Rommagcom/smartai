@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from app.graph.output_policy import requested_export_kind
+from app.graph.orchestration_types import SystemToolName
 from app.schemas.graph import RouterDecision, RouterOutput, ToolStep
 
 # Regex for deterministic web search detection — fast path, no LLM needed
@@ -171,7 +172,7 @@ def deterministic_route(user_message: str) -> RouterOutput | None:
         query = strip_web_search_prefix(user_message)
         return RouterOutput(
             decision=RouterDecision.WEB_SEARCH,
-            steps=[ToolStep(tool="web_search", arguments={"query": query})],
+            steps=[ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query})],
             response_hint="Выполни поиск в интернете и представь результаты",
             confidence=0.95,
         )
@@ -247,16 +248,16 @@ def fallback_live_data_export_route(user_message: str) -> RouterOutput | None:
         return None
 
     if export_kind == "pdf":
-        export_tool = "pdf_create"
+        export_tool = SystemToolName.PDF_CREATE.value
         file_name = "weather-report.pdf"
     else:
-        export_tool = "excel_create"
+        export_tool = SystemToolName.EXCEL_CREATE.value
         file_name = "weather-report.xlsx"
 
     return RouterOutput(
         decision=RouterDecision.TOOL,
         steps=[
-            ToolStep(tool="web_search", arguments={"query": query}),
+            ToolStep(tool=SystemToolName.WEB_SEARCH.value, arguments={"query": query}),
             ToolStep(
                 tool=export_tool,
                 arguments={

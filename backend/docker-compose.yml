@@ -23,11 +23,18 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - skill-runner
-      - postgres
-      - milvus-standalone
-      - ollama
-      - redis
+      skill-runner:
+        condition: service_started
+      postgres:
+        condition: service_started
+      milvus-standalone:
+        condition: service_started
+      ollama:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -53,11 +60,18 @@ services:
         "120",
       ]
     depends_on:
-      - skill-runner
-      - postgres
-      - milvus-standalone
-      - ollama
-      - redis
+      skill-runner:
+        condition: service_started
+      postgres:
+        condition: service_started
+      milvus-standalone:
+        condition: service_started
+      ollama:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
     environment:
       CHROME_EXECUTABLE_PATH: /usr/bin/chromium
       WORKER_ENABLED: "false"
@@ -70,11 +84,18 @@ services:
       - .env
     command: ["python", "-m", "app.workers.run"]
     depends_on:
-      - skill-runner
-      - postgres
-      - redis
-      - milvus-standalone
-      - ollama
+      skill-runner:
+        condition: service_started
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+      milvus-standalone:
+        condition: service_started
+      ollama:
+        condition: service_started
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -120,8 +141,39 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: assistant-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     ports:
       - "6379:6379"
+
+  redis-replica:
+    image: redis:7.4-alpine
+    container_name: assistant-redis-replica
+    command:
+      [
+        "redis-server",
+        "--replicaof",
+        "redis",
+        "6379",
+        "--replica-read-only",
+        "yes",
+      ]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 INFO replication | grep -q '^role:slave'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 8s
+    ports:
+      - "6380:6379"
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.5

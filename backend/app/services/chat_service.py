@@ -408,6 +408,14 @@ class ChatService:
         if cron_add_args:
             return [{"tool": "cron_add", "arguments": cron_add_args}]
 
+        quick_reminder_args = ChatService._extract_quick_relative_reminder_args(user_message)
+        if quick_reminder_args:
+            return [{"tool": "cron_add", "arguments": quick_reminder_args}]
+
+        natural_reminder_args = ChatService._extract_natural_reminder_args(user_message)
+        if natural_reminder_args:
+            return [{"tool": "cron_add", "arguments": natural_reminder_args}]
+
         return None
 
     @staticmethod
@@ -1425,6 +1433,14 @@ class ChatService:
         planned_result = await self._run_planned_tools_with_plan(db, user, user_message, planner_task)
         if not planned_result:
             if self._is_cron_add_intent(user_message):
+                cron_fallback = await self._maybe_deterministic_cron_fallback(
+                    db=db,
+                    user=user,
+                    user_message=user_message,
+                    manual_tool_calls=manual_tool_calls,
+                )
+                if cron_fallback is not None:
+                    return cron_fallback
                 return None
             if self._is_live_data_intent(user_message):
                 return self._live_data_unavailable_fallback(), manual_tool_calls, []
@@ -1488,6 +1504,42 @@ class ChatService:
                 return deterministic, tool_calls, artifacts
 
         return sanitized, tool_calls, artifacts
+
+    async def _maybe_deterministic_cron_fallback(
+        self,
+        *,
+        db: AsyncSession,
+        user: User,
+        user_message: str,
+        manual_tool_calls: list[dict],
+    ) -> tuple[str, list[dict], list[dict]] | None:
+        cron_add_args = self._extract_quick_relative_reminder_args(user_message)
+        if not cron_add_args:
+            cron_add_args = self._extract_natural_reminder_args(user_message)
+        if not cron_add_args:
+            return None
+
+        planned_calls = await self._execute_single_cron_add(
+            db=db,
+            user=user,
+            cron_add_args=cron_add_args,
+            error_log_message="deterministic cron fallback execution failed",
+        )
+        if planned_calls is None:
+            return None
+        if not any(bool(call.get("success")) for call in planned_calls):
+            return None
+
+        tool_calls = [*manual_tool_calls, *planned_calls]
+        artifacts = self._extract_artifacts(tool_calls)
+        answer = self._format_deterministic_tool_answer(planned_calls) or "Готово: создал напоминание."
+        self._dev_verbose_log(
+            "deterministic_cron_fallback_executed",
+            user_id=str(user.id),
+            schedule_text=str(cron_add_args.get("schedule_text") or ""),
+            task_text_preview=str(cron_add_args.get("task_text") or "")[:120],
+        )
+        return answer, tool_calls, artifacts
 
     async def _compose_answer_with_retry(
         self,

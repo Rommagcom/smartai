@@ -42,7 +42,7 @@ class SchedulerService:
 
     def _get_redis(self) -> Redis:
         if self._redis is None:
-            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            self._redis = Redis.from_url(settings.redis_write_url, decode_responses=True)
         return self._redis
 
     async def _acquire_execution_lock(self, *, job_id: str, action_type: str) -> bool:

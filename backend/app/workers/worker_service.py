@@ -41,7 +41,7 @@ class WorkerService:
 
     def _get_redis(self) -> Redis:
         if self._redis is None:
-            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            self._redis = Redis.from_url(settings.redis_write_url, decode_responses=True)
         return self._redis
 
     async def enqueue(
@@ -162,9 +162,28 @@ class WorkerService:
                 redis_backoff = 0.0          # healthy cycle — reset backoff
                 if task is None:
                     await asyncio.sleep(0.2)
-            except (ReadOnlyError, RedisConnectionError, OSError) as exc:
-                # Redis is unreachable or in read-only state (replica / failover).
-                # Use exponential backoff and force a fresh connection.
+            except ReadOnlyError as exc:
+                # Read-only usually means we are connected to a replica.
+                # Reconnect with backoff and emit an actionable warning.
+                self._reset_redis()
+                redis_backoff = min(
+                    _REDIS_BACKOFF_MAX,
+                    max(1.0, redis_backoff * 2) if redis_backoff else 1.0,
+                )
+                alerting_service.emit(
+                    component="worker",
+                    severity="warning",
+                    message="Redis is read-only replica — retrying",
+                    details={"error": str(exc), "backoff_s": redis_backoff},
+                )
+                logger.warning(
+                    "worker redis read-only, backoff=%.1fs: %s",
+                    redis_backoff,
+                    exc,
+                )
+                await asyncio.sleep(redis_backoff)
+            except (RedisConnectionError, OSError) as exc:
+                # Redis is unreachable. Use exponential backoff and reconnect.
                 self._reset_redis()
                 redis_backoff = min(
                     _REDIS_BACKOFF_MAX,

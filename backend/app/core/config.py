@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 1024
 
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_READ_URL: str = ""
+    REDIS_WRITE_URL: str = ""
     WORKER_QUEUE_KEY: str = "assistant:worker:queue"
     WORKER_QUEUE_HIGH_KEY: str = "assistant:worker:queue:high"
     WORKER_PROCESSING_QUEUE_KEY: str = "assistant:worker:processing"
@@ -134,7 +136,6 @@ class Settings(BaseSettings):
     SANDBOX_EGRESS_ALLOWED_HOSTS: str = ""
     SANDBOX_EGRESS_DENIED_HOSTS: str = "localhost,127.0.0.1,::1"
     SANDBOX_EGRESS_ALLOWED_PORTS: str = "80,443"
-    DYNAMIC_SKILL_EXECUTION_MODE: str = "runner" # options: local, runner (in docker)
     DYNAMIC_SKILL_RUNNER_URL: str = "http://skill-runner:8081"
     DYNAMIC_SKILL_RUNNER_SECRET: str = "change-me-skill-runner-secret"
     DYNAMIC_SKILL_RUNNER_TIMEOUT_SECONDS: int = 45
@@ -142,12 +143,6 @@ class Settings(BaseSettings):
     DYNAMIC_SKILL_SANDBOX_TIMEOUT_SECONDS: int = 30
     DYNAMIC_SKILL_SANDBOX_NETWORK: str = "smartai-sandbox-net"
     DYNAMIC_SKILL_LLM_CALLBACK_ENABLED: bool = True
-    DYNAMIC_SKILL_HTTP_CALLBACK_ENABLED: bool = True
-    DYNAMIC_SKILL_HTTP_TIMEOUT_SECONDS: int = 30
-
-    DYNAMIC_SKILL_IMPORT_POLICY: str = "all"
-    DYNAMIC_SKILL_ALLOWED_IMPORTS: str = ""
-    DYNAMIC_SKILL_BLOCKED_IMPORTS: str = ""
 
     MEMORY_DEFAULT_TTL_DAYS: int = 0
     MEMORY_DECAY_HALF_LIFE_DAYS: int = 45
@@ -188,6 +183,16 @@ class Settings(BaseSettings):
     # --- Tool Vector Registry (Milvus semantic tool search) ---
     TOOL_RETRIEVER_TOP_K: int = 5
     TOOL_VECTOR_COLLECTION: str = "tool_vectors"
+
+    @property
+    def redis_read_url(self) -> str:
+        value = str(self.REDIS_READ_URL or "").strip()
+        return value or str(self.REDIS_URL or "").strip()
+
+    @property
+    def redis_write_url(self) -> str:
+        value = str(self.REDIS_WRITE_URL or "").strip()
+        return value or str(self.REDIS_URL or "").strip()
 
 
 @lru_cache

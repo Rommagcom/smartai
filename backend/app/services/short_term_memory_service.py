@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.exceptions import ReadOnlyError
 
 from app.core.config import settings
 
@@ -25,12 +26,18 @@ class ShortTermMemoryService:
     """Redis-backed short-term memory per user."""
 
     def __init__(self) -> None:
-        self._redis: Redis | None = None
+        self._redis_read: Redis | None = None
+        self._redis_write: Redis | None = None
 
-    def _get_redis(self) -> Redis:
-        if self._redis is None:
-            self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
-        return self._redis
+    def _get_redis_read(self) -> Redis:
+        if self._redis_read is None:
+            self._redis_read = Redis.from_url(settings.redis_read_url, decode_responses=True)
+        return self._redis_read
+
+    def _get_redis_write(self) -> Redis:
+        if self._redis_write is None:
+            self._redis_write = Redis.from_url(settings.redis_write_url, decode_responses=True)
+        return self._redis_write
 
     @staticmethod
     def _key(user_id: str | UUID) -> str:
@@ -60,10 +67,14 @@ class ShortTermMemoryService:
         ttl = max(60, int(settings.STM_TTL_SECONDS))
 
         try:
-            redis = self._get_redis()
+            redis = self._get_redis_write()
             await redis.rpush(key, json.dumps(entry, ensure_ascii=False))
             await redis.ltrim(key, -max_items, -1)
             await redis.expire(key, ttl)
+        except ReadOnlyError:
+            logger.warning(
+                "STM append skipped: Redis is read-only replica (check REDIS_URL points to primary)"
+            )
         except Exception:
             logger.debug("STM append failed (Redis unavailable), skipping", exc_info=True)
 
@@ -72,7 +83,7 @@ class ShortTermMemoryService:
         key = self._key(user_id)
         count = max(1, min(limit, int(settings.STM_MAX_ITEMS)))
         try:
-            redis = self._get_redis()
+            redis = self._get_redis_read()
             raw_items = await redis.lrange(key, -count, -1)
             items: list[dict] = []
             for raw in raw_items:
@@ -90,15 +101,19 @@ class ShortTermMemoryService:
     async def clear(self, user_id: str | UUID) -> None:
         """Remove all STM entries for a user."""
         try:
-            redis = self._get_redis()
+            redis = self._get_redis_write()
             await redis.delete(self._key(user_id))
+        except ReadOnlyError:
+            logger.warning(
+                "STM clear skipped: Redis is read-only replica (check REDIS_URL points to primary)"
+            )
         except Exception:
             logger.debug("STM clear failed", exc_info=True)
 
     async def size(self, user_id: str | UUID) -> int:
         """Return how many STM entries exist for the user."""
         try:
-            redis = self._get_redis()
+            redis = self._get_redis_read()
             return await redis.llen(self._key(user_id))
         except Exception:
             return 0
