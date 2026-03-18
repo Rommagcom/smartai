@@ -112,6 +112,7 @@ class OllamaClient:
                     model=model,
                     messages=messages,
                     stream=stream,
+                    think=True,
                     options=merged,
                     keep_alive=settings.OLLAMA_KEEP_ALIVE,
                 )
@@ -147,6 +148,7 @@ class OllamaClient:
                     model=model,
                     messages=messages,
                     stream=True,
+                    think=True,
                     options=merged,
                     keep_alive=settings.OLLAMA_KEEP_ALIVE,
                 )
