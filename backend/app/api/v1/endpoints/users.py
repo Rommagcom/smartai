@@ -28,6 +28,8 @@ def _to_user_out(current_user: User) -> UserOut:
         requires_soul_setup=requires_soul_setup,
         soul_onboarding=onboarding,
         system_prompt_template=current_user.system_prompt_template,
+        llm_tokens_used_month=int(current_user.llm_tokens_used_month or 0),
+        llm_tokens_month_key=str(current_user.llm_tokens_month_key or ""),
         created_at=current_user.created_at,
     )
 
@@ -166,7 +168,7 @@ async def soul_setup(
     profile = current_user.soul_profile or {}
     return SoulSetupResponse(
         configured=current_user.soul_configured,
-        assistant_name=profile.get("assistant_name", "SOUL"),
+        assistant_name=profile.get("assistant_name", "SmartAi"),
         emoji=profile.get("emoji", "🧠"),
         style=profile.get("style", "direct"),
         task_mode=profile.get("task_mode", "other"),
@@ -189,7 +191,7 @@ async def soul_adapt_task(
     profile = current_user.soul_profile or {}
     return SoulSetupResponse(
         configured=current_user.soul_configured,
-        assistant_name=profile.get("assistant_name", "SOUL"),
+        assistant_name=profile.get("assistant_name", "SmartAi"),
         emoji=profile.get("emoji", "🧠"),
         style=profile.get("style", "direct"),
         task_mode=profile.get("task_mode", "other"),

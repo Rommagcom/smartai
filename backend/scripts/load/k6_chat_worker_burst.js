@@ -68,7 +68,7 @@ export function setup() {
     `${BASE_URL}/users/me/soul/setup`,
     JSON.stringify({
       user_description: 'k6 load test user',
-      assistant_name: 'SOUL',
+      assistant_name: 'SmartAi',
       emoji: '🧪',
       style: 'direct',
       tone_modifier: 'Коротко и по делу',
