@@ -63,7 +63,7 @@ async def run() -> None:
 
         setup_payload = {
             "user_description": "Я аналитик и автоматизирую отчёты",
-            "assistant_name": "SOUL",
+            "assistant_name": "SmartAi",
             "emoji": "🧠",
             "style": "business",
             "tone_modifier": "Деловой, структурированный",

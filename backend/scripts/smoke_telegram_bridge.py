@@ -126,7 +126,7 @@ async def run() -> None:
         update = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
         context = FakeContext()
         await adapter.start(update, context)
-        ensure(any("SOUL-настройка" in text for text in update.effective_message.replies), "start should require soul setup")
+        ensure(any("SmartAi-настройка" in text for text in update.effective_message.replies), "start should require soul setup")
 
         async def me_ready(token: str):
             await asyncio.sleep(0)
@@ -142,7 +142,7 @@ async def run() -> None:
             await asyncio.sleep(0)
             await bot.send_message(
                 chat_id=chat_id,
-                text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
+                text="Нужна SmartAi-настройка перед первым чатом. Я уже запустил setup автоматически.",
             )
 
         adapter._chat_background_task_api = chat_api_requires_setup
@@ -154,10 +154,10 @@ async def run() -> None:
             await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
         ensure(
             any(
-                "SOUL-настройка" in text or "запустил setup автоматически" in text
+                "SmartAi-настройка" in text or "запустил setup автоматически" in text
                 for _, text in context.bot.sent_messages
             ),
-            "chat should notify about soul setup on 428",
+            "chat should notify about SmartAi setup on 428",
         )
 
         async def chat_api_ok(bot, chat_id: int, telegram_user_id: int, token: str, text: str):

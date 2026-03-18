@@ -76,7 +76,7 @@ async def chat(
             soul_service.setup_user_soul(
                 user=current_user,
                 user_description=user_description,
-                assistant_name="SOUL",
+                assistant_name="SmartAi",
                 emoji="🧠",
                 style="direct",
                 tone_modifier="Коротко и по делу",
@@ -88,7 +88,7 @@ async def chat(
             raise HTTPException(
                 status_code=428,
                 detail={
-                    "message": "SOUL initial setup failed",
+                    "message": "SmartAi initial setup failed",
                     "setup_endpoint": "/api/v1/users/me/soul/setup",
                     "status_endpoint": "/api/v1/users/me/soul/status",
                     "first_question": "Кто ты и чем занимаемся?",

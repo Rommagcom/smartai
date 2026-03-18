@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, JSON, Text
+from sqlalchemy import Boolean, Integer, JSON, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -20,6 +20,8 @@ class User(UUIDTimestampMixin, Base):
         Text,
         default="Ты полезный AI ассистент. Отвечай безопасно, кратко и точно.",
     )
+    llm_tokens_used_month: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    llm_tokens_month_key: Mapped[str] = mapped_column(Text, default="", server_default="", nullable=False)
 
     sessions = relationship("Session", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)
     messages = relationship("Message", back_populates="user", cascade=CASC_ALL_DELETE_ORPHAN)
