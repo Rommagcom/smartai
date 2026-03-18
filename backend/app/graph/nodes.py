@@ -364,22 +364,39 @@ async def web_fetch_node(state: dict) -> dict:
 
     async def _fetch_one(url: str, client: httpx.AsyncClient) -> str | None:
         async with semaphore:
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                text = await asyncio.to_thread(
-                    trafilatura.extract,
-                    resp.text,
-                    include_links=True,
-                    include_tables=True,
-                    output_format="txt",
-                )
-                if text and text.strip():
-                    # Keep snippet reasonable — up to ~3000 chars per page
-                    snippet = text[:3000]
-                    return f"### {url}\n{snippet}"
-            except Exception:
-                logger.debug("web_fetch failed for %s", url, exc_info=True)
+            # Network timeouts are common for some sources, retry once before dropping.
+            for attempt in range(2):
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    text = await asyncio.to_thread(
+                        trafilatura.extract,
+                        resp.text,
+                        include_links=True,
+                        include_tables=True,
+                        output_format="txt",
+                    )
+                    if text and text.strip():
+                        # Keep snippet reasonable — up to ~3000 chars per page
+                        snippet = text[:3000]
+                        return f"### {url}\n{snippet}"
+                    return None
+                except httpx.TimeoutException as exc:
+                    if attempt == 0:
+                        await asyncio.sleep(0.2)
+                        continue
+                    logger.debug("web_fetch timeout for %s after retries: %s", url, str(exc))
+                    return None
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code if exc.response is not None else "?"
+                    logger.debug("web_fetch http status %s for %s", status, url)
+                    return None
+                except httpx.HTTPError as exc:
+                    logger.debug("web_fetch transport error for %s: %s", url, str(exc))
+                    return None
+                except Exception:
+                    logger.debug("web_fetch failed for %s", url, exc_info=True)
+                    return None
         return None
 
     async with httpx.AsyncClient(

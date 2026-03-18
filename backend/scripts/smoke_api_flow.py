@@ -85,7 +85,7 @@ async def run() -> None:
 
             soul_setup_payload = {
                 "user_description": "Я разработчик backend и автоматизирую процессы",
-                "assistant_name": "SOUL",
+                "assistant_name": "SmartAi",
                 "emoji": "🧠",
                 "style": "direct",
                 "tone_modifier": "Прямой, без воды",

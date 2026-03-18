@@ -14,6 +14,8 @@ class UserOut(BaseModel):
     requires_soul_setup: bool
     soul_onboarding: dict | None = None
     system_prompt_template: str
+    llm_tokens_used_month: int
+    llm_tokens_month_key: str
     created_at: datetime
 
     model_config = {"from_attributes": True, "populate_by_name": True}

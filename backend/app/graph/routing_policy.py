@@ -27,7 +27,8 @@ WEB_SEARCH_RE = re.compile(
 )
 
 _LIVE_DATA_RE = re.compile(
-    r"\b(?:погод|weather|прогноз|курс\s+валют|валют|usd|eur|kzt|новост|цена|стоимост|сегодня|актуальн)\b",
+    r"\b(?:погод\w*|weather|прогноз\w*|курс\s+валют|валют\w*|usd|eur|kzt|новост\w*|цена\w*|стоимост\w*|сегодня|актуальн\w*"
+    r"|криптовалют\w*|крипт\w*|bitcoin|btc|ethereum|eth|altcoin\w*|инвест\w*|портфел\w*|risk\w*|risky)\b",
     re.IGNORECASE,
 )
 

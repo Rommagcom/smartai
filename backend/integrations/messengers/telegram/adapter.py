@@ -14,7 +14,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from telegram import Bot, InputFile, Update
 from telegram.ext import (
     Application,
@@ -250,13 +250,11 @@ class TelegramAdapter(MessengerAdapter):
             user = user_result.scalar_one_or_none()
 
             if user is None:
-                users_count_query = await db.execute(select(func.count()).select_from(User))
-                users_count = int(users_count_query.scalar() or 0)
                 user = User(
                     username=username,
                     hashed_password=get_password_hash(password),
                     preferences={},
-                    is_admin=users_count == 0,
+                    is_admin=False,
                 )
                 db.add(user)
                 await db.commit()
@@ -343,7 +341,7 @@ class TelegramAdapter(MessengerAdapter):
                 if not user.soul_configured:
                     await bot.send_message(
                         chat_id=chat_id,
-                        text="Нужна первичная SOUL-настройка. Используй /start и пройди onboarding.",
+                        text="Нужна первичная SmartAi-настройка. Используй /start и пройди onboarding.",
                     )
                     if context and context.user_data is not None:
                         context.user_data.setdefault("soul_setup_auto", {"step": "desc", "data": {}})
@@ -874,7 +872,7 @@ class TelegramAdapter(MessengerAdapter):
         style = str(payload.get("style") or "direct")
         task_mode = str(payload.get("task_mode") or "other")
         return (
-            "SOUL setup завершён ✅\n"
+            "SmartAi setup завершён ✅\n"
             f"Ассистент: {assistant_name} {emoji}\n"
             f"Стиль: {style}\n"
             f"Профиль: {task_mode}\n\n"
@@ -913,7 +911,7 @@ class TelegramAdapter(MessengerAdapter):
     async def _begin_auto_soul_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data["soul_setup_auto"] = {"step": "desc", "data": {}}
         await update.effective_message.reply_text(
-            "Нужна первичная SOUL-настройка. Запускаю setup автоматически.\n"
+            "Нужна первичная SmartAi-настройка. Запускаю setup автоматически.\n"
             "Шаг 1/4: кто вы и чем обычно занимаетесь?"
         )
 
@@ -928,7 +926,7 @@ class TelegramAdapter(MessengerAdapter):
 
         text = message.text.strip()
         if not text:
-            await message.reply_text("Нужен текстовый ответ для продолжения SOUL setup.")
+            await message.reply_text("Нужен текстовый ответ для продолжения SmartAi setup.")
             return True
 
         step = str(state.get("step") or "")
@@ -2017,7 +2015,7 @@ class TelegramAdapter(MessengerAdapter):
         if not auth:
             return ConversationHandler.END
         context.user_data["soul_setup"] = {}
-        await update.effective_message.reply_text("SOUL setup (быстрый):\nШаг 1/4: кто вы и чем обычно занимаетесь?")
+        await update.effective_message.reply_text("SmartAi setup (быстрый):\nШаг 1/4: кто вы и чем обычно занимаетесь?")
         return SOUL_DESC
 
     async def soul_setup_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2073,5 +2071,5 @@ class TelegramAdapter(MessengerAdapter):
 
     async def soul_setup_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data.pop("soul_setup", None)
-        await update.effective_message.reply_text("SOUL setup отменён")
+        await update.effective_message.reply_text("SmartAi setup отменён")
         return ConversationHandler.END

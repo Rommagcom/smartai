@@ -116,6 +116,8 @@ class LLMProvider:
         # Set API base for Ollama models
         if resolved.startswith("ollama"):
             params["api_base"] = settings.OLLAMA_BASE_URL
+            # Enable model reasoning mode for Ollama-backed calls.
+            params["think"] = True
 
         # Set API keys from config if available
         if settings.LITELLM_OPENAI_API_KEY:
@@ -124,6 +126,28 @@ class LLMProvider:
             params["api_key"] = settings.LITELLM_ANTHROPIC_API_KEY
 
         return params
+
+    @staticmethod
+    def _usage_field(obj: object, name: str) -> object | None:
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    @classmethod
+    def _extract_total_tokens(cls, response: object) -> int:
+        usage = cls._usage_field(response, "usage")
+        if usage is None:
+            return 0
+
+        total_raw = cls._usage_field(usage, "total_tokens")
+        if isinstance(total_raw, (int, float)):
+            return max(0, int(total_raw))
+
+        prompt_raw = cls._usage_field(usage, "prompt_tokens")
+        completion_raw = cls._usage_field(usage, "completion_tokens")
+        prompt = int(prompt_raw) if isinstance(prompt_raw, (int, float)) else 0
+        completion = int(completion_raw) if isinstance(completion_raw, (int, float)) else 0
+        return max(0, prompt + completion)
 
     # ------------------------------------------------------------------
     # Core chat
@@ -152,6 +176,11 @@ class LLMProvider:
             try:
                 async with self._semaphore:
                     response = await litellm.acompletion(**params)
+                total_tokens = self._extract_total_tokens(response)
+                if total_tokens > 0:
+                    from app.services.llm_usage_service import llm_usage_service
+
+                    await llm_usage_service.record_total_tokens(total_tokens)
                 return response.choices[0].message.content or ""
             except Exception as exc:
                 last_exc = exc
@@ -204,10 +233,19 @@ class LLMProvider:
         async with self._semaphore:
             response = await litellm.acompletion(**params)
 
+        stream_total_tokens = 0
         async for chunk in response:
+            chunk_total = self._extract_total_tokens(chunk)
+            if chunk_total > stream_total_tokens:
+                stream_total_tokens = chunk_total
             delta = chunk.choices[0].delta
             if delta and delta.content:
                 yield delta.content
+
+        if stream_total_tokens > 0:
+            from app.services.llm_usage_service import llm_usage_service
+
+            await llm_usage_service.record_total_tokens(stream_total_tokens)
 
     # ------------------------------------------------------------------
     # Structured output (Pydantic v2)

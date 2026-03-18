@@ -28,6 +28,14 @@ class OllamaClient:
         content = self._field(message, "content")
         return str(content or "")
 
+    @classmethod
+    def _extract_total_tokens(cls, response: object) -> int:
+        prompt = cls._field(response, "prompt_eval_count")
+        completion = cls._field(response, "eval_count")
+        prompt_tokens = int(prompt) if isinstance(prompt, (int, float)) else 0
+        completion_tokens = int(completion) if isinstance(completion, (int, float)) else 0
+        return max(0, prompt_tokens + completion_tokens)
+
     @staticmethod
     def _normalize_embedding_dim(vector: list[float]) -> list[float]:
         target_dim = int(settings.EMBEDDING_DIM)
@@ -112,6 +120,7 @@ class OllamaClient:
                     model=model,
                     messages=messages,
                     stream=stream,
+                    think=True,
                     options=merged,
                     keep_alive=settings.OLLAMA_KEEP_ALIVE,
                 )
@@ -135,6 +144,11 @@ class OllamaClient:
                     raise
             else:
                 raise
+        total_tokens = self._extract_total_tokens(response)
+        if total_tokens > 0:
+            from app.services.llm_usage_service import llm_usage_service
+
+            await llm_usage_service.record_total_tokens(total_tokens)
         return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
@@ -147,6 +161,7 @@ class OllamaClient:
                     model=model,
                     messages=messages,
                     stream=True,
+                    think=True,
                     options=merged,
                     keep_alive=settings.OLLAMA_KEEP_ALIVE,
                 )
@@ -171,10 +186,19 @@ class OllamaClient:
             else:
                 raise
 
+        stream_total_tokens = 0
         async for chunk in stream:
+            chunk_total = self._extract_total_tokens(chunk)
+            if chunk_total > stream_total_tokens:
+                stream_total_tokens = chunk_total
             content = self._extract_message_content(chunk)
             if content:
                 yield content
+
+        if stream_total_tokens > 0:
+            from app.services.llm_usage_service import llm_usage_service
+
+            await llm_usage_service.record_total_tokens(stream_total_tokens)
 
     async def embeddings(self, text: str) -> list[float]:
         try:
