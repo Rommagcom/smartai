@@ -116,6 +116,8 @@ class LLMProvider:
         # Set API base for Ollama models
         if resolved.startswith("ollama"):
             params["api_base"] = settings.OLLAMA_BASE_URL
+            # Enable model reasoning mode for Ollama-backed calls.
+            params["think"] = True
 
         # Set API keys from config if available
         if settings.LITELLM_OPENAI_API_KEY:
