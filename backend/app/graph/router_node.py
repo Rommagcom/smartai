@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.core.config import settings
@@ -40,6 +41,7 @@ from app.graph.prompt_routing_policy import (
     hard_structured_route as _hard_structured_route,
 )
 from app.graph.router_recovery import (
+    extract_non_json_answer_from_exception,
     extract_router_output_from_exception,
 )
 from app.graph.user_tool_context import load_user_tool_context
@@ -53,6 +55,19 @@ from app.schemas.graph import RouterDecision, RouterOutput, ToolStep
 
 logger = logging.getLogger(__name__)
 _WEB_SEARCH_HINT = "Выполни поиск в интернете"
+_REFUSAL_SNIPPETS = (
+    "i'm sorry, but i can't help with that",
+    "i’m sorry, but i can’t help with that",
+    "i can't help with that",
+    "i can’t help with that",
+    "i cannot help with that",
+    "can't assist with that",
+    "cannot assist with that",
+    "sorry, but i can't help",
+    "sorry, but i can’t help",
+    "извините, но я не могу помочь",
+    "не могу помочь с этим",
+)
 
 
 def _dev_log(event: str, **ctx: Any) -> None:
@@ -134,12 +149,22 @@ def _try_export_followup_route(user_message: str, history: list[dict]) -> dict |
 
 
 def _try_deterministic_route(user_message: str) -> dict | None:
-    if not settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
-        return None
     deterministic = deterministic_route(user_message)
     if deterministic is None:
         return None
-    _dev_log("router_deterministic", decision=deterministic.decision.value)
+
+    is_forced_cron_route = (
+        deterministic.decision == RouterDecision.TOOL
+        and any(str(step.tool or "").strip().lower() == SystemToolName.CRON_ADD.value for step in deterministic.steps)
+    )
+    if not settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS and not is_forced_cron_route:
+        return None
+
+    if is_forced_cron_route and not settings.ROUTER_ENABLE_DETERMINISTIC_SHORTCUTS:
+        _dev_log("router_deterministic_forced_cron", decision=deterministic.decision.value)
+    else:
+        _dev_log("router_deterministic", decision=deterministic.decision.value)
+
     return RouterNodeUpdate(
         router_output=deterministic,
         next_step=next_step_from_router_decision(deterministic.decision),
@@ -240,8 +265,29 @@ def _build_web_search_fallback(user_message: str) -> dict:
     ).to_state_update()
 
 
+def _is_refusal_like_router_error(exc: Exception) -> bool:
+    raw = str(exc or "")
+    extracted = extract_non_json_answer_from_exception(exc)
+    haystack = f"{raw}\n{extracted}".lower()
+    if any(snippet in haystack for snippet in _REFUSAL_SNIPPETS):
+        return True
+    # Catch close variants like "I am sorry ... can't help"
+    return bool(re.search(r"\b(?:i\s*am|i['’]?m)\s+sorry\b[\s\S]{0,120}\bcan(?:not|'t|’t)\s+help\b", haystack))
+
+
 def _handle_router_fallback(exc: Exception, *, user_message: str) -> dict:
     logger.warning("Router LLM failed: %s, using fallback routing", exc)
+
+    # If planner degraded to refusal text, force web_search fallback.
+    if _is_refusal_like_router_error(exc) and str(user_message or "").strip():
+        _dev_log("router_fallback_refusal_web_search", query=user_message[:120])
+        return _build_web_search_fallback(user_message)
+
+    # If planner returned non-JSON/refusal for a live-data query, prefer
+    # deterministic web_search fallback instead of chat dead-end.
+    if is_live_data_query(user_message):
+        _dev_log("router_fallback_live_data_web_search", query=user_message[:120])
+        return _build_web_search_fallback(user_message)
     
     # Side effect: Extract router output from malformed JSON exception
     salvaged = extract_router_output_from_exception(

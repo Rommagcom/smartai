@@ -14,7 +14,7 @@ from time import perf_counter
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from telegram import Bot, InputFile, Update
 from telegram.ext import (
     Application,
@@ -250,13 +250,11 @@ class TelegramAdapter(MessengerAdapter):
             user = user_result.scalar_one_or_none()
 
             if user is None:
-                users_count_query = await db.execute(select(func.count()).select_from(User))
-                users_count = int(users_count_query.scalar() or 0)
                 user = User(
                     username=username,
                     hashed_password=get_password_hash(password),
                     preferences={},
-                    is_admin=users_count == 0,
+                    is_admin=False,
                 )
                 db.add(user)
                 await db.commit()

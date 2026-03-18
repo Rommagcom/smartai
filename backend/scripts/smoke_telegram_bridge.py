@@ -1,9 +1,15 @@
 import asyncio
+import os
+import tempfile
+from pathlib import Path
 
 from integrations.messengers.telegram.adapter import TelegramAdapter
 
 
 DOCUMENT_FILENAME = "rates.pdf"
+TEST_TELEGRAM_USER_ID = int(os.getenv("SMOKE_TELEGRAM_USER_ID", "910000123"))
+TEST_TELEGRAM_USERNAME = f"tg_{TEST_TELEGRAM_USER_ID}"
+SMOKE_KNOWN_USERS_PATH = Path(tempfile.gettempdir()) / "smartai_smoke_tg_known_users.json"
 
 
 class FakeMessage:
@@ -95,261 +101,271 @@ def ensure(condition: bool, message: str) -> None:
 
 
 async def run() -> None:
-    adapter = TelegramAdapter()
-    adapter.settings.TELEGRAM_GROUP_REQUIRE_NAME = True
-    adapter.settings.TELEGRAM_GROUP_NAME_ALIASES = "smart ai"
+    original_known_users_path = TelegramAdapter._KNOWN_USERS_PATH
+    TelegramAdapter._KNOWN_USERS_PATH = SMOKE_KNOWN_USERS_PATH
+    try:
+        if SMOKE_KNOWN_USERS_PATH.exists():
+            SMOKE_KNOWN_USERS_PATH.unlink()
 
-    async def fake_auth(update):
-        await asyncio.sleep(0)
-        return "token-1", "tg_123"
+        adapter = TelegramAdapter()
+        adapter.settings.TELEGRAM_GROUP_REQUIRE_NAME = True
+        adapter.settings.TELEGRAM_GROUP_NAME_ALIASES = "smart ai"
 
-    adapter._auth = fake_auth
+        async def fake_auth(update):
+            await asyncio.sleep(0)
+            return "token-1", TEST_TELEGRAM_USERNAME
 
-    async def me_requires_setup(token: str):
-        await asyncio.sleep(0)
-        return {"status": 200, "payload": {"requires_soul_setup": True}}
+        adapter._auth = fake_auth
 
-    adapter.client.get_me = me_requires_setup
+        async def me_requires_setup(token: str):
+            await asyncio.sleep(0)
+            return {"status": 200, "payload": {"requires_soul_setup": True}}
 
-    update = FakeUpdate(user_id=123)
-    context = FakeContext()
-    await adapter.start(update, context)
-    ensure(any("SOUL-настройка" in text for text in update.effective_message.replies), "start should require soul setup")
+        adapter.client.get_me = me_requires_setup
 
-    async def me_ready(token: str):
-        await asyncio.sleep(0)
-        return {"status": 200, "payload": {"requires_soul_setup": False}}
+        update = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        context = FakeContext()
+        await adapter.start(update, context)
+        ensure(any("SOUL-настройка" in text for text in update.effective_message.replies), "start should require soul setup")
 
-    adapter.client.get_me = me_ready
-    update_ready = FakeUpdate(user_id=123)
-    await adapter.start(update_ready, context)
-    ensure(any("Ассистент готов" in text for text in update_ready.effective_message.replies), "start should show ready state")
+        async def me_ready(token: str):
+            await asyncio.sleep(0)
+            return {"status": 200, "payload": {"requires_soul_setup": False}}
 
-    async def chat_api_requires_setup(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
-        del telegram_user_id, text, token
-        await asyncio.sleep(0)
-        await bot.send_message(
-            chat_id=chat_id,
-            text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
+        adapter.client.get_me = me_ready
+        update_ready = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.start(update_ready, context)
+        ensure(any("Ассистент готов" in text for text in update_ready.effective_message.replies), "start should show ready state")
+
+        async def chat_api_requires_setup(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
+            del telegram_user_id, text, token
+            await asyncio.sleep(0)
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Нужна SOUL-настройка перед первым чатом. Я уже запустил setup автоматически.",
+            )
+
+        adapter._chat_background_task_api = chat_api_requires_setup
+        context.user_data.clear()
+        update_chat = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID, text="Привет")
+        await adapter.chat_message(update_chat, context)
+        ensure(len(update_chat.effective_message.replies) == 0, "chat should not send intermediate ack")
+        if adapter._background_tasks:
+            await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+        ensure(
+            any(
+                "SOUL-настройка" in text or "запустил setup автоматически" in text
+                for _, text in context.bot.sent_messages
+            ),
+            "chat should notify about soul setup on 428",
         )
 
-    adapter._chat_background_task_api = chat_api_requires_setup
-    context.user_data.clear()
-    update_chat = FakeUpdate(user_id=123, text="Привет")
-    await adapter.chat_message(update_chat, context)
-    ensure(len(update_chat.effective_message.replies) == 0, "chat should not send intermediate ack")
-    if adapter._background_tasks:
-        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
-    ensure(
-        any(
-            "SOUL-настройка" in text or "запустил setup автоматически" in text
-            for _, text in context.bot.sent_messages
-        ),
-        "chat should notify about soul setup on 428",
-    )
+        async def chat_api_ok(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
+            del telegram_user_id, text, token
+            await asyncio.sleep(0)
+            await bot.send_message(chat_id=chat_id, text="ok-from-backend")
 
-    async def chat_api_ok(bot, chat_id: int, telegram_user_id: int, token: str, text: str):
-        del telegram_user_id, text, token
-        await asyncio.sleep(0)
-        await bot.send_message(chat_id=chat_id, text="ok-from-backend")
+        adapter._chat_background_task_api = chat_api_ok
+        context.user_data.clear()
+        update_chat_ok = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID, text="Привет")
+        await adapter.chat_message(update_chat_ok, context)
+        ensure(len(update_chat_ok.effective_message.replies) == 0, "chat should not send intermediate ack")
+        if adapter._background_tasks:
+            await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+        ensure(
+            any("ok-from-backend" in text for _, text in context.bot.sent_messages),
+            "chat should deliver backend response asynchronously",
+        )
 
-    adapter._chat_background_task_api = chat_api_ok
-    context.user_data.clear()
-    update_chat_ok = FakeUpdate(user_id=123, text="Привет")
-    await adapter.chat_message(update_chat_ok, context)
-    ensure(len(update_chat_ok.effective_message.replies) == 0, "chat should not send intermediate ack")
-    if adapter._background_tasks:
-        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
-    ensure(
-        any("ok-from-backend" in text for _, text in context.bot.sent_messages),
-        "chat should deliver backend response asynchronously",
-    )
+        # In group chats the bot should answer only when explicitly addressed.
+        context_group = FakeContext()
+        context_group.user_data.clear()
+        before_group_silent = len(context_group.bot.sent_messages)
+        update_group_silent = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID, text="привет всем", chat_type="group")
+        await adapter.chat_message(update_group_silent, context_group)
+        if adapter._background_tasks:
+            await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+        ensure(
+            len(context_group.bot.sent_messages) == before_group_silent,
+            "group message without bot name should be ignored",
+        )
 
-    # In group chats the bot should answer only when explicitly addressed.
-    context_group = FakeContext()
-    context_group.user_data.clear()
-    before_group_silent = len(context_group.bot.sent_messages)
-    update_group_silent = FakeUpdate(user_id=123, text="привет всем", chat_type="group")
-    await adapter.chat_message(update_group_silent, context_group)
-    if adapter._background_tasks:
-        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
-    ensure(
-        len(context_group.bot.sent_messages) == before_group_silent,
-        "group message without bot name should be ignored",
-    )
+        update_group_named = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID, text="SmartAi, привет", chat_type="group")
+        await adapter.chat_message(update_group_named, context_group)
+        if adapter._background_tasks:
+            await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
+        ensure(
+            any("ok-from-backend" in text for _, text in context_group.bot.sent_messages),
+            "group message with bot name should be processed",
+        )
 
-    update_group_named = FakeUpdate(user_id=123, text="SmartAi, привет", chat_type="group")
-    await adapter.chat_message(update_group_named, context_group)
-    if adapter._background_tasks:
-        await asyncio.gather(*list(adapter._background_tasks), return_exceptions=False)
-    ensure(
-        any("ok-from-backend" in text for _, text in context_group.bot.sent_messages),
-        "group message with bot name should be processed",
-    )
+        memory_args = ["preference|любит краткие ответы|0.8"]
+        context_memory = FakeContext(args=memory_args)
 
-    memory_args = ["preference|любит краткие ответы|0.8"]
-    context_memory = FakeContext(args=memory_args)
+        async def memory_add_ok(token: str, fact_type: str, content: str, importance: float):
+            await asyncio.sleep(0)
+            return {"status": 200, "payload": {"fact_type": fact_type, "content": content, "importance": importance}}
 
-    async def memory_add_ok(token: str, fact_type: str, content: str, importance: float):
-        await asyncio.sleep(0)
-        return {"status": 200, "payload": {"fact_type": fact_type, "content": content, "importance": importance}}
+        adapter.client.memory_add = memory_add_ok
+        update_memory = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.memory_add(update_memory, context_memory)
+        ensure(len(update_memory.effective_message.replies) > 0, "memory_add should produce reply")
+        ensure("Готово" in update_memory.effective_message.replies[-1], "memory_add reply should be compact")
 
-    adapter.client.memory_add = memory_add_ok
-    update_memory = FakeUpdate(user_id=123)
-    await adapter.memory_add(update_memory, context_memory)
-    ensure(len(update_memory.effective_message.replies) > 0, "memory_add should produce reply")
-    ensure("Готово" in update_memory.effective_message.replies[-1], "memory_add reply should be compact")
+        async def documents_upload_ok(token: str, filename: str, content: bytes):
+            del token
+            await asyncio.sleep(0)
+            ensure(filename == DOCUMENT_FILENAME, f"unexpected filename: {filename}")
+            ensure(len(content) > 0, "uploaded content should not be empty")
+            return {"status": 200, "payload": {"status": "ok", "chunks": 3}}
 
-    async def documents_upload_ok(token: str, filename: str, content: bytes):
-        del token
-        await asyncio.sleep(0)
-        ensure(filename == DOCUMENT_FILENAME, f"unexpected filename: {filename}")
-        ensure(len(content) > 0, "uploaded content should not be empty")
-        return {"status": 200, "payload": {"status": "ok", "chunks": 3}}
+        adapter.client.documents_upload = documents_upload_ok
+        doc_context = FakeContext()
+        doc_context.bot.files_by_id["file-1"] = b"fake pdf bytes"
+        update_doc_upload = FakeUpdate(
+            user_id=TEST_TELEGRAM_USER_ID,
+            document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
+        )
+        await adapter.document_upload(update_doc_upload, doc_context)
+        ensure(
+            any("проиндексирован" in text for text in update_doc_upload.effective_message.replies),
+            "document_upload should confirm indexed chunks",
+        )
 
-    adapter.client.documents_upload = documents_upload_ok
-    doc_context = FakeContext()
-    doc_context.bot.files_by_id["file-1"] = b"fake pdf bytes"
-    update_doc_upload = FakeUpdate(
-        user_id=123,
-        document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
-    )
-    await adapter.document_upload(update_doc_upload, doc_context)
-    ensure(
-        any("проиндексирован" in text for text in update_doc_upload.effective_message.replies),
-        "document_upload should confirm indexed chunks",
-    )
+        async def documents_search_ok(token: str, query: str, top_k: int = 5):
+            del token, top_k
+            await asyncio.sleep(0)
+            ensure(query == "USD KZT", f"unexpected query: {query}")
+            return {
+                "status": 200,
+                "payload": {
+                    "items": [
+                        {
+                            "source_doc": DOCUMENT_FILENAME,
+                            "chunk_text": "Курс USD/KZT на сегодня: 501.25. Курс EUR/KZT: 542.10.",
+                        }
+                    ]
+                },
+            }
 
-    async def documents_search_ok(token: str, query: str, top_k: int = 5):
-        del token, top_k
-        await asyncio.sleep(0)
-        ensure(query == "USD KZT", f"unexpected query: {query}")
-        return {
-            "status": 200,
-            "payload": {
-                "items": [
-                    {
-                        "source_doc": DOCUMENT_FILENAME,
-                        "chunk_text": "Курс USD/KZT на сегодня: 501.25. Курс EUR/KZT: 542.10.",
-                    }
-                ]
+        adapter.client.documents_search = documents_search_ok
+        update_doc_search = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.doc_search(update_doc_search, FakeContext(args=["USD", "KZT"]))
+        ensure(len(update_doc_search.effective_message.replies) > 0, "doc_search should produce reply")
+        ensure(
+            "Результаты поиска по документам" in update_doc_search.effective_message.replies[-1],
+            "doc_search should show readable document snippets",
+        )
+        ensure(
+            DOCUMENT_FILENAME in update_doc_search.effective_message.replies[-1],
+            "doc_search reply should include source document",
+        )
+
+        async def documents_list_ok(token: str, limit: int = 200):
+            del token, limit
+            await asyncio.sleep(0)
+            return {
+                "status": 200,
+                "payload": {"items": [{"source_doc": DOCUMENT_FILENAME, "chunks": 3}]},
+            }
+
+        adapter.client.documents_list = documents_list_ok
+        update_doc_list = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.doc_list(update_doc_list, FakeContext())
+        ensure(len(update_doc_list.effective_message.replies) > 0, "doc_list should produce reply")
+        ensure(DOCUMENT_FILENAME in update_doc_list.effective_message.replies[-1], "doc_list should include filename")
+
+        async def documents_delete_ok(token: str, source_doc: str):
+            del token
+            await asyncio.sleep(0)
+            ensure(source_doc == DOCUMENT_FILENAME, f"unexpected source_doc: {source_doc}")
+            return {"status": 200, "payload": {"status": "deleted", "deleted_count": 3, "source_doc": source_doc}}
+
+        adapter.client.documents_delete = documents_delete_ok
+        update_doc_delete = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.doc_delete(update_doc_delete, FakeContext(args=[DOCUMENT_FILENAME]))
+        ensure(len(update_doc_delete.effective_message.replies) > 0, "doc_delete should produce reply")
+        ensure("Удалил документ" in update_doc_delete.effective_message.replies[-1], "doc_delete should confirm deletion")
+
+        async def documents_delete_all_ok(token: str):
+            del token
+            await asyncio.sleep(0)
+            return {"status": 200, "payload": {"status": "deleted_all", "deleted_count": 7}}
+
+        adapter.client.documents_delete_all = documents_delete_all_ok
+        update_doc_delete_all = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.doc_delete_all(update_doc_delete_all, FakeContext())
+        ensure(len(update_doc_delete_all.effective_message.replies) > 0, "doc_delete_all should produce reply")
+        ensure("Удалены все загруженные документы" in update_doc_delete_all.effective_message.replies[-1], "doc_delete_all should confirm deletion")
+
+        async def documents_upload_unavailable(token: str, filename: str, content: bytes):
+            del token, filename, content
+            await asyncio.sleep(0)
+            return {"status": 503, "payload": {"detail": "Document embedding is temporarily unavailable"}}
+
+        adapter.client.documents_upload = documents_upload_unavailable
+        update_doc_upload_503 = FakeUpdate(
+            user_id=TEST_TELEGRAM_USER_ID,
+            document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
+        )
+        await adapter.document_upload(update_doc_upload_503, doc_context)
+        ensure(len(update_doc_upload_503.effective_message.replies) > 0, "document_upload 503 should produce reply")
+        ensure(
+            "HTTP 503" in update_doc_upload_503.effective_message.replies[-1],
+            "document_upload 503 should return user-friendly error",
+        )
+
+        async def documents_search_unavailable(token: str, query: str, top_k: int = 5):
+            del token, query, top_k
+            await asyncio.sleep(0)
+            return {"status": 503, "payload": {"detail": "Document search embedding is temporarily unavailable"}}
+
+        adapter.client.documents_search = documents_search_unavailable
+        update_doc_search_503 = FakeUpdate(user_id=TEST_TELEGRAM_USER_ID)
+        await adapter.doc_search(update_doc_search_503, FakeContext(args=["USD", "KZT"]))
+        ensure(len(update_doc_search_503.effective_message.replies) > 0, "doc_search 503 should produce reply")
+        ensure(
+            "HTTP 503" in update_doc_search_503.effective_message.replies[-1],
+            "doc_search 503 should return user-friendly error",
+        )
+
+        async def worker_results_poll_ok(token: str, limit: int = 20):
+            del token, limit
+            await asyncio.sleep(0)
+            return {
+                "status": 200,
+                "payload": {
+                    "items": [
+                        {
+                            "success": True,
+                            "job_type": "pdf_create",
+                            "result_preview": {
+                                "artifact_ready": True,
+                                "file_name": "report.pdf",
+                            },
+                        }
+                    ]
+                },
+            }
+
+        adapter.client.worker_results_poll = worker_results_poll_ok
+        app = FakeApplication()
+        await adapter._poll_worker_results_for_user(
+            app,
+            TEST_TELEGRAM_USER_ID,
+            {
+                "token": "token-1",
+                "chat_id": TEST_TELEGRAM_USER_ID,
+                "username": TEST_TELEGRAM_USERNAME,
             },
-        }
-
-    adapter.client.documents_search = documents_search_ok
-    update_doc_search = FakeUpdate(user_id=123)
-    await adapter.doc_search(update_doc_search, FakeContext(args=["USD", "KZT"]))
-    ensure(len(update_doc_search.effective_message.replies) > 0, "doc_search should produce reply")
-    ensure(
-        "Результаты поиска по документам" in update_doc_search.effective_message.replies[-1],
-        "doc_search should show readable document snippets",
-    )
-    ensure(
-        DOCUMENT_FILENAME in update_doc_search.effective_message.replies[-1],
-        "doc_search reply should include source document",
-    )
-
-    async def documents_list_ok(token: str, limit: int = 200):
-        del token, limit
-        await asyncio.sleep(0)
-        return {
-            "status": 200,
-            "payload": {"items": [{"source_doc": DOCUMENT_FILENAME, "chunks": 3}]},
-        }
-
-    adapter.client.documents_list = documents_list_ok
-    update_doc_list = FakeUpdate(user_id=123)
-    await adapter.doc_list(update_doc_list, FakeContext())
-    ensure(len(update_doc_list.effective_message.replies) > 0, "doc_list should produce reply")
-    ensure(DOCUMENT_FILENAME in update_doc_list.effective_message.replies[-1], "doc_list should include filename")
-
-    async def documents_delete_ok(token: str, source_doc: str):
-        del token
-        await asyncio.sleep(0)
-        ensure(source_doc == DOCUMENT_FILENAME, f"unexpected source_doc: {source_doc}")
-        return {"status": 200, "payload": {"status": "deleted", "deleted_count": 3, "source_doc": source_doc}}
-
-    adapter.client.documents_delete = documents_delete_ok
-    update_doc_delete = FakeUpdate(user_id=123)
-    await adapter.doc_delete(update_doc_delete, FakeContext(args=[DOCUMENT_FILENAME]))
-    ensure(len(update_doc_delete.effective_message.replies) > 0, "doc_delete should produce reply")
-    ensure("Удалил документ" in update_doc_delete.effective_message.replies[-1], "doc_delete should confirm deletion")
-
-    async def documents_delete_all_ok(token: str):
-        del token
-        await asyncio.sleep(0)
-        return {"status": 200, "payload": {"status": "deleted_all", "deleted_count": 7}}
-
-    adapter.client.documents_delete_all = documents_delete_all_ok
-    update_doc_delete_all = FakeUpdate(user_id=123)
-    await adapter.doc_delete_all(update_doc_delete_all, FakeContext())
-    ensure(len(update_doc_delete_all.effective_message.replies) > 0, "doc_delete_all should produce reply")
-    ensure("Удалены все загруженные документы" in update_doc_delete_all.effective_message.replies[-1], "doc_delete_all should confirm deletion")
-
-    async def documents_upload_unavailable(token: str, filename: str, content: bytes):
-        del token, filename, content
-        await asyncio.sleep(0)
-        return {"status": 503, "payload": {"detail": "Document embedding is temporarily unavailable"}}
-
-    adapter.client.documents_upload = documents_upload_unavailable
-    update_doc_upload_503 = FakeUpdate(
-        user_id=123,
-        document=FakeTelegramDocument(file_id="file-1", file_name=DOCUMENT_FILENAME),
-    )
-    await adapter.document_upload(update_doc_upload_503, doc_context)
-    ensure(len(update_doc_upload_503.effective_message.replies) > 0, "document_upload 503 should produce reply")
-    ensure(
-        "HTTP 503" in update_doc_upload_503.effective_message.replies[-1],
-        "document_upload 503 should return user-friendly error",
-    )
-
-    async def documents_search_unavailable(token: str, query: str, top_k: int = 5):
-        del token, query, top_k
-        await asyncio.sleep(0)
-        return {"status": 503, "payload": {"detail": "Document search embedding is temporarily unavailable"}}
-
-    adapter.client.documents_search = documents_search_unavailable
-    update_doc_search_503 = FakeUpdate(user_id=123)
-    await adapter.doc_search(update_doc_search_503, FakeContext(args=["USD", "KZT"]))
-    ensure(len(update_doc_search_503.effective_message.replies) > 0, "doc_search 503 should produce reply")
-    ensure(
-        "HTTP 503" in update_doc_search_503.effective_message.replies[-1],
-        "doc_search 503 should return user-friendly error",
-    )
-
-    async def worker_results_poll_ok(token: str, limit: int = 20):
-        del token, limit
-        await asyncio.sleep(0)
-        return {
-            "status": 200,
-            "payload": {
-                "items": [
-                    {
-                        "success": True,
-                        "job_type": "pdf_create",
-                        "result_preview": {
-                            "artifact_ready": True,
-                            "file_name": "report.pdf",
-                        },
-                    }
-                ]
-            },
-        }
-
-    adapter.client.worker_results_poll = worker_results_poll_ok
-    app = FakeApplication()
-    await adapter._poll_worker_results_for_user(
-        app,
-        123,
-        {
-            "token": "token-1",
-            "chat_id": 123,
-            "username": "tg_123",
-        },
-    )
-    ensure(len(app.bot.sent_messages) == 1, "expected one delivered worker result message")
-    delivered_text = app.bot.sent_messages[0][1]
-    ensure(delivered_text.strip() == "Задача поставлена в очередь.", f"unexpected delivery text: {delivered_text}")
+        )
+        ensure(len(app.bot.sent_messages) == 1, "expected one delivered worker result message")
+        delivered_text = app.bot.sent_messages[0][1]
+        ensure(delivered_text.strip() == "Задача поставлена в очередь.", f"unexpected delivery text: {delivered_text}")
+    finally:
+        TelegramAdapter._KNOWN_USERS_PATH = original_known_users_path
+        if SMOKE_KNOWN_USERS_PATH.exists():
+            SMOKE_KNOWN_USERS_PATH.unlink()
 
     print("SMOKE_TELEGRAM_BRIDGE_OK")
 
