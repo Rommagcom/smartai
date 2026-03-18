@@ -121,6 +121,39 @@ def try_short_circuit(input_data: ComposeInput) -> ComposeResult | None:
             answer=input_data.existing_answer,
             iterations=input_data.iterations,
         )
+
+    # If action tools already succeeded, prefer deterministic answer and skip
+    # LLM compose to avoid hallucinated disclaimers.
+    if input_data.has_tool_results:
+        successful_tools = {
+            str(result.tool or "").strip().lower()
+            for result in input_data.tool_results
+            if bool(result.success)
+        }
+        if successful_tools and successful_tools.issubset({"cron_add", "integration_add"}):
+            from app.services.chat_service import ChatService
+
+            tool_calls_payload = [
+                {
+                    "tool": str(result.tool or "").strip().lower(),
+                    "success": bool(result.success),
+                    "arguments": result.arguments or {},
+                    "result": result.result if isinstance(result.result, dict) else {},
+                    "error": result.error,
+                }
+                for result in input_data.tool_results
+            ]
+            deterministic_answer = ChatService._format_deterministic_tool_answer(tool_calls_payload)
+            if deterministic_answer:
+                _dev_log(
+                    "compose_short_circuit_action_tool",
+                    tools=sorted(successful_tools),
+                    answer_len=len(deterministic_answer),
+                )
+                return ComposeResult.complete(
+                    answer=deterministic_answer,
+                    iterations=input_data.iterations,
+                )
     
     # Policy decision: Can we extract answer from web context only?
     if input_data.existing_answer and can_extract_answer_from_web_context(input_data.web_fetch_content):

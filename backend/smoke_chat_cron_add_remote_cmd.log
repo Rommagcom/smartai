@@ -1,0 +1,31 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Repositories\SmartAi\backend\scripts\smoke_chat_cron_add.py", line 11, in <module>
+    from app.core.config import settings
+  File "C:\Repositories\SmartAi\backend\app\core\config.py", line 204, in <module>
+    settings = get_settings()
+  File "C:\Repositories\SmartAi\backend\app\core\config.py", line 201, in get_settings
+    return Settings()
+  File "C:\Repositories\SmartAi\.venv\Lib\site-packages\pydantic_settings\main.py", line 188, in __init__
+    super().__init__(
+    ~~~~~~~~~~~~~~~~^
+        **__pydantic_self__._settings_build_values(
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<27 lines>...
+        )
+        ^
+    )
+    ^
+  File "C:\Repositories\SmartAi\.venv\Lib\site-packages\pydantic\main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+pydantic_core._pydantic_core.ValidationError: 3 validation errors for Settings
+WORKER_ENABLED
+  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='0 ', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/bool_parsing
+SCHEDULER_ENABLED
+  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='0 ', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/bool_parsing
+WS_FANOUT_REDIS_ENABLED
+  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='0 ', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/bool_parsing
