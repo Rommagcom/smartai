@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     SCHEDULER_INACTIVITY_REMINDER_MIN_HOURS: int = 6
     SCHEDULER_INACTIVITY_REMINDER_MAX_HOURS: int = 168
     SCHEDULER_INACTIVITY_REMINDER_MESSAGE: str = "Давно не виделись. Если хотите, помогу с задачами на сегодня."
+    SCHEDULER_SYNC_DB_BATCH_SIZE: int = 500
 
     WEBSOCKET_SEND_TIMEOUT_SECONDS: float = 2.0
     WS_FANOUT_REDIS_ENABLED: bool = True

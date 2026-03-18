@@ -8,7 +8,7 @@ from sqlalchemy import case, update
 
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
-from app.services.llm_usage_context import get_llm_usage_user_id
+from app.services.llm_usage_context import add_llm_usage_tokens, get_llm_usage_user_id, pop_llm_usage_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +18,14 @@ class LLMUsageService:
     def _month_key() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m")
 
-    async def record_total_tokens(self, total_tokens: int) -> None:
+    def record_total_tokens(self, total_tokens: int) -> None:
         safe_tokens = int(total_tokens or 0)
+        if safe_tokens <= 0:
+            return
+        add_llm_usage_tokens(safe_tokens)
+
+    async def flush_buffered_usage(self) -> None:
+        safe_tokens = pop_llm_usage_tokens()
         if safe_tokens <= 0:
             return
 

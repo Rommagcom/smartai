@@ -64,27 +64,60 @@ async def apply_output_bridges(
     Returns:
         Tuple of (final_answer, all_calls, all_artifacts) after bridges applied
     """
-    final_answer, all_calls, all_artifacts = await apply_direct_route_fallback(
-        user_id=user_id,
-        user_message=user_message,
-        final_answer=final_answer,
-        all_calls=all_calls,
-        all_artifacts=all_artifacts,
-    )
-    final_answer, all_calls, all_artifacts = await apply_inline_cron_bridge(
-        user_id=user_id,
-        user_message=user_message,
-        final_answer=final_answer,
-        all_calls=all_calls,
-        all_artifacts=all_artifacts,
-    )
-    return await apply_inline_integration_bridge(
-        user_id=user_id,
-        user_message=user_message,
-        final_answer=final_answer,
-        all_calls=all_calls,
-        all_artifacts=all_artifacts,
-    )
+    shared_db = None
+    shared_user = None
+    if user_id:
+        try:
+            from app.db.session import AsyncSessionLocal
+            from app.models.user import User
+            from sqlalchemy import select
+
+            shared_db = AsyncSessionLocal()
+            user_res = await shared_db.execute(select(User).where(User.id == user_id))
+            shared_user = user_res.scalar_one_or_none()
+        except Exception:
+            logger.debug("output bridge shared db init failed", exc_info=True)
+            if shared_db is not None:
+                try:
+                    await shared_db.close()
+                except Exception:
+                    logger.debug("output bridge shared db close failed", exc_info=True)
+                shared_db = None
+
+    try:
+        final_answer, all_calls, all_artifacts = await apply_direct_route_fallback(
+            user_id=user_id,
+            user_message=user_message,
+            final_answer=final_answer,
+            all_calls=all_calls,
+            all_artifacts=all_artifacts,
+            db=shared_db,
+            user=shared_user,
+        )
+        final_answer, all_calls, all_artifacts = await apply_inline_cron_bridge(
+            user_id=user_id,
+            user_message=user_message,
+            final_answer=final_answer,
+            all_calls=all_calls,
+            all_artifacts=all_artifacts,
+            db=shared_db,
+            user=shared_user,
+        )
+        return await apply_inline_integration_bridge(
+            user_id=user_id,
+            user_message=user_message,
+            final_answer=final_answer,
+            all_calls=all_calls,
+            all_artifacts=all_artifacts,
+            db=shared_db,
+            user=shared_user,
+        )
+    finally:
+        if shared_db is not None:
+            try:
+                await shared_db.close()
+            except Exception:
+                logger.debug("output bridge shared db close failed", exc_info=True)
 
 
 def append_export_status(

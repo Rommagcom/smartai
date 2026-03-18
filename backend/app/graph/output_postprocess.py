@@ -115,6 +115,9 @@ async def apply_direct_route_fallback(
     final_answer: str,
     all_calls: list[dict],
     all_artifacts: list[dict],
+    *,
+    db: Any | None = None,
+    user: Any | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     from app.db.session import AsyncSessionLocal
     from app.models.user import User
@@ -129,6 +132,26 @@ async def apply_direct_route_fallback(
     direct_steps = ChatService._direct_route_from_message(user_message)
     if not direct_steps:
         return final_answer, all_calls, all_artifacts
+
+    if db is not None and user is not None:
+        try:
+            direct_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=direct_steps,
+                max_steps=max(1, len(direct_steps)),
+            )
+            with suppress(Exception):
+                await db.commit()
+            if direct_calls and any(bool(c.get("success")) for c in direct_calls):
+                all_calls = [*all_calls, *direct_calls]
+                all_artifacts = [*all_artifacts, *extract_artifacts(direct_calls)]
+                direct_answer = ChatService._format_deterministic_tool_answer(direct_calls)
+                if direct_answer:
+                    final_answer = direct_answer
+            return final_answer, all_calls, all_artifacts
+        except Exception:
+            logger.warning("output direct-route fallback shared-db failed", exc_info=True)
 
     try:
         async with AsyncSessionLocal() as db:
@@ -187,6 +210,9 @@ async def apply_inline_cron_bridge(
     final_answer: str,
     all_calls: list[dict],
     all_artifacts: list[dict],
+    *,
+    db: Any | None = None,
+    user: Any | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     from app.db.session import AsyncSessionLocal
     from app.models.user import User
@@ -202,6 +228,31 @@ async def apply_inline_cron_bridge(
     parsed_cron = ChatService._extract_cron_xml_tags(final_answer)
     if not parsed_cron:
         return final_answer, all_calls, all_artifacts
+
+    if db is not None and user is not None:
+        try:
+            cron_args = {
+                "cron_expression": parsed_cron["cron_expression"],
+                "task_text": parsed_cron["message"],
+                "name": "chat-reminder",
+                "action_type": "send_message",
+            }
+            cron_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=[{"tool": "cron_add", "arguments": cron_args}],
+                max_steps=1,
+            )
+            with suppress(Exception):
+                await db.commit()
+            if cron_calls and any(bool(c.get("success")) for c in cron_calls):
+                all_calls = [*all_calls, *cron_calls]
+                all_artifacts = [*all_artifacts, *extract_artifacts(cron_calls)]
+                clean_answer = ChatService._strip_cron_xml_tags(final_answer)
+                final_answer = clean_answer or ChatService._format_deterministic_tool_answer(cron_calls) or "Готово: создал напоминание."
+            return final_answer, all_calls, all_artifacts
+        except Exception:
+            logger.warning("output inline cron bridge shared-db failed", exc_info=True)
 
     try:
         async with AsyncSessionLocal() as db:
@@ -240,6 +291,9 @@ async def apply_inline_integration_bridge(
     final_answer: str,
     all_calls: list[dict],
     all_artifacts: list[dict],
+    *,
+    db: Any | None = None,
+    user: Any | None = None,
 ) -> tuple[str, list[dict], list[dict]]:
     from app.db.session import AsyncSessionLocal
     from app.models.user import User
@@ -255,6 +309,25 @@ async def apply_inline_integration_bridge(
     parsed_integration = ChatService._extract_integration_xml_tags(final_answer)
     if not parsed_integration:
         return final_answer, all_calls, all_artifacts
+
+    if db is not None and user is not None:
+        try:
+            integration_calls = await tool_orchestrator_service.execute_tool_chain(
+                db=db,
+                user=user,
+                steps=[{"tool": "integration_add", "arguments": parsed_integration}],
+                max_steps=1,
+            )
+            with suppress(Exception):
+                await db.commit()
+            if integration_calls and any(bool(c.get("success")) for c in integration_calls):
+                all_calls = [*all_calls, *integration_calls]
+                all_artifacts = [*all_artifacts, *extract_artifacts(integration_calls)]
+                clean_answer = ChatService._strip_integration_xml_tags(final_answer)
+                final_answer = clean_answer or ChatService._format_deterministic_tool_answer(integration_calls) or "Готово: интеграция создана."
+            return final_answer, all_calls, all_artifacts
+        except Exception:
+            logger.warning("output inline integration bridge shared-db failed", exc_info=True)
 
     try:
         async with AsyncSessionLocal() as db:

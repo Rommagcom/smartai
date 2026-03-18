@@ -148,7 +148,7 @@ class OllamaClient:
         if total_tokens > 0:
             from app.services.llm_usage_service import llm_usage_service
 
-            await llm_usage_service.record_total_tokens(total_tokens)
+            llm_usage_service.record_total_tokens(total_tokens)
         return self._extract_message_content(response)
 
     async def stream_chat(self, messages: list[dict], options: dict | None = None) -> AsyncGenerator[str, None]:
@@ -198,7 +198,7 @@ class OllamaClient:
         if stream_total_tokens > 0:
             from app.services.llm_usage_service import llm_usage_service
 
-            await llm_usage_service.record_total_tokens(stream_total_tokens)
+            llm_usage_service.record_total_tokens(stream_total_tokens)
 
     async def embeddings(self, text: str) -> list[float]:
         try:

@@ -274,19 +274,6 @@ async def chat_node(state: dict) -> dict:
         )
         # Sanitize
         answer = _sanitize_llm_answer(raw_answer)
-
-        # Rare but real: model can return empty/invalid text that sanitizes to
-        # a generic fallback even for simple chat prompts. Retry once.
-        if answer.startswith(_GENERIC_CHAT_FALLBACK_PREFIX):
-            _dev_log("chat_sanitize_fallback_retry", raw_len=len(str(raw_answer or "")))
-            retry_raw = await llm_provider.chat(
-                messages,
-                temperature=0.0,
-                max_tokens=settings.OLLAMA_NUM_PREDICT,
-            )
-            retry_answer = _sanitize_llm_answer(retry_raw)
-            if retry_answer and not retry_answer.startswith(_GENERIC_CHAT_FALLBACK_PREFIX):
-                answer = retry_answer
     except Exception as exc:
         logger.warning("Chat LLM failed: %s", exc)
         answer = (

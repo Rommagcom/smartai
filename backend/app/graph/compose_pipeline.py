@@ -319,6 +319,24 @@ async def process_compose_output(
     # Handle LLM failure
     if output is None:
         _dev_log("compose_recovery_fallback_start")
+
+        # Prefer deterministic fallback from collected web context first.
+        web_fallback = _synthesize_web_fallback(
+            user_message=input_data.user_message,
+            web_fetch_content=input_data.web_fetch_content,
+            web_search_results=input_data.web_search_results,
+        )
+        if web_fallback:
+            return ComposeResult.complete(
+                answer=web_fallback,
+                iterations=input_data.iterations,
+            )
+
+        if input_data.existing_answer:
+            return ComposeResult.complete(
+                answer=input_data.existing_answer,
+                iterations=input_data.iterations,
+            )
         
         # Fallback recovery
         result = await _recover_compose_failure(

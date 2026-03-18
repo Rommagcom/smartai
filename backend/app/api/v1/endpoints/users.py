@@ -1,6 +1,7 @@
 from uuid import UUID
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from app.api.types import AdminUser, CurrentUser, DBSession
@@ -53,8 +54,18 @@ async def update_preferences(
 
 
 @router.get("/admin/users", response_model=list[UserOut])
-async def admin_list_users(db: DBSession, current_user: AdminUser) -> list[UserOut]:
-    result = await db.execute(select(User).order_by(User.created_at.desc()))
+async def admin_list_users(
+    db: DBSession,
+    current_user: AdminUser,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[UserOut]:
+    result = await db.execute(
+        select(User)
+        .order_by(User.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     users = result.scalars().all()
     return [_to_user_out(user) for user in users]
 

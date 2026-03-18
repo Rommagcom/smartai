@@ -180,7 +180,7 @@ class LLMProvider:
                 if total_tokens > 0:
                     from app.services.llm_usage_service import llm_usage_service
 
-                    await llm_usage_service.record_total_tokens(total_tokens)
+                    llm_usage_service.record_total_tokens(total_tokens)
                 return response.choices[0].message.content or ""
             except Exception as exc:
                 last_exc = exc
@@ -245,7 +245,7 @@ class LLMProvider:
         if stream_total_tokens > 0:
             from app.services.llm_usage_service import llm_usage_service
 
-            await llm_usage_service.record_total_tokens(stream_total_tokens)
+            llm_usage_service.record_total_tokens(stream_total_tokens)
 
     # ------------------------------------------------------------------
     # Structured output (Pydantic v2)

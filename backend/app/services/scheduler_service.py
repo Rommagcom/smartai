@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from app.db.session import AsyncSessionLocal
 from app.models.cron_job import CronJob
@@ -36,6 +36,8 @@ class _InactivityReminderPlan(BaseModel):
 
 
 class SchedulerService:
+    _ONCE_CRON_PREFIX = "@once:"
+
     def __init__(self) -> None:
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._redis: Redis | None = None
@@ -98,7 +100,7 @@ class SchedulerService:
                 return
 
             cron_expression = str(job.cron_expression or "").strip().lower()
-            if not cron_expression.startswith("@once:"):
+            if not cron_expression.startswith(self._ONCE_CRON_PREFIX):
                 return
 
             if not bool(job.is_active):
@@ -369,75 +371,87 @@ class SchedulerService:
     def _is_managed_cron_job_id(job_id: str) -> bool:
         return not str(job_id).startswith("global_")
 
-    async def _sync_jobs_from_db_internal(self, force_reload_all: bool = False) -> dict:
-        loaded = 0
-        failed = 0
-        removed = 0
-        skipped_stale_once = 0
-
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(CronJob).where(CronJob.is_active.is_(True)).order_by(CronJob.created_at.desc())
-            )
-            db_rows = result.scalars().all()
-
-            rows: list[CronJob] = []
-            for row in db_rows:
-                cron_expression = str(row.cron_expression or "").strip().lower()
-                if cron_expression.startswith("@once:"):
-                    try:
-                        run_at_raw = str(row.cron_expression or "").replace("@once:", "", 1)
-                        run_at = datetime.fromisoformat(run_at_raw)
-                    except Exception:
-                        failed += 1
-                        continue
-
-                    if self._should_skip_stale_once_job(run_at):
-                        row.is_active = False
-                        row.next_run = None
-                        skipped_stale_once += 1
-                        logger.debug(
-                            "scheduler stale once job deactivated",
-                            extra={
-                                "context": {
-                                    "component": "scheduler",
-                                    "event": "job_deactivate_stale_once",
-                                    "job_id": str(row.id),
-                                    "action_type": str(row.action_type),
-                                }
-                            },
-                        )
-                        continue
-
-                rows.append(row)
-
-            if skipped_stale_once:
-                await db.commit()
-
-        active_ids = {str(row.id) for row in rows}
-        existing_ids = {
+    def _managed_scheduler_job_ids(self) -> set[str]:
+        return {
             str(job.id)
             for job in self.scheduler.get_jobs()
             if self._is_managed_cron_job_id(str(job.id))
         }
 
-        for row in rows:
-            row_id = str(row.id)
-            if not force_reload_all and row_id in existing_ids:
-                continue
-            try:
-                added = self.add_or_replace_job(
-                    job_id=row_id,
-                    cron_expression=row.cron_expression,
-                    user_id=str(row.user_id),
-                    action_type=row.action_type,
-                    payload=row.payload if isinstance(row.payload, dict) else {},
+    def _build_sync_batch_query(
+        self,
+        *,
+        batch_size: int,
+        cursor_created_at: datetime | None,
+        cursor_id: UUID | None,
+    ):
+        query = select(CronJob).where(CronJob.is_active.is_(True))
+        if cursor_created_at is not None and cursor_id is not None:
+            query = query.where(
+                or_(
+                    CronJob.created_at < cursor_created_at,
+                    and_(CronJob.created_at == cursor_created_at, CronJob.id < cursor_id),
                 )
-                if added:
-                    loaded += 1
-            except Exception:
-                failed += 1
+            )
+        return query.order_by(CronJob.created_at.desc(), CronJob.id.desc()).limit(batch_size)
 
+    def _sync_row_once_guard(self, row: CronJob) -> tuple[bool, bool]:
+        """Return (is_failed, is_skipped_stale_once)."""
+        cron_expression = str(row.cron_expression or "").strip().lower()
+        if not cron_expression.startswith(self._ONCE_CRON_PREFIX):
+            return False, False
+
+        try:
+            run_at_raw = str(row.cron_expression or "").replace(self._ONCE_CRON_PREFIX, "", 1)
+            run_at = datetime.fromisoformat(run_at_raw)
+        except Exception:
+            return True, False
+
+        if self._should_skip_stale_once_job(run_at):
+            row.is_active = False
+            row.next_run = None
+            logger.debug(
+                "scheduler stale once job deactivated",
+                extra={
+                    "context": {
+                        "component": "scheduler",
+                        "event": "job_deactivate_stale_once",
+                        "job_id": str(row.id),
+                        "action_type": str(row.action_type),
+                    }
+                },
+            )
+            return False, True
+
+        return False, False
+
+    def _sync_row_schedule_if_needed(
+        self,
+        row: CronJob,
+        *,
+        force_reload_all: bool,
+        existing_ids: set[str],
+    ) -> tuple[bool, bool, str]:
+        """Return (loaded_added, failed, row_id)."""
+        row_id = str(row.id)
+        if not force_reload_all and row_id in existing_ids:
+            return False, False, row_id
+
+        try:
+            added = self.add_or_replace_job(
+                job_id=row_id,
+                cron_expression=row.cron_expression,
+                user_id=str(row.user_id),
+                action_type=row.action_type,
+                payload=row.payload if isinstance(row.payload, dict) else {},
+            )
+            return bool(added), False, row_id
+        except Exception:
+            return False, True, row_id
+
+    def _remove_stale_scheduler_jobs(self, active_ids: set[str], existing_ids: set[str]) -> tuple[int, int]:
+        removed = 0
+        failed = 0
         stale_ids = existing_ids - active_ids
         for stale_id in stale_ids:
             try:
@@ -445,6 +459,63 @@ class SchedulerService:
                 removed += 1
             except Exception:
                 failed += 1
+        return removed, failed
+
+    async def _sync_jobs_from_db_internal(self, force_reload_all: bool = False) -> dict:
+        loaded = 0
+        failed = 0
+        removed = 0
+        skipped_stale_once = 0
+
+        existing_ids = self._managed_scheduler_job_ids()
+        active_ids: set[str] = set()
+        batch_size = max(50, int(settings.SCHEDULER_SYNC_DB_BATCH_SIZE))
+
+        async with AsyncSessionLocal() as db:
+            cursor_created_at: datetime | None = None
+            cursor_id: UUID | None = None
+            while True:
+                query = self._build_sync_batch_query(
+                    batch_size=batch_size,
+                    cursor_created_at=cursor_created_at,
+                    cursor_id=cursor_id,
+                )
+                result = await db.execute(query)
+                db_rows = result.scalars().all()
+                if not db_rows:
+                    break
+
+                for row in db_rows:
+                    is_failed, is_skipped = self._sync_row_once_guard(row)
+                    if is_failed:
+                        failed += 1
+                        continue
+                    if is_skipped:
+                        skipped_stale_once += 1
+                        continue
+
+                    loaded_added, row_failed, row_id = self._sync_row_schedule_if_needed(
+                        row,
+                        force_reload_all=force_reload_all,
+                        existing_ids=existing_ids,
+                    )
+                    active_ids.add(row_id)
+                    if loaded_added:
+                        loaded += 1
+                    if row_failed:
+                        failed += 1
+
+                if len(db_rows) < batch_size:
+                    break
+                last_row = db_rows[-1]
+                cursor_created_at = last_row.created_at
+                cursor_id = last_row.id
+
+            if skipped_stale_once:
+                await db.commit()
+
+        removed, remove_failed = self._remove_stale_scheduler_jobs(active_ids, existing_ids)
+        failed += remove_failed
 
         return {
             "loaded": loaded,
@@ -521,8 +592,8 @@ class SchedulerService:
         started_at = perf_counter()
         success = False
         try:
-            if cron_expression.startswith("@once:"):
-                run_at = datetime.fromisoformat(cron_expression.replace("@once:", "", 1))
+            if cron_expression.startswith(self._ONCE_CRON_PREFIX):
+                run_at = datetime.fromisoformat(cron_expression.replace(self._ONCE_CRON_PREFIX, "", 1))
                 if self._should_skip_stale_once_job(run_at):
                     logger.info(
                         "scheduler stale once job skipped",
