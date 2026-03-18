@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 1024
 
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_READ_URL: str = ""
+    REDIS_WRITE_URL: str = ""
     WORKER_QUEUE_KEY: str = "assistant:worker:queue"
     WORKER_QUEUE_HIGH_KEY: str = "assistant:worker:queue:high"
     WORKER_PROCESSING_QUEUE_KEY: str = "assistant:worker:processing"
@@ -181,6 +183,16 @@ class Settings(BaseSettings):
     # --- Tool Vector Registry (Milvus semantic tool search) ---
     TOOL_RETRIEVER_TOP_K: int = 5
     TOOL_VECTOR_COLLECTION: str = "tool_vectors"
+
+    @property
+    def redis_read_url(self) -> str:
+        value = str(self.REDIS_READ_URL or "").strip()
+        return value or str(self.REDIS_URL or "").strip()
+
+    @property
+    def redis_write_url(self) -> str:
+        value = str(self.REDIS_WRITE_URL or "").strip()
+        return value or str(self.REDIS_URL or "").strip()
 
 
 @lru_cache

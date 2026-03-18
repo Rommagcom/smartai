@@ -18,8 +18,40 @@ services:
     image: redis:7.4-alpine
     container_name: assistant-redis
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     ports:
       - "127.0.0.1:6379:6379"
+
+  redis-replica:
+    image: redis:7.4-alpine
+    container_name: assistant-redis-replica
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--replicaof",
+        "redis",
+        "6379",
+        "--replica-read-only",
+        "yes",
+      ]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 -p 6379 INFO replication | grep -q '^role:slave'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 8s
+    ports:
+      - "127.0.0.1:6380:6379"
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.5

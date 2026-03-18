@@ -12,6 +12,7 @@ services:
       - postgres
       - milvus-standalone
       - redis
+      - redis-replica
 
   scheduler-leader:
     environment:
@@ -22,6 +23,7 @@ services:
       - postgres
       - milvus-standalone
       - redis
+      - redis-replica
 
   worker:
     environment:
@@ -32,6 +34,7 @@ services:
       - postgres
       - milvus-standalone
       - redis
+      - redis-replica
 
   # Disable local Ollama container in this mode.
   ollama:
