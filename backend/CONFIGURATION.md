@@ -40,6 +40,9 @@ API_V1_PREFIX=/api/v1
 # Storage
 DATABASE_URL=postgresql+asyncpg://assistant:assistant@postgres:5432/assistant
 REDIS_URL=redis://redis:6379/0
+# Optional split (recommended for primary/replica Redis):
+REDIS_WRITE_URL=redis://redis:6379/0
+REDIS_READ_URL=redis://redis-replica:6379/0
 
 # LLM
 OLLAMA_BASE_URL=http://ollama:11434
@@ -123,6 +126,49 @@ WS_FANOUT_REDIS_ENABLED=0
 - DB_MAX_OVERFLOW: доп. соединения сверх пула.
 - DB_POOL_TIMEOUT_SECONDS: timeout ожидания соединения.
 - DB_POOL_RECYCLE_SECONDS: recycle lifetime подключения.
+
+## 3.1 Redis (read/write)
+
+- `REDIS_URL`: базовый URL Redis (используется как fallback).
+- `REDIS_WRITE_URL`: writable endpoint (primary/master), используется для всех операций записи.
+- `REDIS_READ_URL`: endpoint для чтения (может быть replica).
+
+Если `REDIS_WRITE_URL`/`REDIS_READ_URL` не заданы, приложение использует `REDIS_URL`.
+
+Для docker-compose в этом репозитории:
+
+- primary сервис: `redis` (порт `6379`)
+- replica сервис: `redis-replica` (порт `6380` на хосте, `6379` внутри сети compose)
+
+### 3.2 Быстрая проверка после развёртывания
+
+Команды ниже проверяют роли Redis и работоспособность записи.
+
+```bash
+sudo docker compose ps
+sudo docker compose exec api env | grep -E '^REDIS_URL|^REDIS_WRITE_URL|^REDIS_READ_URL'
+
+sudo docker compose exec redis redis-cli INFO replication | grep '^role'
+sudo docker compose exec redis-replica redis-cli INFO replication | grep '^role'
+
+sudo docker compose exec redis redis-cli SET smartai:rw:test ok EX 30
+sudo docker compose exec redis redis-cli GET smartai:rw:test
+sudo docker compose exec redis-replica redis-cli GET smartai:rw:test
+```
+
+Ожидаемый результат:
+
+- `redis` -> `role:master`
+- `redis-replica` -> `role:slave`
+- `SET` в primary возвращает `OK`
+- `GET` из primary и replica возвращает одинаковое значение
+
+Если `redis` показывает `role:slave`, переключите его обратно в master:
+
+```bash
+sudo docker compose exec redis redis-cli REPLICAOF NO ONE
+sudo docker compose exec redis redis-cli INFO replication | grep '^role'
+```
 
 ## 4. LLM, Ollama, LiteLLM
 
