@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _to_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(slots=True)
+class Settings:
+    telegram_bot_token: str | None
+    ollama_model: str
+    ollama_base_url: str | None
+    ollama_api_key: str | None
+    ollama_auth_token: str | None
+    ollama_think: bool
+    langsmith_tracing: bool
+    langsmith_project: str
+    dynamic_skills_dir: Path
+    max_tool_result_chars: int
+    agent_max_steps: int
+    max_conversation_messages: int
+    redis_url: str | None
+    redis_key_prefix: str
+    redis_conversation_ttl_seconds: int
+    include_token_usage_in_response: bool
+    telegram_admin_user_ids: set[int]
+    enable_dynamic_tools: bool
+
+
+
+def load_settings() -> Settings:
+    workspace_root = Path(__file__).resolve().parents[2]
+    package_dir = Path(__file__).resolve().parent
+    load_dotenv(workspace_root / ".env")
+    load_dotenv(package_dir / ".env")
+    load_dotenv()
+    configured_skills_dir = os.getenv("DYNAMIC_SKILLS_DIR", "skills")
+    dynamic_skills_dir = Path(configured_skills_dir)
+    if not dynamic_skills_dir.is_absolute():
+        dynamic_skills_dir = workspace_root / dynamic_skills_dir
+
+    admin_ids_raw = os.getenv("TELEGRAM_ADMIN_USER_IDS", "")
+    admin_ids: set[int] = set()
+    for part in admin_ids_raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            admin_ids.add(int(part))
+        except ValueError:
+            continue
+
+    return Settings(
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "qwen3:4b"),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL"),
+        ollama_api_key=os.getenv("OLLAMA_API_KEY"),
+        ollama_auth_token=os.getenv("OLLAMA_AUTH_TOKEN"),
+        ollama_think=_to_bool(os.getenv("OLLAMA_THINK"), default=True),
+        langsmith_tracing=_to_bool(os.getenv("LANGSMITH_TRACING"), default=False),
+        langsmith_project=os.getenv("LANGSMITH_PROJECT", "telegram-search-agent"),
+        dynamic_skills_dir=dynamic_skills_dir,
+        max_tool_result_chars=int(os.getenv("MAX_TOOL_RESULT_CHARS", "8000")),
+        agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "8")),
+        max_conversation_messages=int(os.getenv("MAX_CONVERSATION_MESSAGES", "12")),
+        redis_url=os.getenv("REDIS_URL"),
+        redis_key_prefix=os.getenv("REDIS_KEY_PREFIX", "sai:chat"),
+        redis_conversation_ttl_seconds=int(os.getenv("REDIS_CONVERSATION_TTL_SECONDS", "604800")),
+        include_token_usage_in_response=_to_bool(os.getenv("INCLUDE_TOKEN_USAGE_IN_RESPONSE"), default=True),
+        telegram_admin_user_ids=admin_ids,
+        enable_dynamic_tools=_to_bool(os.getenv("ENABLE_DYNAMIC_TOOLS"), default=True),
+    )

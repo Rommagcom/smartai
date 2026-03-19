@@ -1,0 +1,40 @@
+{
+  "name": "generate_pdf_document",
+  "description": "Generates a PDF from HTML or Markdown and returns it as base64",
+  "entrypoint": "tool.py",
+  "function": "generate_pdf_document",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "HTML content or Markdown text to render into the PDF"
+      },
+      "input_format": {
+        "type": "string",
+        "description": "Input format: auto, html, or markdown",
+        "enum": ["auto", "html", "markdown"],
+        "default": "auto"
+      },
+      "title": {
+        "type": "string",
+        "description": "Optional title prepended before content"
+      },
+      "theme": {
+        "type": "string",
+        "description": "Document style theme: clean or business",
+        "enum": ["clean", "business"],
+        "default": "clean"
+      },
+      "css": {
+        "type": "string",
+        "description": "Optional CSS styles injected into HTML before PDF rendering"
+      },
+      "filename": {
+        "type": "string",
+        "description": "Optional output filename, for example report.pdf"
+      }
+    },
+    "required": ["content"]
+  }
+}
