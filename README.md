@@ -100,7 +100,7 @@ The bot can reload tools at runtime with `/reload` command, and tools are also r
 The repository ships with `skills/reminder_scheduler`.
 
 It supports actions:
-- `create`: create one-time (`once`) or recurring (`interval`, `daily`) reminders.
+- `create`: create one-time (`once`) or recurring (`interval`, `daily`, `cron`) reminders.
 - `list`: show reminders.
 - `delete`: remove a reminder.
 

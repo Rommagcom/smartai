@@ -53,8 +53,8 @@
       },
       "schedule_type": {
         "type": "string",
-        "description": "Schedule type: once, interval, daily",
-        "enum": ["once", "interval", "daily"],
+        "description": "Schedule type: once, interval, daily, cron",
+        "enum": ["once", "interval", "daily", "cron"],
         "default": "once"
       },
       "once_at": {
@@ -68,6 +68,10 @@
       "time_of_day": {
         "type": "string",
         "description": "Daily time in HH:MM for schedule_type=daily"
+      },
+      "cron_expr": {
+        "type": "string",
+        "description": "Cron expression for schedule_type=cron, for example */15 * * * *"
       },
       "timezone": {
         "type": "string",
