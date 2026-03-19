@@ -15,6 +15,10 @@ from aiogram.types import BufferedInputFile, Message
 from search_agent.agent.graph import OllamaLangGraphAgent
 from search_agent.config import load_settings
 from search_agent.memory.store import build_conversation_store
+from search_agent.reminders.store import ReminderStore
+
+
+logger = logging.getLogger(__name__)
 
 
 def _chunk_message(text: str, max_length: int = 4096) -> list[str]:
@@ -96,8 +100,9 @@ def _extract_file_payload_from_messages(messages: list[dict[str, Any]]) -> dict[
     return None
 
 
-async def _send_answer(
-    message: Message,
+async def _send_answer_to_chat(
+    bot: Bot,
+    chat_id: int,
     answer: str,
     messages: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -109,24 +114,84 @@ async def _send_answer(
 
     if file_payload is None:
         for chunk in _chunk_message(answer):
-            await message.answer(chunk)
+            await bot.send_message(chat_id=chat_id, text=chunk)
         return
 
     try:
         file_bytes = base64.b64decode(file_payload["base64"], validate=True)
     except Exception:
-        await message.answer("File payload is invalid: cannot decode base64.")
+        await bot.send_message(chat_id=chat_id, text="File payload is invalid: cannot decode base64.")
         return
 
     input_file = BufferedInputFile(file=BytesIO(file_bytes).getvalue(), filename=file_payload["filename"])
     caption = f"Generated file ({file_payload['mime_type']})"
-    await message.answer_document(document=input_file, caption=caption)
+    await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
 
     text_answer_payload = _parse_file_payload(answer)
     text_answer = answer.strip()
     if text_answer and text_answer_payload is None:
         for chunk in _chunk_message(text_answer):
-            await message.answer(chunk)
+            await bot.send_message(chat_id=chat_id, text=chunk)
+
+
+async def _send_answer(
+    message: Message,
+    answer: str,
+    messages: list[dict[str, Any]] | None = None,
+) -> None:
+    await _send_answer_to_chat(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        answer=answer,
+        messages=messages,
+    )
+
+
+async def _run_reminder_worker(
+    *,
+    bot: Bot,
+    agent: OllamaLangGraphAgent,
+    conversation_store: Any,
+    reminder_store: ReminderStore,
+    poll_interval_seconds: int,
+    max_jobs_per_tick: int,
+) -> None:
+    while True:
+        try:
+            due_items = await asyncio.to_thread(reminder_store.pop_due, limit=max_jobs_per_tick)
+            for item in due_items:
+                chat_id = int(item.chat_id)
+                prompt = item.prompt.strip()
+                if not prompt:
+                    continue
+
+                notify_prefix = item.notify_text.strip()
+                history = await conversation_store.get_history(chat_id)
+                result = await asyncio.to_thread(agent.run, prompt, history, chat_id)
+                answer = result.answer or "I could not generate a response."
+
+                await conversation_store.append_turn(chat_id, prompt, answer)
+                await conversation_store.add_token_usage(
+                    chat_id,
+                    prompt_tokens=result.token_usage.prompt_tokens,
+                    completion_tokens=result.token_usage.completion_tokens,
+                    total_tokens=result.token_usage.total_tokens,
+                    requests=result.token_usage.request_count,
+                )
+
+                final_answer = f"{notify_prefix}\n\n{answer}" if notify_prefix else answer
+                await _send_answer_to_chat(
+                    bot=bot,
+                    chat_id=chat_id,
+                    answer=final_answer,
+                    messages=result.messages,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Reminder worker iteration failed: %s", exc)
+
+        await asyncio.sleep(max(1, poll_interval_seconds))
 
 
 async def start_bot() -> None:
@@ -138,8 +203,21 @@ async def start_bot() -> None:
 
     agent = OllamaLangGraphAgent(settings)
     conversation_store = await build_conversation_store(settings)
+    reminder_store = ReminderStore()
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
+
+    reminder_task = asyncio.create_task(
+        _run_reminder_worker(
+            bot=bot,
+            agent=agent,
+            conversation_store=conversation_store,
+            reminder_store=reminder_store,
+            poll_interval_seconds=settings.reminder_poll_interval_seconds,
+            max_jobs_per_tick=settings.reminder_max_jobs_per_tick,
+        ),
+        name="reminder-worker",
+    )
 
     def _is_admin(message: Message) -> bool:
         user = message.from_user
@@ -200,7 +278,7 @@ async def start_bot() -> None:
         await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
         history = await conversation_store.get_history(message.chat.id)
-        result = await asyncio.to_thread(agent.run, text, history)
+        result = await asyncio.to_thread(agent.run, text, history, message.chat.id)
         answer = result.answer or "I could not generate a response."
 
         await conversation_store.append_turn(message.chat.id, text, answer)
@@ -217,4 +295,6 @@ async def start_bot() -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        reminder_task.cancel()
+        await asyncio.gather(reminder_task, return_exceptions=True)
         await conversation_store.close()
