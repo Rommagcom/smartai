@@ -29,6 +29,34 @@ def _resolve_prompt(args: dict[str, Any]) -> str:
     return ""
 
 
+def _flatten_nested_arguments(args: dict[str, Any]) -> dict[str, Any]:
+    nested = args.get("arguments")
+    if not isinstance(nested, dict):
+        return args
+
+    # Support tool runtimes that wrap payload as {"arguments": {...}}.
+    merged = dict(nested)
+    for key, value in args.items():
+        if key == "arguments":
+            continue
+        merged[key] = value
+    return merged
+
+
+def _resolve_schedule_type(args: dict[str, Any]) -> str:
+    explicit = _text_value(args.get("schedule_type")).lower()
+    if explicit:
+        return explicit
+
+    if _text_value(args.get("cron_expr")):
+        return "cron"
+    if args.get("interval_seconds") is not None:
+        return "interval"
+    if _text_value(args.get("time_of_day")):
+        return "daily"
+    return "once"
+
+
 def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
     chat_id = args.get("chat_id")
     if chat_id is None:
@@ -45,10 +73,11 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
         prompt=resolved_prompt,
         title=_text_value(args.get("title")) or "Reminder",
         notify_text=_text_value(args.get("notify_text")),
-        schedule_type=_text_value(args.get("schedule_type")) or "once",
+        schedule_type=_resolve_schedule_type(args),
         once_at=_text_value(args.get("once_at")) or None,
         interval_seconds=int(args["interval_seconds"]) if args.get("interval_seconds") is not None else None,
         time_of_day=_text_value(args.get("time_of_day")) or None,
+        cron_expr=_text_value(args.get("cron_expr")) or None,
         timezone=_text_value(args.get("timezone")) or "UTC",
         max_runs=int(args["max_runs"]) if args.get("max_runs") is not None else None,
     )
@@ -95,6 +124,7 @@ def _handle_delete(store: ReminderStore, args: dict[str, Any]) -> str:
 
 
 def reminder_scheduler(action: str, **kwargs: Any) -> str:
+    kwargs = _flatten_nested_arguments(kwargs)
     store = ReminderStore()
     normalized = _text_value(action).lower()
 

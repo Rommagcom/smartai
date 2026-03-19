@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from croniter import croniter
 
 from sqlalchemy import (
     BigInteger,
@@ -41,6 +42,7 @@ _reminders_table = Table(
     Column("next_run_at", DateTime(timezone=True), nullable=True),
     Column("interval_seconds", Integer, nullable=True),
     Column("time_of_day", String(5), nullable=True),
+    Column("cron_expr", String(128), nullable=True),
     Column("max_runs", Integer, nullable=True),
     Column("run_count", Integer, nullable=False, server_default="0"),
     Column("active", Boolean, nullable=False, server_default="true", index=True),
@@ -61,6 +63,7 @@ class ReminderRecord:
     next_run_at: str
     interval_seconds: int | None
     time_of_day: str | None
+    cron_expr: str | None
     max_runs: int | None
     run_count: int
     active: bool
@@ -79,6 +82,7 @@ class ReminderRecord:
             "next_run_at": self.next_run_at,
             "interval_seconds": self.interval_seconds,
             "time_of_day": self.time_of_day,
+            "cron_expr": self.cron_expr,
             "max_runs": self.max_runs,
             "run_count": self.run_count,
             "active": self.active,
@@ -121,6 +125,7 @@ class ReminderStore:
         once_at: str | None = None,
         interval_seconds: int | None = None,
         time_of_day: str | None = None,
+        cron_expr: str | None = None,
         timezone: str = "UTC",
         max_runs: int | None = None,
     ) -> ReminderRecord:
@@ -132,6 +137,7 @@ class ReminderStore:
             once_at=once_at,
             interval_seconds=interval_seconds,
             time_of_day=time_of_day,
+            cron_expr=cron_expr,
             tz=tz,
             now=now,
         )
@@ -148,6 +154,7 @@ class ReminderStore:
             "next_run_at": next_run,
             "interval_seconds": int(interval_seconds) if interval_seconds is not None else None,
             "time_of_day": time_of_day.strip() if time_of_day else None,
+            "cron_expr": cron_expr.strip() if cron_expr else None,
             "max_runs": int(max_runs) if max_runs is not None else None,
             "run_count": 0,
             "active": True,
@@ -241,24 +248,39 @@ class ReminderStore:
         if schedule_type == "once":
             return None
 
-        if schedule_type == "interval":
-            interval_seconds = int(raw.get("interval_seconds") or 0)
-            if interval_seconds <= 0:
-                return None
-            prev_raw = raw.get("next_run_at")
-            prev = self._as_utc(prev_raw) or now
-            next_dt = prev
-            while next_dt <= now:
-                next_dt += timedelta(seconds=interval_seconds)
-            return next_dt
+        handlers = {
+            "interval": self._advance_interval_next_run,
+            "daily": self._advance_daily_next_run,
+            "cron": self._advance_cron_next_run,
+        }
+        handler = handlers.get(schedule_type)
+        if handler is None:
+            return None
+        return handler(raw=raw, tz=tz, now=now)
 
-        if schedule_type == "daily":
-            time_of_day = str(raw.get("time_of_day") or "").strip()
-            if not time_of_day:
-                return None
-            return self._next_daily_time(time_of_day=time_of_day, tz=tz, now=now)
+    def _advance_interval_next_run(self, *, raw: dict[str, Any], tz: ZoneInfo, now: datetime) -> datetime | None:
+        del tz
+        interval_seconds = int(raw.get("interval_seconds") or 0)
+        if interval_seconds <= 0:
+            return None
+        prev_raw = raw.get("next_run_at")
+        prev = self._as_utc(prev_raw) or now
+        next_dt = prev
+        while next_dt <= now:
+            next_dt += timedelta(seconds=interval_seconds)
+        return next_dt
 
-        return None
+    def _advance_daily_next_run(self, *, raw: dict[str, Any], tz: ZoneInfo, now: datetime) -> datetime | None:
+        time_of_day = str(raw.get("time_of_day") or "").strip()
+        if not time_of_day:
+            return None
+        return self._next_daily_time(time_of_day=time_of_day, tz=tz, now=now)
+
+    def _advance_cron_next_run(self, *, raw: dict[str, Any], tz: ZoneInfo, now: datetime) -> datetime | None:
+        cron_expr = str(raw.get("cron_expr") or "").strip()
+        if not cron_expr:
+            return None
+        return self._next_cron_time(cron_expr=cron_expr, tz=tz, now=now)
 
     def _compute_initial_next_run(
         self,
@@ -267,31 +289,47 @@ class ReminderStore:
         once_at: str | None,
         interval_seconds: int | None,
         time_of_day: str | None,
+        cron_expr: str | None,
         tz: ZoneInfo,
         now: datetime,
     ) -> datetime:
         if schedule_type == "once":
-            if not once_at:
-                raise ValueError("once_at is required for schedule_type=once")
-            when = self._parse_iso_flexible(once_at, tz=tz)
-            if when <= now:
-                raise ValueError("once_at must be in the future")
-            return when
-
+            return self._compute_initial_once_next_run(once_at=once_at, tz=tz, now=now)
         if schedule_type == "interval":
-            if interval_seconds is None:
-                raise ValueError("interval_seconds is required for schedule_type=interval")
-            seconds = int(interval_seconds)
-            if seconds <= 0:
-                raise ValueError("interval_seconds must be > 0")
-            return now + timedelta(seconds=seconds)
-
+            return self._compute_initial_interval_next_run(interval_seconds=interval_seconds, now=now)
         if schedule_type == "daily":
-            if not time_of_day:
-                raise ValueError("time_of_day is required for schedule_type=daily")
-            return self._next_daily_time(time_of_day=time_of_day, tz=tz, now=now)
+            return self._compute_initial_daily_next_run(time_of_day=time_of_day, tz=tz, now=now)
+        if schedule_type == "cron":
+            return self._compute_initial_cron_next_run(cron_expr=cron_expr, tz=tz, now=now)
 
-        raise ValueError("schedule_type must be one of: once, interval, daily")
+        raise ValueError("schedule_type must be one of: once, interval, daily, cron")
+
+    def _compute_initial_once_next_run(self, *, once_at: str | None, tz: ZoneInfo, now: datetime) -> datetime:
+        if not once_at:
+            raise ValueError("once_at is required for schedule_type=once")
+        when = self._parse_iso_flexible(once_at, tz=tz)
+        if when <= now:
+            raise ValueError("once_at must be in the future")
+        return when
+
+    @staticmethod
+    def _compute_initial_interval_next_run(*, interval_seconds: int | None, now: datetime) -> datetime:
+        if interval_seconds is None:
+            raise ValueError("interval_seconds is required for schedule_type=interval")
+        seconds = int(interval_seconds)
+        if seconds <= 0:
+            raise ValueError("interval_seconds must be > 0")
+        return now + timedelta(seconds=seconds)
+
+    def _compute_initial_daily_next_run(self, *, time_of_day: str | None, tz: ZoneInfo, now: datetime) -> datetime:
+        if not time_of_day:
+            raise ValueError("time_of_day is required for schedule_type=daily")
+        return self._next_daily_time(time_of_day=time_of_day, tz=tz, now=now)
+
+    def _compute_initial_cron_next_run(self, *, cron_expr: str | None, tz: ZoneInfo, now: datetime) -> datetime:
+        if not cron_expr or not cron_expr.strip():
+            raise ValueError("cron_expr is required for schedule_type=cron")
+        return self._next_cron_time(cron_expr=cron_expr, tz=tz, now=now)
 
     def _next_daily_time(self, *, time_of_day: str, tz: ZoneInfo, now: datetime) -> datetime:
         hour, minute = self._parse_hhmm(time_of_day)
@@ -300,6 +338,23 @@ class ReminderStore:
         if candidate <= local_now:
             candidate += timedelta(days=1)
         return candidate.astimezone(UTC)
+
+    @staticmethod
+    def _next_cron_time(*, cron_expr: str, tz: ZoneInfo, now: datetime) -> datetime:
+        expression = cron_expr.strip()
+        if not expression:
+            raise ValueError("cron_expr must not be empty")
+
+        local_now = now.astimezone(tz)
+        try:
+            itr = croniter(expression, local_now)
+            next_local = itr.get_next(datetime)
+        except Exception as exc:
+            raise ValueError("cron_expr is invalid") from exc
+
+        if next_local.tzinfo is None:
+            next_local = next_local.replace(tzinfo=tz)
+        return next_local.astimezone(UTC)
 
     @staticmethod
     def _parse_hhmm(value: str) -> tuple[int, int]:
@@ -370,6 +425,7 @@ class ReminderStore:
             next_run_at=ReminderStore._iso_or_empty(raw.get("next_run_at")),
             interval_seconds=int(raw["interval_seconds"]) if raw.get("interval_seconds") is not None else None,
             time_of_day=str(raw.get("time_of_day")) if raw.get("time_of_day") is not None else None,
+            cron_expr=str(raw.get("cron_expr")) if raw.get("cron_expr") is not None else None,
             max_runs=int(raw["max_runs"]) if raw.get("max_runs") is not None else None,
             run_count=int(raw.get("run_count", 0)),
             active=bool(raw.get("active", False)),
