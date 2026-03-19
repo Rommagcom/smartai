@@ -1,0 +1,21 @@
+{
+  "name": "echo_skill",
+  "description": "Echoes input with optional uppercase formatting",
+  "entrypoint": "tool.py",
+  "function": "echo",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to echo"
+      },
+      "uppercase": {
+        "type": "boolean",
+        "description": "Return in upper case",
+        "default": false
+      }
+    },
+    "required": ["text"]
+  }
+}

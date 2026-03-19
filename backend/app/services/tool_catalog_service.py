@@ -1,7 +1,0 @@
-from __future__ import annotations
-
-from app.services.skills_registry_service import SkillsRegistryService, skills_registry_service
-
-
-ToolCatalogService = SkillsRegistryService
-tool_catalog_service = skills_registry_service
