@@ -25,7 +25,7 @@
       },
       "prompt": {
         "type": "string",
-        "description": "Text that will be sent to LLM as if from user when reminder triggers or Short reminder title"
+        "description": "Additional instructions to LLM from user if provided when reminder triggers"
       },
       "text": {
         "type": "string",
