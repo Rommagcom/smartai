@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[dict[str, Any]], list.__add__]
     step_count: int
     token_usage: dict[str, int]
+    chat_id: int | None
 
 
 @dataclass(slots=True)
@@ -84,7 +85,12 @@ class OllamaLangGraphAgent:
         self.registry.refresh()
 
     @traceable(name="ollama_langgraph_agent_run")
-    def run(self, user_message: str, history_messages: list[dict[str, Any]] | None = None) -> AgentRunResult:
+    def run(
+        self,
+        user_message: str,
+        history_messages: list[dict[str, Any]] | None = None,
+        chat_id: int | None = None,
+    ) -> AgentRunResult:
         if self.settings.enable_dynamic_tools:
             self.refresh_dynamic_tools()
         self._configure_langsmith_env()
@@ -101,6 +107,7 @@ class OllamaLangGraphAgent:
                 "messages": initial_messages,
                 "step_count": 0,
                 "token_usage": TokenUsage().to_dict(),
+                "chat_id": chat_id,
             }
         )
         messages = result_state["messages"]
@@ -205,19 +212,16 @@ class OllamaLangGraphAgent:
         for tool_call in tool_calls:
             function = tool_call.get("function") or {}
             tool_name = function.get("name", "unknown_tool")
-            arguments = function.get("arguments") or {}
-            if not isinstance(arguments, dict):
-                arguments = {}
-
-            tool_fn = callables.get(tool_name)
-            if tool_fn is None:
-                content = f"Tool {tool_name} not found"
-            else:
-                try:
-                    result = tool_fn(**arguments)
-                    content = str(result)
-                except Exception as exc:
-                    content = f"Tool {tool_name} failed: {exc}"
+            arguments = self._resolve_tool_arguments(
+                tool_name=tool_name,
+                raw_arguments=function.get("arguments"),
+                state=state,
+            )
+            content = self._execute_tool_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                callables=callables,
+            )
 
             content = content[: self.settings.max_tool_result_chars]
             tool_messages.append(
@@ -232,6 +236,39 @@ class OllamaLangGraphAgent:
             "messages": tool_messages,
             "step_count": state["step_count"] + 1,
         }
+
+    @staticmethod
+    def _resolve_tool_arguments(
+        *,
+        tool_name: str,
+        raw_arguments: Any,
+        state: AgentState,
+    ) -> dict[str, Any]:
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+
+        if tool_name == "reminder_scheduler" and "chat_id" not in arguments:
+            state_chat_id = state.get("chat_id")
+            if isinstance(state_chat_id, int):
+                arguments["chat_id"] = state_chat_id
+
+        return arguments
+
+    @staticmethod
+    def _execute_tool_call(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        callables: dict[str, Any],
+    ) -> str:
+        tool_fn = callables.get(tool_name)
+        if tool_fn is None:
+            return f"Tool {tool_name} not found"
+
+        try:
+            result = tool_fn(**arguments)
+            return str(result)
+        except Exception as exc:
+            return f"Tool {tool_name} failed: {exc}"
 
     def _route_after_agent(self, state: AgentState) -> str:
         if state["step_count"] >= self.settings.agent_max_steps:

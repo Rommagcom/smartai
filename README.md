@@ -8,6 +8,7 @@ A Telegram bot that runs an Ollama-powered search agent using LangGraph orchestr
 - LangSmith tracing support via environment variables
 - aiogram Telegram bot integration
 - Dynamic tool loading from a `skills` folder (manifest + script + skill.md)
+- Built-in reminder scheduler skill with one-time and recurring notifications
 - Per-chat conversation memory with `/reset`
 - Admin diagnostics for dynamic tools with `/tools`
 - Redis-backed persistent conversation memory (with automatic in-memory fallback)
@@ -95,6 +96,16 @@ Drop a new folder inside `skills/` with:
 
 The bot can reload tools at runtime with `/reload` command, and tools are also refreshed each agent run.
 
+### Included reminder skill
+The repository ships with `skills/reminder_scheduler`.
+
+It supports actions:
+- `create`: create one-time (`once`) or recurring (`interval`, `daily`) reminders.
+- `list`: show reminders.
+- `delete`: remove a reminder.
+
+When a reminder is due, the bot executes reminder `prompt` through the LLM as a user message and sends the model answer to the target chat.
+
 ## Telegram commands
 - `/start`: show quick help
 - `/reload`: reload dynamic skills from disk
@@ -113,6 +124,18 @@ The bot can reload tools at runtime with `/reload` command, and tools are also r
 - `REDIS_KEY_PREFIX=sai:chat`: Redis key namespace for chat history
 - `REDIS_CONVERSATION_TTL_SECONDS=604800`: expiration window in seconds for chat history
 - `INCLUDE_TOKEN_USAGE_IN_RESPONSE=true|false`: append per-request token usage to each answer
+- `REMINDER_POLL_INTERVAL_SECONDS=10`: polling interval for scheduled reminders
+- `REMINDER_MAX_JOBS_PER_TICK=10`: max reminders executed in one polling cycle
+- `REMINDER_DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/sai_reminders`: PostgreSQL DSN for reminders storage
+
+## Reminder database migrations
+Reminders are persisted in PostgreSQL. Use Alembic migrations to create/update schema:
+
+```powershell
+alembic upgrade head
+```
+
+In Docker Compose this runs automatically before bot startup.
 
 ## Redis memory
 When `REDIS_URL` is set and reachable, chat memory is persisted in Redis.

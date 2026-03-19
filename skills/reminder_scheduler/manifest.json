@@ -1,0 +1,89 @@
+{
+  "name": "reminder_scheduler",
+  "description": "Creates, lists and deletes scheduled reminders and notifications",
+  "entrypoint": "tool.py",
+  "function": "reminder_scheduler",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "Action: create, list or delete",
+        "enum": ["create", "list", "delete"]
+      },
+      "chat_id": {
+        "type": "integer",
+        "description": "Target chat id. If omitted, agent may inject current chat id automatically"
+      },
+      "reminder_id": {
+        "type": "string",
+        "description": "Reminder id for delete action"
+      },
+      "title": {
+        "type": "string",
+        "description": "Short reminder title"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Text that will be sent to LLM as if from user when reminder triggers or Short reminder title"
+      },
+      "text": {
+        "type": "string",
+        "description": "Alias for prompt"
+      },
+      "message": {
+        "type": "string",
+        "description": "Alias for prompt"
+      },
+      "query": {
+        "type": "string",
+        "description": "Alias for prompt"
+      },
+      "task": {
+        "type": "string",
+        "description": "Alias for prompt"
+      },
+      "instruction": {
+        "type": "string",
+        "description": "Alias for prompt"
+      },
+      "notify_text": {
+        "type": "string",
+        "description": "Optional user-facing preface shown before LLM answer"
+      },
+      "schedule_type": {
+        "type": "string",
+        "description": "Schedule type: once, interval, daily",
+        "enum": ["once", "interval", "daily"],
+        "default": "once"
+      },
+      "once_at": {
+        "type": "string",
+        "description": "ISO datetime for one-time reminder, for example 2026-03-20T09:00:00+05:00"
+      },
+      "interval_seconds": {
+        "type": "integer",
+        "description": "Repeat interval in seconds for schedule_type=interval"
+      },
+      "time_of_day": {
+        "type": "string",
+        "description": "Daily time in HH:MM for schedule_type=daily"
+      },
+      "timezone": {
+        "type": "string",
+        "description": "IANA timezone, for example Asia/Almaty",
+        "default": "UTC"
+      },
+      "max_runs": {
+        "type": "integer",
+        "description": "Optional max number of runs for repeating reminders"
+      },
+      "active_only": {
+        "type": "boolean",
+        "description": "For list action: include only active reminders",
+        "default": true
+      }
+    },
+    "required": ["action"]
+  }
+}

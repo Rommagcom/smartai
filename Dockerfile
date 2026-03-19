@@ -18,6 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir langsmith
 
 COPY pyproject.toml README.md ./
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY src ./src
 COPY skills ./skills
 
