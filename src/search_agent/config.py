@@ -40,6 +40,15 @@ class Settings:
     long_term_memory_top_k: int
     long_term_memory_embedding_model: str
     long_term_memory_max_entry_chars: int
+    long_term_memory_embedding_timeout_seconds: int
+    long_term_memory_embedding_retry_attempts: int
+    long_term_memory_embedding_retry_base_delay_seconds: float
+    long_term_memory_embedding_retry_max_delay_seconds: float
+    long_term_memory_circuit_breaker_failure_threshold: int
+    long_term_memory_circuit_breaker_recovery_seconds: int
+    long_term_memory_retention_days: int
+    long_term_memory_archive_batch_size: int
+    long_term_memory_maintenance_interval_seconds: int
     tenant_default_org_id: str
     rbac_enabled: bool
 
@@ -97,6 +106,29 @@ def load_settings() -> Settings:
         long_term_memory_top_k=int(os.getenv("LONG_TERM_MEMORY_TOP_K", "4")),
         long_term_memory_embedding_model=os.getenv("LONG_TERM_MEMORY_EMBEDDING_MODEL", "nomic-embed-text:latest"),
         long_term_memory_max_entry_chars=int(os.getenv("LONG_TERM_MEMORY_MAX_ENTRY_CHARS", "2000")),
+        long_term_memory_embedding_timeout_seconds=int(
+            os.getenv("LONG_TERM_MEMORY_EMBEDDING_TIMEOUT_SECONDS", "20")
+        ),
+        long_term_memory_embedding_retry_attempts=int(
+            os.getenv("LONG_TERM_MEMORY_EMBEDDING_RETRY_ATTEMPTS", "3")
+        ),
+        long_term_memory_embedding_retry_base_delay_seconds=float(
+            os.getenv("LONG_TERM_MEMORY_EMBEDDING_RETRY_BASE_DELAY_SECONDS", "0.5")
+        ),
+        long_term_memory_embedding_retry_max_delay_seconds=float(
+            os.getenv("LONG_TERM_MEMORY_EMBEDDING_RETRY_MAX_DELAY_SECONDS", "4")
+        ),
+        long_term_memory_circuit_breaker_failure_threshold=int(
+            os.getenv("LONG_TERM_MEMORY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5")
+        ),
+        long_term_memory_circuit_breaker_recovery_seconds=int(
+            os.getenv("LONG_TERM_MEMORY_CIRCUIT_BREAKER_RECOVERY_SECONDS", "60")
+        ),
+        long_term_memory_retention_days=int(os.getenv("LONG_TERM_MEMORY_RETENTION_DAYS", "90")),
+        long_term_memory_archive_batch_size=int(os.getenv("LONG_TERM_MEMORY_ARCHIVE_BATCH_SIZE", "500")),
+        long_term_memory_maintenance_interval_seconds=int(
+            os.getenv("LONG_TERM_MEMORY_MAINTENANCE_INTERVAL_SECONDS", "300")
+        ),
         tenant_default_org_id=os.getenv("TENANT_DEFAULT_ORG_ID", "default-org").strip() or "default-org",
         rbac_enabled=_to_bool(os.getenv("RBAC_ENABLED"), default=True),
     )

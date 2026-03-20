@@ -428,6 +428,15 @@ RBAC and reminder actions are written to `audit_events` with:
 - `LONG_TERM_MEMORY_EMBEDDING_MODEL=nomic-embed-text:latest`: embedding model used via Ollama `/api/embeddings`
 - `LONG_TERM_MEMORY_TOP_K=4`: number of most similar memory entries injected into context
 - `LONG_TERM_MEMORY_MAX_ENTRY_CHARS=2000`: max stored text size per memory record
+- `LONG_TERM_MEMORY_EMBEDDING_TIMEOUT_SECONDS=20`: timeout for one embeddings request
+- `LONG_TERM_MEMORY_EMBEDDING_RETRY_ATTEMPTS=3`: retry attempts for embeddings with exponential backoff
+- `LONG_TERM_MEMORY_EMBEDDING_RETRY_BASE_DELAY_SECONDS=0.5`: initial backoff delay
+- `LONG_TERM_MEMORY_EMBEDDING_RETRY_MAX_DELAY_SECONDS=4`: max backoff delay cap
+- `LONG_TERM_MEMORY_CIRCUIT_BREAKER_FAILURE_THRESHOLD=5`: opens circuit after consecutive embedding failures
+- `LONG_TERM_MEMORY_CIRCUIT_BREAKER_RECOVERY_SECONDS=60`: cooldown period before retrying after circuit opens
+- `LONG_TERM_MEMORY_RETENTION_DAYS=90`: retention window for hot long-term memories
+- `LONG_TERM_MEMORY_ARCHIVE_BATCH_SIZE=500`: max archived rows per maintenance pass
+- `LONG_TERM_MEMORY_MAINTENANCE_INTERVAL_SECONDS=300`: interval between retention maintenance runs
 
 ## Reminder database migrations
 Reminders are persisted in PostgreSQL. Use Alembic migrations to create/update schema:
@@ -443,6 +452,12 @@ Long-term memory is stored in PostgreSQL using pgvector and is queried by cosine
 For this reason, Docker Compose uses `pgvector/pgvector:pg16` image for the `postgres` service.
 
 The bot retrieves relevant memory snippets before each response and appends new user/assistant pairs after each reply.
+
+Reliability hardening includes:
+- embeddings retry with exponential backoff
+- circuit breaker for repeated embeddings failures
+- retention policy that archives expired records from `long_term_memories` to `long_term_memories_archive`
+- recall quality metrics stored in `long_term_recall_metrics` (result count, top score, degraded mode, errors)
 
 ## Redis memory
 When `REDIS_URL` is set and reachable, chat memory is persisted in Redis.
