@@ -9,8 +9,10 @@ class _FakeRegistry:
     def __init__(self, callable_map: dict[str, object]) -> None:
         self._callable_map = callable_map
 
-    def get_callable_map(self) -> dict[str, object]:
-        return dict(self._callable_map)
+    def get_callable_map(self, allowed_names: set[str] | None = None) -> dict[str, object]:
+        if allowed_names is None:
+            return dict(self._callable_map)
+        return {name: fn for name, fn in self._callable_map.items() if name in allowed_names}
 
 
 def _build_agent(callable_map: dict[str, object]) -> OllamaLangGraphAgent:
@@ -67,6 +69,7 @@ def test_reminder_create_skips_non_reminder_tool_calls() -> None:
         "step_count": 0,
         "token_usage": {},
         "chat_id": 100,
+        "allowed_dynamic_tools": ["reminder_scheduler", "generate_pdf_document"],
     }
 
     result = agent._tools_node(state)
@@ -122,6 +125,7 @@ def test_reminder_non_create_does_not_skip_other_tools() -> None:
         "step_count": 0,
         "token_usage": {},
         "chat_id": 100,
+        "allowed_dynamic_tools": ["reminder_scheduler", "generate_pdf_document"],
     }
 
     result = agent._tools_node(state)

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from search_agent.reminders.store import ReminderStore
+from search_agent.reminders.store import ReminderOwnerContext, ReminderStore
+from search_agent.security.rbac import RbacStore
 
 
 def _text_value(value: Any) -> str:
@@ -57,6 +58,26 @@ def _resolve_schedule_type(args: dict[str, Any]) -> str:
     return "once"
 
 
+def _audit_event(args: dict[str, Any], *, action: str, details: dict[str, object]) -> None:
+    org_id = _text_value(args.get("org_id")) or "default-org"
+    team_id = _text_value(args.get("team_id")) or f"chat:{_text_value(args.get('chat_id')) or '0'}"
+    user_id = int(args["user_id"]) if args.get("user_id") is not None else 0
+    try:
+        rbac = RbacStore()
+        rbac.audit(
+            org_id=org_id,
+            team_id=team_id,
+            actor_user_id=user_id,
+            action=f"reminder.{action}",
+            target_type="reminder",
+            target_id=str(details.get("reminder_id") or ""),
+            details=details,
+        )
+    except Exception:
+        # Audit failures should not break business flow.
+        return
+
+
 def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
     chat_id = args.get("chat_id")
     if chat_id is None:
@@ -69,6 +90,11 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
         )
 
     record = store.create_reminder(
+        owner=ReminderOwnerContext(
+            org_id=_text_value(args.get("org_id")) or "default-org",
+            team_id=_text_value(args.get("team_id")) or f"chat:{int(chat_id)}",
+            user_id=int(args["user_id"]) if args.get("user_id") is not None else 0,
+        ),
         chat_id=int(chat_id),
         prompt=resolved_prompt,
         title=_text_value(args.get("title")) or "Reminder",
@@ -81,6 +107,15 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
         timezone=_text_value(args.get("timezone")) or "UTC",
         max_runs=int(args["max_runs"]) if args.get("max_runs") is not None else None,
     )
+    _audit_event(
+        args,
+        action="create",
+        details={
+            "reminder_id": record.id,
+            "schedule_type": record.schedule_type,
+            "chat_id": record.chat_id,
+        },
+    )
     return json.dumps(
         {
             "status": "created",
@@ -92,8 +127,19 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
 
 def _handle_list(store: ReminderStore, args: dict[str, Any]) -> str:
     reminders = store.list_reminders(
+        org_id=_text_value(args.get("org_id")) or None,
+        team_id=_text_value(args.get("team_id")) or None,
+        user_id=int(args["user_id"]) if args.get("user_id") is not None else None,
         chat_id=int(args["chat_id"]) if args.get("chat_id") is not None else None,
         active_only=bool(args.get("active_only", True)),
+    )
+    _audit_event(
+        args,
+        action="list",
+        details={
+            "count": len(reminders),
+            "chat_id": int(args["chat_id"]) if args.get("chat_id") is not None else None,
+        },
     )
     return json.dumps(
         {
@@ -112,7 +158,19 @@ def _handle_delete(store: ReminderStore, args: dict[str, Any]) -> str:
 
     removed = store.delete_reminder(
         reminder_id,
+        org_id=_text_value(args.get("org_id")) or None,
+        team_id=_text_value(args.get("team_id")) or None,
+        user_id=int(args["user_id"]) if args.get("user_id") is not None else None,
         chat_id=int(args["chat_id"]) if args.get("chat_id") is not None else None,
+    )
+    _audit_event(
+        args,
+        action="delete",
+        details={
+            "reminder_id": reminder_id,
+            "removed": removed,
+            "chat_id": int(args["chat_id"]) if args.get("chat_id") is not None else None,
+        },
     )
     return json.dumps(
         {

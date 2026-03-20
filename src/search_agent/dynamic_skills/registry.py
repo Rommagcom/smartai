@@ -105,11 +105,15 @@ class DynamicToolRegistry:
             return f"Duplicate dynamic tool name: {tool_name}"
         return None
 
-    def get_callable_map(self) -> dict[str, Callable[..., Any]]:
-        return {name: tool.func for name, tool in self._tools.items()}
+    def get_callable_map(self, allowed_names: set[str] | None = None) -> dict[str, Callable[..., Any]]:
+        if allowed_names is None:
+            return {name: tool.func for name, tool in self._tools.items()}
+        return {name: tool.func for name, tool in self._tools.items() if name in allowed_names}
 
-    def get_ollama_tool_schemas(self) -> list[dict[str, Any]]:
-        return [tool.to_ollama_schema() for tool in self._tools.values()]
+    def get_ollama_tool_schemas(self, allowed_names: set[str] | None = None) -> list[dict[str, Any]]:
+        if allowed_names is None:
+            return [tool.to_ollama_schema() for tool in self._tools.values()]
+        return [tool.to_ollama_schema() for tool in self._tools.values() if tool.name in allowed_names]
 
     def status_lines(self) -> list[str]:
         loaded = sorted(self._tools.keys())

@@ -127,7 +127,16 @@ class LongTermMemoryStore:
             normalized.append(float(item))
         return normalized
 
-    def recall(self, *, chat_id: int, query_text: str, limit: int | None = None) -> list[LongTermMemoryItem]:
+    def recall(
+        self,
+        *,
+        org_id: str,
+        team_id: str,
+        user_id: int,
+        chat_id: int,
+        query_text: str,
+        limit: int | None = None,
+    ) -> list[LongTermMemoryItem]:
         normalized_query = query_text.strip()
         if not normalized_query:
             return []
@@ -143,7 +152,10 @@ class LongTermMemoryStore:
                 created_at::text AS created_at,
                 1 - (embedding <=> CAST(:query_vector AS vector)) AS score
             FROM long_term_memories
-            WHERE chat_id = :chat_id
+                        WHERE org_id = :org_id
+                            AND team_id = :team_id
+                            AND user_id = :user_id
+                            AND chat_id = :chat_id
             ORDER BY embedding <=> CAST(:query_vector AS vector)
             LIMIT :row_limit
             """
@@ -154,6 +166,9 @@ class LongTermMemoryStore:
             rows = conn.execute(
                 stmt,
                 {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "user_id": int(user_id),
                     "chat_id": int(chat_id),
                     "query_vector": query_vector,
                     "row_limit": row_limit,
@@ -173,7 +188,17 @@ class LongTermMemoryStore:
 
         return items
 
-    def remember(self, *, chat_id: int, user_text: str, assistant_text: str, source: str = "chat") -> None:
+    def remember(
+        self,
+        *,
+        org_id: str,
+        team_id: str,
+        user_id: int,
+        chat_id: int,
+        user_text: str,
+        assistant_text: str,
+        source: str = "chat",
+    ) -> None:
         compact_user = user_text.strip()
         compact_assistant = assistant_text.strip()
         if not compact_user and not compact_assistant:
@@ -188,8 +213,13 @@ class LongTermMemoryStore:
 
         stmt = text(
             """
-            INSERT INTO long_term_memories (chat_id, source, content, embedding, embedding_model, created_at)
-            VALUES (:chat_id, :source, :content, CAST(:embedding AS vector), :embedding_model, :created_at)
+            INSERT INTO long_term_memories (
+                org_id, team_id, user_id, chat_id, source, content, embedding, embedding_model, created_at
+            )
+            VALUES (
+                :org_id, :team_id, :user_id, :chat_id, :source, :content, CAST(:embedding AS vector),
+                :embedding_model, :created_at
+            )
             """
         )
 
@@ -197,6 +227,9 @@ class LongTermMemoryStore:
             conn.execute(
                 stmt,
                 {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "user_id": int(user_id),
                     "chat_id": int(chat_id),
                     "source": source,
                     "content": merged,
