@@ -43,6 +43,16 @@ A Telegram bot that runs an Ollama-powered search agent using LangGraph orchestr
    python -m search_agent.main
    ```
 
+### Run API interface
+Start HTTP API server:
+
+```powershell
+python -m search_agent.api_main
+```
+
+OpenAPI docs will be available at:
+- `http://localhost:8000/docs`
+
 For direct access to ollama.com API:
 
 1. Create an API key in your Ollama account.
@@ -147,6 +157,135 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `/create_team <org_id> <team_id> [display_name]`: create or update team inside organization (admin only)
 - `/add_to_team <org_id> <team_id> <user_id>`: add user to team in organization (admin only)
 - `/my_skills`: show your assigned dynamic skills
+
+## API interface (registration, admin, chat)
+
+### Authentication flow
+1. Register user profile (who is who and role context for assistant):
+
+```http
+POST /api/v1/auth/register
+{
+   "email": "user@company.com",
+   "password": "StrongPassword123",
+   "full_name": "Jane Smith",
+   "title": "Product Manager",
+   "profile_bio": "Owns roadmap, coordinates GTM and finance planning"
+}
+```
+
+2. Login and get bearer token:
+
+```http
+POST /api/v1/auth/login
+{
+   "email": "user@company.com",
+   "password": "StrongPassword123"
+}
+```
+
+3. Link Telegram account in API profile:
+
+```http
+POST /api/v1/users/me/telegram
+Authorization: Bearer <token>
+{
+   "telegram_id": 705880913
+}
+```
+
+### Admin API: organizations, teams, users, skills
+All endpoints below require admin user.
+
+- Create organization:
+
+```http
+POST /api/v1/admin/organizations
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "name": "Acme Corp"
+}
+```
+
+- Create team in organization:
+
+```http
+POST /api/v1/admin/teams
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "team_id": "finance",
+   "name": "Finance Team"
+}
+```
+
+- Add user to team:
+
+```http
+POST /api/v1/admin/teams/members
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "team_id": "finance",
+   "user_id": 42
+}
+```
+
+- Set user role (`admin|manager|member`):
+
+```http
+POST /api/v1/admin/users/42/role
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "role": "manager"
+}
+```
+
+- Grant/revoke skill:
+
+```http
+POST /api/v1/admin/users/42/skills/grant
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "tool_name": "reminder_scheduler"
+}
+```
+
+```http
+POST /api/v1/admin/users/42/skills/revoke
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "tool_name": "reminder_scheduler"
+}
+```
+
+### Chat API for all users
+Users in the same group (`org_id` + `team_id`) share:
+- short group memory (recent messages)
+- long memory (shared + personal recall)
+
+Send message to assistant-in-the-middle group chat:
+
+```http
+POST /api/v1/chat/send
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "team_id": "finance",
+   "message": "Prepare short budget risk summary for Q3"
+}
+```
+
+Read group chat timeline:
+
+```http
+GET /api/v1/chat/messages?org_id=acme&team_id=finance
+Authorization: Bearer <token>
+```
 
 ## RBAC: users, skills, organizations and groups
 

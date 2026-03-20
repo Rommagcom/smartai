@@ -4,12 +4,22 @@ on:
   pull_request:
     paths:
       - "skills/**"
+      - "src/search_agent/api/**"
+      - "src/search_agent/api_main.py"
+      - "tests/test_api_endpoints.py"
+      - "requirements.txt"
+      - "pyproject.toml"
       - "scripts/skill_manifest_security.py"
       - ".github/workflows/skill-manifest-security.yml"
   push:
     branches: [main]
     paths:
       - "skills/**"
+      - "src/search_agent/api/**"
+      - "src/search_agent/api_main.py"
+      - "tests/test_api_endpoints.py"
+      - "requirements.txt"
+      - "pyproject.toml"
       - "scripts/skill_manifest_security.py"
       - ".github/workflows/skill-manifest-security.yml"
 
@@ -30,3 +40,28 @@ jobs:
           DYNAMIC_SKILL_SIGNING_KEY: ${{ secrets.DYNAMIC_SKILL_SIGNING_KEY }}
         run: |
           python scripts/skill_manifest_security.py verify-all --skills-root skills
+
+  api-smoke-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run API endpoint tests (includes smoke flow)
+        env:
+          PYTHONPATH: src
+          REMINDER_DATABASE_URL: postgresql://user:pass@localhost:5432/testdb
+          ENABLE_LONG_TERM_MEMORY: "0"
+          ENABLE_DYNAMIC_TOOLS: "0"
+        run: |
+          python -m pytest tests/test_api_endpoints.py::test_api_smoke_register_login_admin_team_chat_flow -q
