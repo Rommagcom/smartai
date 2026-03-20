@@ -126,7 +126,7 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `INCLUDE_TOKEN_USAGE_IN_RESPONSE=true|false`: append per-request token usage to each answer
 - `REMINDER_POLL_INTERVAL_SECONDS=10`: polling interval for scheduled reminders
 - `REMINDER_MAX_JOBS_PER_TICK=10`: max reminders executed in one polling cycle
-- `REMINDER_DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/sai_reminders`: PostgreSQL DSN for reminders storage
+- `REMINDER_DATABASE_URL=postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders`: PostgreSQL DSN for reminders storage
 
 ## Reminder database migrations
 Reminders are persisted in PostgreSQL. Use Alembic migrations to create/update schema:
