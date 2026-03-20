@@ -208,6 +208,7 @@ class OllamaLangGraphAgent:
 
         last_message = state["messages"][-1]
         tool_calls = last_message.get("tool_calls") or []
+        reminder_create_requested = self._has_reminder_create_call(tool_calls)
 
         for tool_call in tool_calls:
             function = tool_call.get("function") or {}
@@ -217,11 +218,17 @@ class OllamaLangGraphAgent:
                 raw_arguments=function.get("arguments"),
                 state=state,
             )
-            content = self._execute_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                callables=callables,
-            )
+            if reminder_create_requested and not self._is_reminder_create_execution(tool_name, arguments):
+                content = (
+                    "Skipped deferred-policy execution: reminder creation requests must only schedule work. "
+                    "Generate no immediate report/file; the reminder worker will invoke LLM at trigger time."
+                )
+            else:
+                content = self._execute_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    callables=callables,
+                )
 
             content = content[: self.settings.max_tool_result_chars]
             tool_messages.append(
@@ -236,6 +243,38 @@ class OllamaLangGraphAgent:
             "messages": tool_messages,
             "step_count": state["step_count"] + 1,
         }
+
+    @staticmethod
+    def _has_reminder_create_call(tool_calls: list[dict[str, Any]]) -> bool:
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            tool_name = str(function.get("name") or "")
+            if tool_name != "reminder_scheduler":
+                continue
+            arguments = OllamaLangGraphAgent._normalize_arguments(function.get("arguments"))
+            if OllamaLangGraphAgent._extract_reminder_action(arguments) == "create":
+                return True
+        return False
+
+    @staticmethod
+    def _extract_reminder_action(arguments: dict[str, Any]) -> str:
+        action = arguments.get("action")
+        if isinstance(action, str) and action.strip():
+            return action.strip().lower()
+
+        nested = arguments.get("arguments")
+        if isinstance(nested, dict):
+            nested_action = nested.get("action")
+            if isinstance(nested_action, str) and nested_action.strip():
+                return nested_action.strip().lower()
+
+        return ""
+
+    @staticmethod
+    def _is_reminder_create_execution(tool_name: str, arguments: dict[str, Any]) -> bool:
+        if tool_name != "reminder_scheduler":
+            return False
+        return OllamaLangGraphAgent._extract_reminder_action(arguments) == "create"
 
     @staticmethod
     def _resolve_tool_arguments(
