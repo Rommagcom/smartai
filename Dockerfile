@@ -24,7 +24,13 @@ COPY alembic ./alembic
 COPY src ./src
 COPY skills ./skills
 
-RUN pip install --no-cache-dir -e . \
+RUN test -f /app/src/search_agent/main.py
+RUN if [ ! -f /app/src/search_agent/__init__.py ]; then \
+      printf '"""Search agent package."""\n' > /app/src/search_agent/__init__.py; \
+    fi
+
+RUN pip install --no-cache-dir . \
+    && python -c "import search_agent; import search_agent.main" \
     && chown -R app:app /app
 USER app
 
