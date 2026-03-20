@@ -22,7 +22,7 @@ def _database_url() -> str:
     if env_url:
         return env_url
 
-    fallback = "postgresql+psycopg://postgres:postgres@localhost:5432/sai_reminders"
+    fallback = "postgresql+psycopg://postgresai:aipostgresai@localhost:5432/sai_reminders"
     return fallback
 
 
