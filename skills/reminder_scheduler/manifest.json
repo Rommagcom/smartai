@@ -1,5 +1,10 @@
 {
   "name": "reminder_scheduler",
+  "package_version": "1.0.0",
+  "package_files_sha256": {
+    "skill.md": "55a7d6dcb6354dbc6c4c733b14f12c9d23d7458ef155ab084540d6c0b2b88c84",
+    "tool.py": "52c5406eaaaf10cfe10386a101401ebc85ced26eb4dba47e14f73d186159013b"
+  },
   "description": "Creates, lists and deletes scheduled reminders and notifications",
   "entrypoint": "tool.py",
   "function": "reminder_scheduler",
@@ -9,7 +14,11 @@
       "action": {
         "type": "string",
         "description": "Action: create, list or delete",
-        "enum": ["create", "list", "delete"]
+        "enum": [
+          "create",
+          "list",
+          "delete"
+        ]
       },
       "chat_id": {
         "type": "integer",
@@ -54,7 +63,12 @@
       "schedule_type": {
         "type": "string",
         "description": "Schedule type: once, interval, daily, cron",
-        "enum": ["once", "interval", "daily", "cron"],
+        "enum": [
+          "once",
+          "interval",
+          "daily",
+          "cron"
+        ],
         "default": "once"
       },
       "once_at": {
@@ -88,6 +102,10 @@
         "default": true
       }
     },
-    "required": ["action"]
-  }
+    "required": [
+      "action"
+    ]
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "408761a666c992999643488dbd7873eb03ddb49303dbec813241ff603bf96bc8"
 }

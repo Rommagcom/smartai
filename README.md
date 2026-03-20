@@ -82,6 +82,10 @@ Drop a new folder inside `skills/` with:
 ```json
 {
   "name": "tool_name_for_model",
+   "package_version": "1.0.0",
+   "package_files_sha256": {
+      "tool.py": "<sha256-hex>"
+   },
   "description": "What the tool does",
   "entrypoint": "tool.py",
   "function": "run",
@@ -94,6 +98,27 @@ Drop a new folder inside `skills/` with:
   }
 }
 ```
+
+Optional manifest hardening fields:
+- `package_signature_algorithm`: currently supported `hmac-sha256`
+- `package_signature`: HMAC signature over canonical manifest JSON (without `package_signature` field)
+
+Runtime hardening notes:
+- Dynamic skills are executed in a separate Python subprocess (`sandbox_runner.py`) with timeout.
+- Argument payload is validated against manifest schema before execution.
+- Skill package integrity can be verified via `package_files_sha256`.
+
+### Signing and verification utility
+Use the helper script to update integrity hashes and verify/sign skill manifests:
+
+```powershell
+python scripts/skill_manifest_security.py sign --skill-dir skills/reminder_scheduler --package-version 1.0.1
+python scripts/skill_manifest_security.py sign --skill-dir skills/reminder_scheduler --with-signature --key <SECRET>
+python scripts/skill_manifest_security.py verify --skill-dir skills/reminder_scheduler --key <SECRET>
+python scripts/skill_manifest_security.py verify-all --skills-root skills
+```
+
+CI workflow verifies all skill manifests on push/PR: `.github/workflows/skill-manifest-security.yml`.
 
 The bot can reload tools at runtime with `/reload` command, and tools are also refreshed each agent run.
 
@@ -119,6 +144,14 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `OLLAMA_API_KEY=...`: API key for protected Ollama endpoint (preferred)
 - `OLLAMA_AUTH_TOKEN=...`: legacy auth token variable (fallback)
 - `ENABLE_DYNAMIC_TOOLS=true|false`: hard-disable dynamic skill execution
+- `DYNAMIC_TOOLS_ALLOWLIST=*|tool1,tool2`: allow only listed dynamic tool names (`*` means all)
+- `DYNAMIC_SKILL_STRICT_ARGS=true|false`: enforce strict schema argument policy (required/type/enum/extra args)
+- `DYNAMIC_SKILL_MAX_STRING_LENGTH=10000`: max string length for a single tool argument
+- `DYNAMIC_SKILL_MAX_ARGS_BYTES=50000`: max serialized arguments payload size in bytes
+- `DYNAMIC_SKILL_TIMEOUT_SECONDS=20`: timeout for sandboxed dynamic skill execution
+- `DYNAMIC_SKILL_REQUIRE_INTEGRITY=true|false`: require `package_files_sha256` in each manifest
+- `DYNAMIC_SKILL_REQUIRE_SIGNATURE=true|false`: require valid skill package signature
+- `DYNAMIC_SKILL_SIGNING_KEY=...`: shared secret used to verify `hmac-sha256` manifest signatures
 - `MAX_CONVERSATION_MESSAGES=12`: per-chat memory size (user+assistant message entries)
 - `TELEGRAM_ADMIN_USER_IDS=12345,67890`: users allowed to call `/tools`
 - `REDIS_URL=redis://localhost:6379/0`: enables persistent chat memory across restarts
