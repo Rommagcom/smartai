@@ -9,6 +9,8 @@ description = "Telegram search agent powered by Ollama, LangGraph, and LangSmith
 requires-python = ">=3.11"
 dependencies = [
   "aiogram>=3.17.0",
+  "fastapi>=0.116.0",
+  "uvicorn>=0.35.0",
   "langgraph>=0.3.1",
   "langsmith>=0.3.18",
   "ollama>=0.5.4",
