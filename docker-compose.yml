@@ -112,6 +112,7 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       REMINDER_DATABASE_URL: ${REMINDER_DATABASE_URL:-postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders}
       PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
     depends_on:
       ollama-pull:
