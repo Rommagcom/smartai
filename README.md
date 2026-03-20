@@ -12,6 +12,7 @@ A Telegram bot that runs an Ollama-powered search agent using LangGraph orchestr
 - Per-chat conversation memory with `/reset`
 - Admin diagnostics for dynamic tools with `/tools`
 - Redis-backed persistent conversation memory (with automatic in-memory fallback)
+- Long-term memory with semantic retrieval on PostgreSQL + pgvector
 - Token consumption tracking per reply and cumulative per chat
 
 ## Project structure
@@ -127,6 +128,11 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `REMINDER_POLL_INTERVAL_SECONDS=10`: polling interval for scheduled reminders
 - `REMINDER_MAX_JOBS_PER_TICK=10`: max reminders executed in one polling cycle
 - `REMINDER_DATABASE_URL=postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders`: PostgreSQL DSN for reminders storage
+- `ENABLE_LONG_TERM_MEMORY=true|false`: enable semantic long-term memory for each chat
+- `LONG_TERM_MEMORY_DATABASE_URL=postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders`: PostgreSQL DSN for long-term memory table
+- `LONG_TERM_MEMORY_EMBEDDING_MODEL=nomic-embed-text:latest`: embedding model used via Ollama `/api/embeddings`
+- `LONG_TERM_MEMORY_TOP_K=4`: number of most similar memory entries injected into context
+- `LONG_TERM_MEMORY_MAX_ENTRY_CHARS=2000`: max stored text size per memory record
 
 ## Reminder database migrations
 Reminders are persisted in PostgreSQL. Use Alembic migrations to create/update schema:
@@ -136,6 +142,12 @@ alembic upgrade head
 ```
 
 In Docker Compose this runs automatically before bot startup.
+
+## Long-term memory (pgvector)
+Long-term memory is stored in PostgreSQL using pgvector and is queried by cosine similarity.
+For this reason, Docker Compose uses `pgvector/pgvector:pg16` image for the `postgres` service.
+
+The bot retrieves relevant memory snippets before each response and appends new user/assistant pairs after each reply.
 
 ## Redis memory
 When `REDIS_URL` is set and reachable, chat memory is persisted in Redis.
