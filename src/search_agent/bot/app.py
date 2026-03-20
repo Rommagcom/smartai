@@ -9,11 +9,13 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, Message
 
 from search_agent.agent.graph import OllamaLangGraphAgent
 from search_agent.config import load_settings
+from search_agent.memory.long_term import LongTermMemoryStore
 from search_agent.memory.store import build_conversation_store
 from search_agent.reminders.store import ReminderStore
 
@@ -153,6 +155,7 @@ async def _run_reminder_worker(
     agent: OllamaLangGraphAgent,
     conversation_store: Any,
     reminder_store: ReminderStore,
+    long_term_memory: LongTermMemoryStore | None,
     poll_interval_seconds: int,
     max_jobs_per_tick: int,
 ) -> None:
@@ -161,31 +164,78 @@ async def _run_reminder_worker(
             due_items = await asyncio.to_thread(reminder_store.pop_due, limit=max_jobs_per_tick)
             for item in due_items:
                 chat_id = int(item.chat_id)
-                prompt = item.prompt.strip()
-                if not prompt:
-                    continue
+                try:
+                    prompt = item.prompt.strip()
+                    if not prompt:
+                        continue
 
-                notify_prefix = item.notify_text.strip()
-                history = await conversation_store.get_history(chat_id)
-                result = await asyncio.to_thread(agent.run, prompt, history, chat_id)
-                answer = result.answer or "I could not generate a response."
+                    notify_prefix = item.notify_text.strip()
+                    history = await conversation_store.get_history(chat_id)
+                    if long_term_memory is not None:
+                        try:
+                            memories = await asyncio.to_thread(
+                                long_term_memory.recall,
+                                chat_id=chat_id,
+                                query_text=prompt,
+                            )
+                            context_message = long_term_memory.build_system_context(memories)
+                            if context_message:
+                                history = [{"role": "system", "content": context_message}, *history]
+                        except Exception as exc:
+                            logger.warning("Long-term memory recall failed for chat %s: %s", chat_id, exc)
 
-                await conversation_store.append_turn(chat_id, prompt, answer)
-                await conversation_store.add_token_usage(
-                    chat_id,
-                    prompt_tokens=result.token_usage.prompt_tokens,
-                    completion_tokens=result.token_usage.completion_tokens,
-                    total_tokens=result.token_usage.total_tokens,
-                    requests=result.token_usage.request_count,
-                )
+                    result = await asyncio.to_thread(agent.run, prompt, history, chat_id)
+                    answer = result.answer or "I could not generate a response."
 
-                final_answer = f"{notify_prefix}\n\n{answer}" if notify_prefix else answer
-                await _send_answer_to_chat(
-                    bot=bot,
-                    chat_id=chat_id,
-                    answer=final_answer,
-                    messages=result.messages,
-                )
+                    await conversation_store.append_turn(chat_id, prompt, answer)
+                    await conversation_store.add_token_usage(
+                        chat_id,
+                        prompt_tokens=result.token_usage.prompt_tokens,
+                        completion_tokens=result.token_usage.completion_tokens,
+                        total_tokens=result.token_usage.total_tokens,
+                        requests=result.token_usage.request_count,
+                    )
+                    if long_term_memory is not None:
+                        try:
+                            await asyncio.to_thread(
+                                long_term_memory.remember,
+                                chat_id=chat_id,
+                                user_text=prompt,
+                                assistant_text=answer,
+                                source="reminder",
+                            )
+                        except Exception as exc:
+                            logger.warning("Long-term memory write failed for chat %s: %s", chat_id, exc)
+
+                    final_answer = f"{notify_prefix}\n\n{answer}" if notify_prefix else answer
+                    await _send_answer_to_chat(
+                        bot=bot,
+                        chat_id=chat_id,
+                        answer=final_answer,
+                        messages=result.messages,
+                    )
+                except TelegramBadRequest as exc:
+                    message = str(exc).lower()
+                    if (
+                        "chat not found" in message
+                        or "bot was blocked by the user" in message
+                        or "user is deactivated" in message
+                    ):
+                        deactivated = await asyncio.to_thread(
+                            reminder_store.deactivate_reminder,
+                            item.id,
+                            chat_id=chat_id,
+                        )
+                        logger.warning(
+                            "Reminder %s deactivated: chat %s is unavailable (chat not found). updated=%s",
+                            item.id,
+                            chat_id,
+                            deactivated,
+                        )
+                        continue
+                    logger.warning("Reminder %s failed for chat %s: %s", item.id, chat_id, exc)
+                except Exception as exc:
+                    logger.exception("Reminder %s failed for chat %s: %s", item.id, chat_id, exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -204,6 +254,7 @@ async def start_bot() -> None:
     agent = OllamaLangGraphAgent(settings)
     conversation_store = await build_conversation_store(settings)
     reminder_store = ReminderStore()
+    long_term_memory = LongTermMemoryStore.from_settings(settings)
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
 
@@ -213,6 +264,7 @@ async def start_bot() -> None:
             agent=agent,
             conversation_store=conversation_store,
             reminder_store=reminder_store,
+            long_term_memory=long_term_memory,
             poll_interval_seconds=settings.reminder_poll_interval_seconds,
             max_jobs_per_tick=settings.reminder_max_jobs_per_tick,
         ),
@@ -278,6 +330,19 @@ async def start_bot() -> None:
         await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
         history = await conversation_store.get_history(message.chat.id)
+        if long_term_memory is not None:
+            try:
+                memories = await asyncio.to_thread(
+                    long_term_memory.recall,
+                    chat_id=message.chat.id,
+                    query_text=text,
+                )
+                context_message = long_term_memory.build_system_context(memories)
+                if context_message:
+                    history = [{"role": "system", "content": context_message}, *history]
+            except Exception as exc:
+                logger.warning("Long-term memory recall failed for chat %s: %s", message.chat.id, exc)
+
         result = await asyncio.to_thread(agent.run, text, history, message.chat.id)
         answer = result.answer or "I could not generate a response."
 
@@ -289,6 +354,17 @@ async def start_bot() -> None:
             total_tokens=result.token_usage.total_tokens,
             requests=result.token_usage.request_count,
         )
+        if long_term_memory is not None:
+            try:
+                await asyncio.to_thread(
+                    long_term_memory.remember,
+                    chat_id=message.chat.id,
+                    user_text=text,
+                    assistant_text=answer,
+                    source="chat",
+                )
+            except Exception as exc:
+                logger.warning("Long-term memory write failed for chat %s: %s", message.chat.id, exc)
 
         await _send_answer(message, answer, result.messages)
 
@@ -298,3 +374,5 @@ async def start_bot() -> None:
         reminder_task.cancel()
         await asyncio.gather(reminder_task, return_exceptions=True)
         await conversation_store.close()
+        if long_term_memory is not None:
+            await asyncio.to_thread(long_term_memory.close)

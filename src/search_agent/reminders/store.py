@@ -189,6 +189,23 @@ class ReminderStore:
             result = conn.execute(stmt)
         return int(result.rowcount or 0) > 0
 
+    def deactivate_reminder(self, reminder_id: str, *, chat_id: int | None = None) -> bool:
+        stmt = (
+            update(_reminders_table)
+            .where(_reminders_table.c.id == reminder_id)
+            .values(
+                active=False,
+                next_run_at=None,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        if chat_id is not None:
+            stmt = stmt.where(_reminders_table.c.chat_id == int(chat_id))
+
+        with self.engine.begin() as conn:
+            result = conn.execute(stmt)
+        return int(result.rowcount or 0) > 0
+
     def pop_due(self, *, limit: int = 10) -> list[ReminderRecord]:
         now = datetime.now(UTC)
         due: list[ReminderRecord] = []

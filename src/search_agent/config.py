@@ -35,6 +35,11 @@ class Settings:
     enable_dynamic_tools: bool
     reminder_poll_interval_seconds: int
     reminder_max_jobs_per_tick: int
+    enable_long_term_memory: bool
+    long_term_memory_database_url: str | None
+    long_term_memory_top_k: int
+    long_term_memory_embedding_model: str
+    long_term_memory_max_entry_chars: int
 
 
 
@@ -81,4 +86,13 @@ def load_settings() -> Settings:
         enable_dynamic_tools=_to_bool(os.getenv("ENABLE_DYNAMIC_TOOLS"), default=True),
         reminder_poll_interval_seconds=int(os.getenv("REMINDER_POLL_INTERVAL_SECONDS", "10")),
         reminder_max_jobs_per_tick=int(os.getenv("REMINDER_MAX_JOBS_PER_TICK", "10")),
+        enable_long_term_memory=_to_bool(os.getenv("ENABLE_LONG_TERM_MEMORY"), default=True),
+        long_term_memory_database_url=(
+            os.getenv("LONG_TERM_MEMORY_DATABASE_URL")
+            or os.getenv("REMINDER_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+        ),
+        long_term_memory_top_k=int(os.getenv("LONG_TERM_MEMORY_TOP_K", "4")),
+        long_term_memory_embedding_model=os.getenv("LONG_TERM_MEMORY_EMBEDDING_MODEL", "nomic-embed-text:latest"),
+        long_term_memory_max_entry_chars=int(os.getenv("LONG_TERM_MEMORY_MAX_ENTRY_CHARS", "2000")),
     )
