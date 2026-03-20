@@ -9,6 +9,8 @@ A Telegram bot that runs an Ollama-powered search agent using LangGraph orchestr
 - aiogram Telegram bot integration
 - Dynamic tool loading from a `skills` folder (manifest + script + skill.md)
 - Built-in reminder scheduler skill with one-time and recurring notifications
+- Tenant isolation across reminders and long-term memory (org/team/user keys)
+- RBAC roles (`admin`, `manager`, `member`) with per-user dynamic skill assignments
 - Per-chat conversation memory with `/reset`
 - Admin diagnostics for dynamic tools with `/tools`
 - Redis-backed persistent conversation memory (with automatic in-memory fallback)
@@ -138,6 +140,125 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `/reset`: clear current chat memory
 - `/tools`: show loaded tools and validation/load errors (admin only)
 - `/usage`: show cumulative token consumption in current chat
+- `/set_role <user_id> <admin|manager|member>`: set user role (admin only)
+- `/grant_skill <user_id> <tool_name>`: assign dynamic skill to user (admin only)
+- `/revoke_skill <user_id> <tool_name>`: remove dynamic skill assignment (admin only)
+- `/create_org <org_id> [display_name]`: create or update organization (admin only)
+- `/create_team <org_id> <team_id> [display_name]`: create or update team inside organization (admin only)
+- `/add_to_team <org_id> <team_id> <user_id>`: add user to team in organization (admin only)
+- `/my_skills`: show your assigned dynamic skills
+
+## RBAC: users, skills, organizations and groups
+
+### 1) Enable RBAC and choose organization
+Set in `.env`:
+- `RBAC_ENABLED=true`
+- `TENANT_DEFAULT_ORG_ID=your-org-id`
+
+This value is used as the organization (`org_id`) for requests handled by this bot instance.
+
+To manage several organizations from one bot instance, use explicit admin commands with `org_id`:
+
+```text
+/create_org acme "Acme Corp"
+/create_team acme finance "Finance Team"
+/add_to_team acme finance 705880913
+```
+
+### 2) Add users and assign roles
+Users are created/updated automatically when they send messages to the bot.
+
+Admin can set role with:
+
+```text
+/set_role <user_id> <admin|manager|member>
+```
+
+Example:
+
+```text
+/set_role 705880913 manager
+```
+
+### 3) Assign and revoke dynamic skills
+Admin assigns skills per user:
+
+```text
+/grant_skill <user_id> <tool_name>
+/revoke_skill <user_id> <tool_name>
+```
+
+User can check assigned skills:
+
+```text
+/my_skills
+```
+
+### 4) Groups (teams)
+Current runtime maps each Telegram chat to a team automatically:
+- `team_id = chat:<chat_id>`
+
+When user sends a message in chat, membership is auto-created in `team_members`.
+
+You can also create named teams manually and add users with commands:
+
+```text
+/create_team <org_id> <team_id> [display_name]
+/add_to_team <org_id> <team_id> <user_id>
+```
+
+If you want to create teams manually and add users in advance, use SQL:
+
+```sql
+INSERT INTO teams (org_id, team_id, name)
+VALUES ('your-org-id', 'finance', 'Finance Team')
+ON CONFLICT (org_id, team_id) DO NOTHING;
+
+INSERT INTO team_members (org_id, team_id, user_id)
+VALUES ('your-org-id', 'finance', 705880913)
+ON CONFLICT (org_id, team_id, user_id) DO NOTHING;
+```
+
+### 5) Audit trail
+RBAC and reminder actions are written to `audit_events` with:
+- org/team/user context
+- action and target
+- JSON details payload
+
+### 6) Important current limitation
+`TENANT_DEFAULT_ORG_ID` is bot-instance-wide. For strict multi-organization isolation in one deployment, add org resolution per chat/user (or run separate bot instances with different `TENANT_DEFAULT_ORG_ID`).
+
+### 7) Admin quick checklist (1 minute onboarding)
+1. User sends `/start` once (user/team records are auto-created).
+2. Admin sets role:
+
+```text
+/set_role <user_id> <admin|manager|member>
+```
+
+3. Admin grants required skills:
+
+```text
+/grant_skill <user_id> <tool_name>
+```
+
+4. User checks granted skills:
+
+```text
+/my_skills
+```
+
+5. Admin verifies loaded tools globally:
+
+```text
+/tools
+```
+
+6. Optional revoke access instantly:
+
+```text
+/revoke_skill <user_id> <tool_name>
+```
 
 ## Extra configuration
 - `OLLAMA_BASE_URL=http://localhost:11434`: Ollama endpoint (local or remote)
@@ -161,6 +282,8 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `REMINDER_POLL_INTERVAL_SECONDS=10`: polling interval for scheduled reminders
 - `REMINDER_MAX_JOBS_PER_TICK=10`: max reminders executed in one polling cycle
 - `REMINDER_DATABASE_URL=postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders`: PostgreSQL DSN for reminders storage
+- `RBAC_ENABLED=true|false`: enable tenant RBAC and skill assignment checks
+- `TENANT_DEFAULT_ORG_ID=default-org`: default organization id used for tenant partitioning
 - `ENABLE_LONG_TERM_MEMORY=true|false`: enable semantic long-term memory for each chat
 - `LONG_TERM_MEMORY_DATABASE_URL=postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders`: PostgreSQL DSN for long-term memory table
 - `LONG_TERM_MEMORY_EMBEDDING_MODEL=nomic-embed-text:latest`: embedding model used via Ollama `/api/embeddings`

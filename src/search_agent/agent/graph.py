@@ -30,6 +30,11 @@ class AgentState(TypedDict):
     step_count: int
     token_usage: dict[str, int]
     chat_id: int | None
+    org_id: str
+    team_id: str
+    user_id: int
+    role: str
+    allowed_dynamic_tools: list[str]
 
 
 @dataclass(slots=True)
@@ -90,6 +95,11 @@ class OllamaLangGraphAgent:
         user_message: str,
         history_messages: list[dict[str, Any]] | None = None,
         chat_id: int | None = None,
+        org_id: str = "default-org",
+        team_id: str = "chat",
+        user_id: int = 0,
+        role: str = "member",
+        allowed_dynamic_tools: set[str] | None = None,
     ) -> AgentRunResult:
         if self.settings.enable_dynamic_tools:
             self.refresh_dynamic_tools()
@@ -108,6 +118,11 @@ class OllamaLangGraphAgent:
                 "step_count": 0,
                 "token_usage": TokenUsage().to_dict(),
                 "chat_id": chat_id,
+                "org_id": org_id,
+                "team_id": team_id,
+                "user_id": int(user_id),
+                "role": role,
+                "allowed_dynamic_tools": sorted(allowed_dynamic_tools or set()),
             }
         )
         messages = result_state["messages"]
@@ -176,7 +191,12 @@ class OllamaLangGraphAgent:
         return "agent"
 
     def _agent_node(self, state: AgentState) -> dict[str, Any]:
-        dynamic_schemas = self.registry.get_ollama_tool_schemas() if self.settings.enable_dynamic_tools else []
+        allowed_dynamic_tools = set(state.get("allowed_dynamic_tools") or [])
+        dynamic_schemas = (
+            self.registry.get_ollama_tool_schemas(allowed_names=allowed_dynamic_tools)
+            if self.settings.enable_dynamic_tools
+            else []
+        )
         response = self.client.chat(
             model=self.settings.ollama_model,
             messages=state["messages"],
@@ -199,7 +219,12 @@ class OllamaLangGraphAgent:
 
     def _tools_node(self, state: AgentState) -> dict[str, Any]:
         tool_messages: list[dict[str, Any]] = []
-        dynamic_callables = self.registry.get_callable_map() if self.settings.enable_dynamic_tools else {}
+        allowed_dynamic_tools = set(state.get("allowed_dynamic_tools") or [])
+        dynamic_callables = (
+            self.registry.get_callable_map(allowed_names=allowed_dynamic_tools)
+            if self.settings.enable_dynamic_tools
+            else {}
+        )
         callables = {
             "web_search": web_search,
             "web_fetch": web_fetch,
@@ -289,6 +314,13 @@ class OllamaLangGraphAgent:
             state_chat_id = state.get("chat_id")
             if isinstance(state_chat_id, int):
                 arguments["chat_id"] = state_chat_id
+
+        if tool_name == "reminder_scheduler":
+            arguments.setdefault("org_id", str(state.get("org_id") or "default-org"))
+            arguments.setdefault("team_id", str(state.get("team_id") or "chat"))
+            state_user_id = state.get("user_id")
+            if isinstance(state_user_id, int):
+                arguments.setdefault("user_id", state_user_id)
 
         return arguments
 

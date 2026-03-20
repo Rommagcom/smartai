@@ -40,6 +40,8 @@ class Settings:
     long_term_memory_top_k: int
     long_term_memory_embedding_model: str
     long_term_memory_max_entry_chars: int
+    tenant_default_org_id: str
+    rbac_enabled: bool
 
 
 
@@ -95,4 +97,6 @@ def load_settings() -> Settings:
         long_term_memory_top_k=int(os.getenv("LONG_TERM_MEMORY_TOP_K", "4")),
         long_term_memory_embedding_model=os.getenv("LONG_TERM_MEMORY_EMBEDDING_MODEL", "nomic-embed-text:latest"),
         long_term_memory_max_entry_chars=int(os.getenv("LONG_TERM_MEMORY_MAX_ENTRY_CHARS", "2000")),
+        tenant_default_org_id=os.getenv("TENANT_DEFAULT_ORG_ID", "default-org").strip() or "default-org",
+        rbac_enabled=_to_bool(os.getenv("RBAC_ENABLED"), default=True),
     )

@@ -3,7 +3,7 @@
   "package_version": "1.0.0",
   "package_files_sha256": {
     "skill.md": "55a7d6dcb6354dbc6c4c733b14f12c9d23d7458ef155ab084540d6c0b2b88c84",
-    "tool.py": "52c5406eaaaf10cfe10386a101401ebc85ced26eb4dba47e14f73d186159013b"
+    "tool.py": "d3972c533046f78be77c46798298479d49187d140efe858ee24f12e67b2b8585"
   },
   "description": "Creates, lists and deletes scheduled reminders and notifications",
   "entrypoint": "tool.py",
@@ -23,6 +23,18 @@
       "chat_id": {
         "type": "integer",
         "description": "Target chat id. If omitted, agent may inject current chat id automatically"
+      },
+      "org_id": {
+        "type": "string",
+        "description": "Organization tenant id"
+      },
+      "team_id": {
+        "type": "string",
+        "description": "Team id within organization"
+      },
+      "user_id": {
+        "type": "integer",
+        "description": "User id in tenant context"
       },
       "reminder_id": {
         "type": "string",
@@ -107,5 +119,5 @@
     ]
   },
   "package_signature_algorithm": "hmac-sha256",
-  "package_signature": "408761a666c992999643488dbd7873eb03ddb49303dbec813241ff603bf96bc8"
+  "package_signature": "72ec429b1ce61391f0fa92e7cbd10eb0b074979c372b7a27365123c6ca9b1090"
 }
