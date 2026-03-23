@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import re
+import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,178 @@ ADMIN_ONLY_TEXT = "This command is admin-only."
 RBAC_DISABLED_TEXT = "RBAC is disabled by configuration."
 USER_ID_INT_TEXT = "user_id must be integer"
 ORG_ID_EMPTY_TEXT = "org_id must not be empty"
+_SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
+
+
+def _slugify_skill_name(raw: str) -> str:
+    lowered = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    cleaned = _SKILL_NAME_RE.sub("_", lowered).strip("_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if not cleaned:
+        raise ValueError("Skill name is empty after normalization")
+    if cleaned[0].isdigit():
+        cleaned = f"skill_{cleaned}"
+    return cleaned
+
+
+def _parse_claude_markdown(content: str) -> tuple[dict[str, str], str]:
+    text = (content or "").replace("\r\n", "\n").lstrip("\ufeff")
+    if not text.strip():
+        raise ValueError("Markdown content is empty")
+
+    meta: dict[str, str] = {}
+    body = text
+    if text.startswith("---\n"):
+        marker = "\n---\n"
+        end = text.find(marker, 4)
+        if end == -1:
+            raise ValueError("Frontmatter is not closed with ---")
+        frontmatter = text[4:end]
+        body = text[end + len(marker) :]
+        for raw_line in frontmatter.splitlines():
+            line = raw_line.strip()
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            k = key.strip().lower()
+            v = value.strip().strip('"').strip("'")
+            if k:
+                meta[k] = v
+
+    return meta, body.strip()
+
+
+def _decode_uploaded_markdown(raw_bytes: bytes) -> str:
+    if not raw_bytes:
+        raise ValueError("Uploaded file is empty")
+
+    for encoding in ("utf-8", "utf-8-sig", "cp1251"):
+        try:
+            return raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError("Unable to decode file content")
+
+
+def _build_generated_tool_py(*, function_name: str, tool_name: str, instruction_text: str) -> str:
+    escaped_instruction = json.dumps(instruction_text, ensure_ascii=True)
+    return (
+        "from __future__ import annotations\n\n"
+        "import json\n\n"
+        f"INSTRUCTION_TEXT = {escaped_instruction}\n\n"
+        f"def {function_name}(request: str, context: str = \"\") -> str:\n"
+        "    request_text = str(request or \"\").strip()\n"
+        "    if not request_text:\n"
+        "        raise ValueError(\"request is required\")\n"
+        "\n"
+        "    payload = {\n"
+        f"        \"skill\": \"{tool_name}\",\n"
+        "        \"request\": request_text,\n"
+        "        \"context\": str(context or \"\").strip(),\n"
+        "        \"instruction\": INSTRUCTION_TEXT,\n"
+        "    }\n"
+        "    return json.dumps(payload, ensure_ascii=True)\n"
+    )
+
+
+def _build_generated_skill_md(*, display_name: str, description: str, source_body: str) -> str:
+    safe_description = description.strip() or "Generated from Claude Agent markdown"
+    body = source_body.strip() or "No additional body content provided."
+    return (
+        f"# {display_name}\n\n"
+        f"{safe_description}\n\n"
+        "## Source Instructions\n\n"
+        f"{body}\n"
+    )
+
+
+def _build_manifest(*, tool_name: str, description: str) -> dict[str, Any]:
+    return {
+        "name": tool_name,
+        "package_version": "1.0.0",
+        "description": (description.strip() or f"Generated dynamic skill: {tool_name}"),
+        "entrypoint": "tool.py",
+        "function": tool_name,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "User request for this specialist skill",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional business context and constraints",
+                    "default": "",
+                },
+            },
+            "required": ["request"],
+        },
+    }
+
+
+def _attach_manifest_hashes(skill_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    hashes = {
+        "skill.md": hashlib.sha256((skill_dir / "skill.md").read_bytes()).hexdigest(),
+        "tool.py": hashlib.sha256((skill_dir / "tool.py").read_bytes()).hexdigest(),
+    }
+    updated = dict(manifest)
+    updated["package_files_sha256"] = hashes
+    return updated
+
+
+def _create_dynamic_skill_from_markdown(
+    *,
+    skills_root: Path,
+    markdown_text: str,
+    skill_name: str | None,
+    overwrite: bool,
+) -> str:
+    meta, body = _parse_claude_markdown(markdown_text)
+
+    source_name = (skill_name or "").strip() or meta.get("name", "") or "generated_skill"
+    tool_name = _slugify_skill_name(source_name)
+
+    skills_root = skills_root.resolve()
+    skills_root.mkdir(parents=True, exist_ok=True)
+    skill_dir = (skills_root / tool_name).resolve()
+    try:
+        skill_dir.relative_to(skills_root)
+    except ValueError as exc:
+        raise ValueError("Invalid skill name") from exc
+
+    if skill_dir.exists() and not overwrite:
+        raise ValueError(f"Skill '{tool_name}' already exists. Use overwrite flag to replace.")
+
+    if skill_dir.exists() and overwrite:
+        shutil.rmtree(skill_dir)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    display_name = str(meta.get("name") or source_name).strip() or source_name
+    description = str(meta.get("description") or "").strip() or f"Generated from Claude Agent: {display_name}"
+
+    tool_content = _build_generated_tool_py(
+        function_name=tool_name,
+        tool_name=tool_name,
+        instruction_text=body,
+    )
+    skill_content = _build_generated_skill_md(
+        display_name=display_name,
+        description=description,
+        source_body=body,
+    )
+    manifest = _build_manifest(tool_name=tool_name, description=description)
+
+    (skill_dir / "tool.py").write_text(tool_content, encoding="utf-8")
+    (skill_dir / "skill.md").write_text(skill_content, encoding="utf-8")
+    final_manifest = _attach_manifest_hashes(skill_dir, manifest)
+    (skill_dir / "manifest.json").write_text(
+        json.dumps(final_manifest, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    return tool_name
 
 
 def _chunk_message(text: str, max_length: int = 4096) -> list[str]:
@@ -395,7 +570,75 @@ async def start_bot() -> None:
             "Search agent is online. Send any query to run the Ollama + LangGraph flow.\\n"
             "Use /reload to re-read dynamic tools from the skills folder.\\n"
             "Use /reset to clear your conversation memory.\\n"
-            "Use /usage to see cumulative token consumption for this chat."
+            "Use /usage to see cumulative token consumption for this chat.\n"
+            "Admins can upload a .md skill file with caption: /add_skill [skill_name] [overwrite]"
+        )
+
+    @dp.message(Command("add_skill"), F.document)
+    async def on_add_skill_document(message: Message) -> None:
+        if not _is_admin(message):
+            await message.answer(ADMIN_ONLY_TEXT)
+            return
+        if not settings.enable_dynamic_tools:
+            await message.answer("Dynamic tools are disabled by configuration.")
+            return
+
+        document = message.document
+        if document is None:
+            await message.answer("Attach a .md file with caption: /add_skill [skill_name] [overwrite]")
+            return
+
+        filename = str(document.file_name or "")
+        if not filename.lower().endswith(".md"):
+            await message.answer("Only .md files are supported for skill import.")
+            return
+
+        parts = ((message.caption or message.text or "").strip()).split()
+        custom_name: str | None = None
+        overwrite = False
+        for part in parts[1:]:
+            raw = part.strip().lower()
+            if raw in {"overwrite", "--overwrite", "-f", "true", "1"}:
+                overwrite = True
+                continue
+            if custom_name is None:
+                custom_name = part.strip()
+
+        try:
+            telegram_file = await bot.get_file(document.file_id)
+            buffer = BytesIO()
+            if hasattr(bot, "download_file"):
+                await bot.download_file(telegram_file.file_path, destination=buffer)
+            else:
+                await bot.download(document, destination=buffer)
+
+            markdown = _decode_uploaded_markdown(buffer.getvalue())
+            created_name = await asyncio.to_thread(
+                _create_dynamic_skill_from_markdown,
+                skills_root=settings.dynamic_skills_dir,
+                markdown_text=markdown,
+                skill_name=custom_name,
+                overwrite=overwrite,
+            )
+
+            agent.refresh_dynamic_tools()
+            await message.answer(f"Skill uploaded: {created_name}")
+        except Exception as exc:
+            logger.exception("Skill upload failed from Telegram document: %s", exc)
+            await message.answer(f"Skill upload failed: {exc}")
+
+    @dp.message(Command("add_skill"))
+    async def on_add_skill_help(message: Message) -> None:
+        if not _is_admin(message):
+            await message.answer(ADMIN_ONLY_TEXT)
+            return
+        await message.answer(
+            "Upload a .md file and add command in caption:\n"
+            "/add_skill [skill_name] [overwrite]\n\n"
+            "Examples:\n"
+            "- /add_skill\n"
+            "- /add_skill seo_specialist\n"
+            "- /add_skill seo_specialist overwrite"
         )
 
     @dp.message(Command("reload"))

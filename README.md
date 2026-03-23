@@ -23,6 +23,9 @@ A Telegram bot that runs an Ollama-powered search agent using LangGraph orchestr
 - `src/search_agent/dynamic_skills/registry.py`: Dynamic tool discovery and loading
 - `skills/`: Runtime-loadable tools
 
+##Install torch with Blackwel architecture support
+1. pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
 ## Quick start
 1. Install Python 3.11+ and Ollama.
 2. Pull your model:
@@ -149,6 +152,7 @@ When a reminder is due, the bot executes reminder `prompt` through the LLM as a 
 - `/reload`: reload dynamic skills from disk
 - `/reset`: clear current chat memory
 - `/tools`: show loaded tools and validation/load errors (admin only)
+- `/add_skill`: upload `.md` file as document with caption `/add_skill [skill_name] [overwrite]` (admin only)
 - `/usage`: show cumulative token consumption in current chat
 - `/set_role <user_id> <admin|manager|member>`: set user role (admin only)
 - `/grant_skill <user_id> <tool_name>`: assign dynamic skill to user (admin only)
