@@ -1,0 +1,30 @@
+{
+  "name": "echo_skill",
+  "package_version": "1.0.0",
+  "package_files_sha256": {
+    "skill.md": "bab9db907660af4ad5c29589701366d8cb0b94565c59923816ebc338c6b3bbe9",
+    "tool.py": "34eb0f2064ce76ec60b07509429670e5314855dc3ebd39897c76136b0ec58784"
+  },
+  "description": "Echoes input with optional uppercase formatting",
+  "entrypoint": "tool.py",
+  "function": "echo",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "Text to echo"
+      },
+      "uppercase": {
+        "type": "boolean",
+        "description": "Return in upper case",
+        "default": false
+      }
+    },
+    "required": [
+      "text"
+    ]
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "d29fdcb129bc5f1b48137fe593faa087d6455c0a725b2675dee81e8e45e9930d"
+}

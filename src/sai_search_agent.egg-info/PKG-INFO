@@ -1,0 +1,19 @@
+Metadata-Version: 2.4
+Name: sai-search-agent
+Version: 0.1.0
+Summary: Telegram search agent powered by Ollama, LangGraph, and LangSmith
+Requires-Python: >=3.11
+Requires-Dist: aiogram>=3.17.0
+Requires-Dist: fastapi>=0.116.0
+Requires-Dist: uvicorn>=0.35.0
+Requires-Dist: langgraph>=0.3.1
+Requires-Dist: langsmith>=0.3.18
+Requires-Dist: ollama>=0.5.4
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: redis>=5.2.1
+Requires-Dist: pdfkit>=1.0.0
+Requires-Dist: markdown>=3.7
+Requires-Dist: SQLAlchemy>=2.0.36
+Requires-Dist: alembic>=1.14.0
+Requires-Dist: psycopg[binary]>=3.2.3
+Requires-Dist: croniter>=2.0.7

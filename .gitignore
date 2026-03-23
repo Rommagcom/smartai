@@ -1,15 +1,54 @@
-# Python cache artifacts (workspace-wide)
+# Python cache and bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 
-# IDE/OS junk
+# Build and packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+.venv312/
+venv/
+env/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker and linters
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local data and logs
+.data/
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
 .DS_Store
 Thumbs.db
 
-# Root-level leftovers must not exist (real code lives in backend/)
-/integrations/
-/scripts/
+# Docker overrides
+docker-compose.override.yml
 
-# Generated runtime artifacts
-/backend/data/dynamic_skills/
+keey.txt

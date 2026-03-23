@@ -1,0 +1,129 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sai-ollama
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: sai-ollama-pull
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -e
+      model="$${OLLAMA_MODEL:-gpt-oss:120b-cloud}"
+      embedding_model="$${LONG_TERM_MEMORY_EMBEDDING_MODEL:-nomic-embed-text:latest}"
+      echo "Waiting for Ollama API at $${OLLAMA_HOST}..."
+      until ollama list >/dev/null 2>&1; do
+        sleep 2
+      done
+
+      attempt=1
+      max_attempts=5
+      while [ "$$attempt" -le "$$max_attempts" ]; do
+        echo "Pulling $$model (attempt $$attempt/$$max_attempts)..."
+        if ollama pull "$$model"; then
+          echo "Model $$model pulled successfully"
+          break
+        fi
+        attempt=$$((attempt + 1))
+        sleep 5
+      done
+
+      if [ "$$attempt" -gt "$$max_attempts" ]; then
+        echo "Failed to pull $$model after $$max_attempts attempts"
+        exit 1
+      fi
+
+      attempt=1
+      while [ "$$attempt" -le "$$max_attempts" ]; do
+        echo "Pulling $$embedding_model (attempt $$attempt/$$max_attempts)..."
+        if ollama pull "$$embedding_model"; then
+          echo "Embedding model $$embedding_model pulled successfully"
+          exit 0
+        fi
+        attempt=$$((attempt + 1))
+        sleep 5
+      done
+
+      echo "Failed to pull $$embedding_model after $$max_attempts attempts"
+      exit 1
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: sai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: sai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sai_reminders
+      POSTGRES_USER: postgresai
+      POSTGRES_PASSWORD: aipostgresai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgresai -d sai_reminders"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sai-bot:latest
+    container_name: sai-bot
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      REMINDER_DATABASE_URL: ${REMINDER_DATABASE_URL:-postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders}
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src
+    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  ollama-data:
+  postgres-data:

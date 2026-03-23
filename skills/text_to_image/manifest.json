@@ -1,0 +1,30 @@
+{
+  "name": "text_to_image",
+  "package_version": "1.0.0",
+  "description": "Generates an image from a text prompt using a Diffusers model",
+  "entrypoint": "tool.py",
+  "function": "text_to_image",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "Text prompt describing the desired image"
+      },
+      "return_base64": {
+        "type": "boolean",
+        "description": "Include base64-encoded image bytes in the result",
+        "default": false
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "package_files_sha256": {
+    "skill.md": "e7b2a5b4a8a4b21295cdbfea6383762c1d8b94b7620ec0978158e2a86a9f945b",
+    "tool.py": "13e1ec47dca3e689fd2b901027c8cc442ca02601df817b6dc2334a714738a8b9"
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "620df38322b64733193afa0df921ea38e1db7bf417322d93818794edd7a54d7d"
+}

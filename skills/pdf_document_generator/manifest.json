@@ -1,0 +1,56 @@
+{
+  "name": "generate_pdf_document",
+  "package_version": "1.0.0",
+  "package_files_sha256": {
+    "skill.md": "b9bb73308c9a67e76d68fde54d9e99577b164010616f39d6fe5132797269c8aa",
+    "tool.py": "9a291a4e2104cfb7decec5ddac3e24cbc0472a4923e393b7e736015277480883"
+  },
+  "description": "Generates a PDF from HTML or Markdown and returns it as base64",
+  "entrypoint": "tool.py",
+  "function": "generate_pdf_document",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "HTML content or Markdown text to render into the PDF"
+      },
+      "input_format": {
+        "type": "string",
+        "description": "Input format: auto, html, or markdown",
+        "enum": [
+          "auto",
+          "html",
+          "markdown"
+        ],
+        "default": "auto"
+      },
+      "title": {
+        "type": "string",
+        "description": "Optional title prepended before content"
+      },
+      "theme": {
+        "type": "string",
+        "description": "Document style theme: clean or business",
+        "enum": [
+          "clean",
+          "business"
+        ],
+        "default": "clean"
+      },
+      "css": {
+        "type": "string",
+        "description": "Optional CSS styles injected into HTML before PDF rendering"
+      },
+      "filename": {
+        "type": "string",
+        "description": "Optional output filename, for example report.pdf"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "162d813a8b5ae1dc29707ef7794e9ce218dfd396bf096ce77e610196162f2e79"
+}
