@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import secrets
+import shutil
 import zlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -22,6 +26,7 @@ APP_NAME = "SmartAi API"
 TOKEN_TTL_HOURS = 24
 PBKDF2_ITERATIONS = 120_000
 GROUP_SHORT_MEMORY_LIMIT = 20
+_SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
 
 
 def _resolve_db_url(explicit: str | None = None) -> str:
@@ -64,6 +69,124 @@ def _hash_token(token: str) -> str:
 def _team_chat_id(org_id: str, team_id: str) -> int:
     key = f"{org_id}:{team_id}"
     return int(zlib.crc32(key.encode("utf-8")) & 0x7FFFFFFF)
+
+
+def _slugify_skill_name(raw: str) -> str:
+    lowered = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    cleaned = _SKILL_NAME_RE.sub("_", lowered).strip("_")
+    cleaned = re.sub(r"_+", "_", cleaned)
+    if not cleaned:
+        raise ValueError("Skill name is empty after normalization")
+    if cleaned[0].isdigit():
+        cleaned = f"skill_{cleaned}"
+    return cleaned
+
+
+def _parse_claude_markdown(content: str) -> tuple[dict[str, str], str]:
+    text = (content or "").replace("\r\n", "\n").lstrip("\ufeff")
+    if not text.strip():
+        raise ValueError("Markdown content is empty")
+
+    meta: dict[str, str] = {}
+    body = text
+    if text.startswith("---\n"):
+        marker = "\n---\n"
+        end = text.find(marker, 4)
+        if end == -1:
+            raise ValueError("Frontmatter is not closed with ---")
+        frontmatter = text[4:end]
+        body = text[end + len(marker) :]
+        for raw_line in frontmatter.splitlines():
+            line = raw_line.strip()
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            k = key.strip().lower()
+            v = value.strip().strip('"').strip("'")
+            if k:
+                meta[k] = v
+
+    return meta, body.strip()
+
+
+def _decode_uploaded_markdown(raw_bytes: bytes) -> str:
+    if not raw_bytes:
+        raise ValueError("Uploaded file is empty")
+
+    for encoding in ("utf-8", "utf-8-sig", "cp1251"):
+        try:
+            return raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    raise ValueError("Unable to decode file content")
+
+
+def _build_generated_tool_py(*, function_name: str, tool_name: str, instruction_text: str) -> str:
+    escaped_instruction = json.dumps(instruction_text, ensure_ascii=True)
+    return (
+        "from __future__ import annotations\n\n"
+        "import json\n\n"
+        f"INSTRUCTION_TEXT = {escaped_instruction}\n\n"
+        f"def {function_name}(request: str, context: str = \"\") -> str:\n"
+        "    request_text = str(request or \"\").strip()\n"
+        "    if not request_text:\n"
+        "        raise ValueError(\"request is required\")\n"
+        "\n"
+        "    payload = {\n"
+        f"        \"skill\": \"{tool_name}\",\n"
+        "        \"request\": request_text,\n"
+        "        \"context\": str(context or \"\").strip(),\n"
+        "        \"instruction\": INSTRUCTION_TEXT,\n"
+        "    }\n"
+        "    return json.dumps(payload, ensure_ascii=True)\n"
+    )
+
+
+def _build_generated_skill_md(*, display_name: str, description: str, source_body: str) -> str:
+    safe_description = description.strip() or "Generated from Claude Agent markdown"
+    body = source_body.strip() or "No additional body content provided."
+    return (
+        f"# {display_name}\n\n"
+        f"{safe_description}\n\n"
+        "## Source Instructions\n\n"
+        f"{body}\n"
+    )
+
+
+def _build_manifest(*, tool_name: str, description: str) -> dict[str, Any]:
+    return {
+        "name": tool_name,
+        "package_version": "1.0.0",
+        "description": (description.strip() or f"Generated dynamic skill: {tool_name}"),
+        "entrypoint": "tool.py",
+        "function": tool_name,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "User request for this specialist skill",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional business context and constraints",
+                    "default": "",
+                },
+            },
+            "required": ["request"],
+        },
+    }
+
+
+def _attach_manifest_hashes(skill_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    hashes = {
+        "skill.md": hashlib.sha256((skill_dir / "skill.md").read_bytes()).hexdigest(),
+        "tool.py": hashlib.sha256((skill_dir / "tool.py").read_bytes()).hexdigest(),
+    }
+    updated = dict(manifest)
+    updated["package_files_sha256"] = hashes
+    return updated
 
 
 class RegisterRequest(BaseModel):
@@ -134,6 +257,55 @@ class ChatResponse(BaseModel):
     messages: list[ChatMessage]
 
 
+class ClaudeSkillConvertRequest(BaseModel):
+    markdown: str = Field(min_length=1)
+    skill_name: str | None = Field(default=None, max_length=128)
+    overwrite: bool = False
+
+
+class DynamicSkillDeleteResponse(BaseModel):
+    status: str
+    deleted: bool
+
+
+class DynamicSkillSummary(BaseModel):
+    folder: str
+    tool_name: str
+    description: str
+
+
+class DynamicSkillListResponse(BaseModel):
+    skills: list[DynamicSkillSummary]
+
+
+class BulkClaudeConvertItem(BaseModel):
+    filename: str
+    status: str
+    skill_name: str | None = None
+    error: str | None = None
+
+
+class BulkClaudeConvertResponse(BaseModel):
+    created: int
+    failed: int
+    results: list[BulkClaudeConvertItem]
+
+
+class BulkClaudeDryRunItem(BaseModel):
+    filename: str
+    status: str
+    proposed_skill_name: str | None = None
+    exists: bool = False
+    error: str | None = None
+
+
+class BulkClaudeDryRunResponse(BaseModel):
+    total: int
+    valid: int
+    invalid: int
+    results: list[BulkClaudeDryRunItem]
+
+
 class ApiService:
     def __init__(self, settings: Settings) -> None:
         db_url = _resolve_db_url(settings.long_term_memory_database_url)
@@ -144,6 +316,7 @@ class ApiService:
         self.agent = OllamaLangGraphAgent(settings)
         self.rbac = RbacStore(db_url)
         self.long_term = LongTermMemoryStore.from_settings(settings)
+        self.settings.dynamic_skills_dir.mkdir(parents=True, exist_ok=True)
 
     def register_user(self, payload: RegisterRequest) -> int:
         password_hash = _hash_password(payload.password)
@@ -356,6 +529,155 @@ class ApiService:
     def list_user_skills(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> list[str]:
         self._enforce_admin(actor_user_id)
         return self.rbac.list_user_skills(org_id=org_id, user_id=target_user_id)
+
+    def list_dynamic_skills(self, *, actor_user_id: int) -> list[DynamicSkillSummary]:
+        self._enforce_admin(actor_user_id)
+        skills: list[DynamicSkillSummary] = []
+        root = self.settings.dynamic_skills_dir
+        if not root.exists():
+            return skills
+
+        for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_dir():
+                continue
+            manifest_path = path / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {}
+            tool_name = str(manifest.get("name") or path.name)
+            description = str(manifest.get("description") or "")
+            skills.append(DynamicSkillSummary(folder=path.name, tool_name=tool_name, description=description))
+        return skills
+
+    def convert_claude_markdown_to_skill(
+        self,
+        *,
+        actor_user_id: int,
+        payload: ClaudeSkillConvertRequest,
+    ) -> dict[str, str]:
+        self._enforce_admin(actor_user_id)
+        meta, body = _parse_claude_markdown(payload.markdown)
+
+        requested_name = (payload.skill_name or "").strip()
+        source_name = requested_name or meta.get("name", "")
+        if not source_name:
+            source_name = "generated_skill"
+
+        tool_name = _slugify_skill_name(source_name)
+        skill_dir = (self.settings.dynamic_skills_dir / tool_name).resolve()
+        root = self.settings.dynamic_skills_dir.resolve()
+        try:
+            skill_dir.relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid skill name") from exc
+
+        if skill_dir.exists() and not payload.overwrite:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Skill '{tool_name}' already exists. Use overwrite=true to replace.",
+            )
+
+        if skill_dir.exists() and payload.overwrite:
+            shutil.rmtree(skill_dir)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        display_name = meta.get("name", source_name).strip() or source_name
+        description = meta.get("description", "").strip() or f"Generated from Claude Agent: {display_name}"
+
+        tool_content = _build_generated_tool_py(
+            function_name=tool_name,
+            tool_name=tool_name,
+            instruction_text=body,
+        )
+        skill_content = _build_generated_skill_md(
+            display_name=display_name,
+            description=description,
+            source_body=body,
+        )
+        manifest = _build_manifest(tool_name=tool_name, description=description)
+
+        (skill_dir / "tool.py").write_text(tool_content, encoding="utf-8")
+        (skill_dir / "skill.md").write_text(skill_content, encoding="utf-8")
+        final_manifest = _attach_manifest_hashes(skill_dir, manifest)
+        (skill_dir / "manifest.json").write_text(
+            json.dumps(final_manifest, ensure_ascii=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        if self.settings.enable_dynamic_tools:
+            self.agent.refresh_dynamic_tools()
+
+        return {
+            "status": "ok",
+            "skill_name": tool_name,
+            "skill_dir": str(skill_dir),
+        }
+
+    def delete_dynamic_skill(self, *, actor_user_id: int, skill_name: str) -> bool:
+        self._enforce_admin(actor_user_id)
+        normalized = _slugify_skill_name(skill_name)
+        root = self.settings.dynamic_skills_dir.resolve()
+        target = (root / normalized).resolve()
+
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid skill name") from exc
+
+        if not target.exists() or not target.is_dir():
+            return False
+
+        shutil.rmtree(target)
+        if self.settings.enable_dynamic_tools:
+            self.agent.refresh_dynamic_tools()
+        return True
+
+    def preview_bulk_claude_conversion(
+        self,
+        *,
+        actor_user_id: int,
+        files: list[tuple[str, str]],
+        skill_name_prefix: str | None,
+    ) -> BulkClaudeDryRunResponse:
+        self._enforce_admin(actor_user_id)
+        root = self.settings.dynamic_skills_dir.resolve()
+        prefix = (skill_name_prefix or "").strip()
+
+        valid = 0
+        invalid = 0
+        results: list[BulkClaudeDryRunItem] = []
+
+        for filename, markdown in files:
+            try:
+                meta, _ = _parse_claude_markdown(markdown)
+                stem = Path(filename).stem.strip()
+                source_name = stem or meta.get("name", "") or "generated_skill"
+                raw_name = f"{prefix}_{source_name}" if prefix else source_name
+                proposed = _slugify_skill_name(raw_name)
+                exists = (root / proposed).exists()
+                valid += 1
+                results.append(
+                    BulkClaudeDryRunItem(
+                        filename=filename,
+                        status="ok",
+                        proposed_skill_name=proposed,
+                        exists=exists,
+                    )
+                )
+            except Exception as exc:
+                invalid += 1
+                results.append(
+                    BulkClaudeDryRunItem(
+                        filename=filename,
+                        status="error",
+                        error=str(exc),
+                    )
+                )
+
+        return BulkClaudeDryRunResponse(total=len(files), valid=valid, invalid=invalid, results=results)
 
     def _assert_membership(self, *, org_id: str, team_id: str, user_id: int) -> None:
         with self.engine.begin() as conn:
@@ -711,6 +1033,147 @@ def list_user_skills(
 ) -> dict[str, Any]:
     skills = service.list_user_skills(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, org_id=org_id)
     return {"skills": skills}
+
+
+@app.get("/api/v1/admin/skills", responses={403: {"description": "Admin access required"}})
+def list_dynamic_skills(user: CurrentUser) -> DynamicSkillListResponse:
+    skills = service.list_dynamic_skills(actor_user_id=int(user["user_id"]))
+    return DynamicSkillListResponse(skills=skills)
+
+
+@app.post("/api/v1/admin/skills/convert-claude", responses={403: {"description": "Admin access required"}})
+def convert_claude_skill(payload: ClaudeSkillConvertRequest, user: CurrentUser) -> dict[str, str]:
+    return service.convert_claude_markdown_to_skill(actor_user_id=int(user["user_id"]), payload=payload)
+
+
+@app.post("/api/v1/admin/skills/convert-claude-file", responses={403: {"description": "Admin access required"}})
+async def convert_claude_skill_file(
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    skill_name: str | None = Form(default=None),
+    overwrite: bool = Form(default=False),
+) -> dict[str, str]:
+    raw_bytes = await file.read()
+    try:
+        markdown = _decode_uploaded_markdown(raw_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    payload = ClaudeSkillConvertRequest(markdown=markdown, skill_name=skill_name, overwrite=overwrite)
+    return service.convert_claude_markdown_to_skill(actor_user_id=int(user["user_id"]), payload=payload)
+
+
+@app.post("/api/v1/admin/skills/convert-claude-files", responses={403: {"description": "Admin access required"}})
+async def convert_claude_skill_files(
+    user: CurrentUser,
+    files: list[UploadFile] = File(...),
+    skill_name_prefix: str | None = Form(default=None),
+    overwrite: bool = Form(default=False),
+) -> BulkClaudeConvertResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    prefix = (skill_name_prefix or "").strip()
+    results: list[BulkClaudeConvertItem] = []
+    created = 0
+    failed = 0
+
+    for item in files:
+        filename = str(item.filename or "unnamed.md")
+        try:
+            raw = await item.read()
+            markdown = _decode_uploaded_markdown(raw)
+
+            explicit_name: str | None = None
+            stem = Path(filename).stem.strip()
+            if stem:
+                explicit_name = f"{prefix}_{stem}" if prefix else stem
+
+            payload = ClaudeSkillConvertRequest(
+                markdown=markdown,
+                skill_name=explicit_name,
+                overwrite=overwrite,
+            )
+            converted = service.convert_claude_markdown_to_skill(
+                actor_user_id=int(user["user_id"]),
+                payload=payload,
+            )
+            created += 1
+            results.append(
+                BulkClaudeConvertItem(
+                    filename=filename,
+                    status="ok",
+                    skill_name=str(converted.get("skill_name") or ""),
+                )
+            )
+        except HTTPException as exc:
+            failed += 1
+            results.append(
+                BulkClaudeConvertItem(
+                    filename=filename,
+                    status="error",
+                    error=str(exc.detail),
+                )
+            )
+        except Exception as exc:
+            failed += 1
+            results.append(
+                BulkClaudeConvertItem(
+                    filename=filename,
+                    status="error",
+                    error=str(exc),
+                )
+            )
+
+    return BulkClaudeConvertResponse(created=created, failed=failed, results=results)
+
+
+@app.post("/api/v1/admin/skills/convert-claude-files/dry-run", responses={403: {"description": "Admin access required"}})
+async def convert_claude_skill_files_dry_run(
+    user: CurrentUser,
+    files: list[UploadFile] = File(...),
+    skill_name_prefix: str | None = Form(default=None),
+) -> BulkClaudeDryRunResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    prepared_files: list[tuple[str, str]] = []
+    decode_errors: list[BulkClaudeDryRunItem] = []
+    for item in files:
+        filename = str(item.filename or "unnamed.md")
+        try:
+            raw = await item.read()
+            markdown = _decode_uploaded_markdown(raw)
+            prepared_files.append((filename, markdown))
+        except ValueError as exc:
+            decode_errors.append(
+                BulkClaudeDryRunItem(
+                    filename=filename,
+                    status="error",
+                    error=str(exc),
+                )
+            )
+
+    preview = service.preview_bulk_claude_conversion(
+        actor_user_id=int(user["user_id"]),
+        files=prepared_files,
+        skill_name_prefix=skill_name_prefix,
+    )
+    combined_results = [*decode_errors, *preview.results]
+    valid = sum(1 for result in combined_results if result.status == "ok")
+    invalid = len(combined_results) - valid
+    return BulkClaudeDryRunResponse(
+        total=len(combined_results),
+        valid=valid,
+        invalid=invalid,
+        results=combined_results,
+    )
+
+
+@app.delete("/api/v1/admin/skills/{skill_name}", responses={403: {"description": "Admin access required"}})
+def delete_dynamic_skill(skill_name: str, user: CurrentUser) -> DynamicSkillDeleteResponse:
+    deleted = service.delete_dynamic_skill(actor_user_id=int(user["user_id"]), skill_name=skill_name)
+    return DynamicSkillDeleteResponse(status="ok", deleted=deleted)
 
 
 @app.post("/api/v1/chat/send", responses={403: {"description": "User is not a member of the target team"}})

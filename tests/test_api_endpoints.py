@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import importlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ class _FakeApiService:
         self.roles: dict[tuple[str, int], str] = {}
         self.skills: dict[tuple[str, int], set[str]] = {}
         self.messages: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.dynamic_skills: dict[str, dict[str, str]] = {}
 
     def register_user(self, payload: Any) -> int:
         email = payload.email.strip().lower()
@@ -116,6 +118,82 @@ class _FakeApiService:
     def list_user_skills(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> list[str]:
         self._ensure_admin(actor_user_id)
         return sorted(self.skills.get((org_id, int(target_user_id)), set()))
+
+    def list_dynamic_skills(self, *, actor_user_id: int) -> list[Any]:
+        self._ensure_admin(actor_user_id)
+        return [
+            api_app.DynamicSkillSummary(
+                folder=record["folder"],
+                tool_name=tool_name,
+                description=record["description"],
+            )
+            for tool_name, record in sorted(self.dynamic_skills.items())
+        ]
+
+    def convert_claude_markdown_to_skill(self, *, actor_user_id: int, payload: Any) -> dict[str, str]:
+        self._ensure_admin(actor_user_id)
+        provided_name = (payload.skill_name or "").strip()
+        markdown = str(payload.markdown)
+        base_name = provided_name or "generated_skill"
+        tool_name = base_name.lower().replace("-", "_").replace(" ", "_")
+        tool_name = "".join(char if (char.isalnum() or char == "_") else "_" for char in tool_name).strip("_")
+        if not tool_name:
+            tool_name = "generated_skill"
+
+        if tool_name in self.dynamic_skills and not bool(payload.overwrite):
+            raise HTTPException(status_code=409, detail=f"Skill '{tool_name}' already exists. Use overwrite=true to replace.")
+
+        self.dynamic_skills[tool_name] = {
+            "folder": tool_name,
+            "description": "Generated from test payload",
+            "source": markdown,
+        }
+        return {
+            "status": "ok",
+            "skill_name": tool_name,
+            "skill_dir": f"skills/{tool_name}",
+        }
+
+    def delete_dynamic_skill(self, *, actor_user_id: int, skill_name: str) -> bool:
+        self._ensure_admin(actor_user_id)
+        normalized = skill_name.lower().replace("-", "_").replace(" ", "_")
+        if normalized in self.dynamic_skills:
+            del self.dynamic_skills[normalized]
+            return True
+        return False
+
+    def preview_bulk_claude_conversion(
+        self,
+        *,
+        actor_user_id: int,
+        files: list[tuple[str, str]],
+        skill_name_prefix: str | None,
+    ) -> Any:
+        self._ensure_admin(actor_user_id)
+        prefix = (skill_name_prefix or "").strip().lower().replace("-", "_").replace(" ", "_")
+        results: list[Any] = []
+        valid = 0
+        invalid = 0
+        for filename, markdown in files:
+            if "---" not in markdown and "#" not in markdown:
+                invalid += 1
+                results.append(api_app.BulkClaudeDryRunItem(filename=filename, status="error", error="Invalid markdown"))
+                continue
+
+            stem = Path(filename).stem.lower().replace("-", "_").replace(" ", "_")
+            proposed = f"{prefix}_{stem}" if prefix else stem
+            exists = proposed in self.dynamic_skills
+            valid += 1
+            results.append(
+                api_app.BulkClaudeDryRunItem(
+                    filename=filename,
+                    status="ok",
+                    proposed_skill_name=proposed,
+                    exists=exists,
+                )
+            )
+
+        return api_app.BulkClaudeDryRunResponse(total=len(files), valid=valid, invalid=invalid, results=results)
 
     def _assert_membership(self, *, org_id: str, team_id: str, user_id: int) -> None:
         if (org_id, team_id, int(user_id)) not in self.team_members:
@@ -359,3 +437,83 @@ def test_chat_send_forbidden_if_user_not_in_team(client: tuple[TestClient, _Fake
     )
     assert denied.status_code == 403
     assert "not a member" in denied.text
+
+
+def test_admin_dynamic_skill_endpoints_with_uploaded_markdown_file(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["access_token"]
+
+    markdown_path = Path(__file__).with_name("marketing-pipeline-analyst.md")
+    markdown = markdown_path.read_text(encoding="utf-8")
+
+    convert = test_client.post(
+        "/api/v1/admin/skills/convert-claude",
+        json={
+            "markdown": markdown,
+            "skill_name": "pipeline_analyst",
+            "overwrite": True,
+        },
+        headers=_auth_headers(admin_token),
+    )
+    assert convert.status_code == 200
+    assert convert.json()["skill_name"] == "pipeline_analyst"
+
+    listed = test_client.get(
+        "/api/v1/admin/skills",
+        headers=_auth_headers(admin_token),
+    )
+    assert listed.status_code == 200
+    tool_names = [item["tool_name"] for item in listed.json()["skills"]]
+    assert "pipeline_analyst" in tool_names
+
+    deleted = test_client.delete(
+        "/api/v1/admin/skills/pipeline_analyst",
+        headers=_auth_headers(admin_token),
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+
+
+def test_admin_dynamic_skill_multipart_bulk_and_dry_run(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["access_token"]
+
+    markdown_path = Path(__file__).with_name("marketing-pipeline-analyst.md")
+    markdown_bytes = markdown_path.read_bytes()
+
+    dry_run = test_client.post(
+        "/api/v1/admin/skills/convert-claude-files/dry-run",
+        files=[("files", ("marketing-pipeline-analyst.md", markdown_bytes, "text/markdown"))],
+        data={"skill_name_prefix": "batch"},
+        headers=_auth_headers(admin_token),
+    )
+    assert dry_run.status_code == 200
+    dry_payload = dry_run.json()
+    assert dry_payload["total"] == 1
+    assert dry_payload["valid"] == 1
+    assert dry_payload["results"][0]["status"] == "ok"
+    assert dry_payload["results"][0]["proposed_skill_name"] == "batch_marketing_pipeline_analyst"
+
+    bulk = test_client.post(
+        "/api/v1/admin/skills/convert-claude-files",
+        files=[("files", ("marketing-pipeline-analyst.md", markdown_bytes, "text/markdown"))],
+        data={"skill_name_prefix": "batch", "overwrite": "true"},
+        headers=_auth_headers(admin_token),
+    )
+    assert bulk.status_code == 200
+    bulk_payload = bulk.json()
+    assert bulk_payload["created"] == 1
+    assert bulk_payload["failed"] == 0
+    assert bulk_payload["results"][0]["skill_name"] == "batch_marketing_pipeline_analyst"

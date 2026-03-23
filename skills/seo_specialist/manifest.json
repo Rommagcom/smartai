@@ -1,0 +1,39 @@
+{
+  "name": "seo_specialist",
+  "package_version": "1.0.0",
+  "description": "Expert search engine optimization strategist for technical SEO, content, links, and reporting.",
+  "entrypoint": "tool.py",
+  "function": "seo_specialist",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "Task type: technical_audit, keyword_strategy, on_page_checklist, link_building_plan, or seo_strategy_plan"
+      },
+      "website": {
+        "type": "string",
+        "description": "Target website domain or URL"
+      },
+      "business": {
+        "type": "string",
+        "description": "Business type, niche, or product category"
+      },
+      "goals": {
+        "type": "string",
+        "description": "Primary SEO goals and success metrics"
+      },
+      "notes": {
+        "type": "string",
+        "description": "Any additional constraints, market notes, or context"
+      }
+    },
+    "required": [
+      "task"
+    ]
+  },
+  "package_files_sha256": {
+    "skill.md": "a881a37e038af9904325bd02b0ef12db74171dce20d14a747777e1702ce57517",
+    "tool.py": "70c2fe14967274c66389f5fbd52d1a443a6c8b5afa0043795c8b005bf59b3f58"
+  }
+}
