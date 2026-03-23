@@ -13,6 +13,7 @@ pip-wheel-metadata/
 
 # Virtual environments
 .venv/
+.venv312/
 venv/
 env/
 
@@ -49,3 +50,5 @@ Thumbs.db
 
 # Docker overrides
 docker-compose.override.yml
+
+keey.txt
