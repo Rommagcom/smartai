@@ -76,13 +76,6 @@ class ReminderRecord:
     created_at: str
     updated_at: str
 
-
-@dataclass(slots=True)
-class ReminderOwnerContext:
-    org_id: str
-    team_id: str
-    user_id: int
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -105,6 +98,13 @@ class ReminderOwnerContext:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+@dataclass(slots=True)
+class ReminderOwnerContext:
+    org_id: str
+    team_id: str
+    user_id: int
 
 
 class ReminderStore:

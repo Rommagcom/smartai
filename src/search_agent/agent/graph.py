@@ -17,6 +17,7 @@ from search_agent.dynamic_skills.registry import DynamicToolRegistry
 
 
 _MAX_INPUT_CHARS = 8000
+_MAX_TOOL_CONTENT_CHARS_FOR_MODEL = 12000
 _PROMPT_INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(all\s+)?(previous|prior)\s+instructions", re.IGNORECASE),
     re.compile(r"(system|developer)\s+prompt", re.IGNORECASE),
@@ -255,7 +256,9 @@ class OllamaLangGraphAgent:
                     callables=callables,
                 )
 
-            content = content[: self.settings.max_tool_result_chars]
+            content = self._sanitize_tool_content_for_model(content)
+            model_limit = min(self.settings.max_tool_result_chars, _MAX_TOOL_CONTENT_CHARS_FOR_MODEL)
+            content = content[:model_limit]
             tool_messages.append(
                 {
                     "role": "tool",
@@ -340,6 +343,28 @@ class OllamaLangGraphAgent:
             return str(result)
         except Exception as exc:
             return f"Tool {tool_name} failed: {exc}"
+
+    @staticmethod
+    def _sanitize_tool_content_for_model(content: str) -> str:
+        text = str(content or "")
+        if not text:
+            return ""
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+        if not isinstance(parsed, dict):
+            return text
+
+        base64_data = parsed.get("base64")
+        if isinstance(base64_data, str) and base64_data:
+            parsed["base64"] = "<omitted>"
+            parsed["base64_omitted"] = True
+            parsed["base64_size_chars"] = len(base64_data)
+
+        return json.dumps(parsed, ensure_ascii=True)
 
     def _route_after_agent(self, state: AgentState) -> str:
         if state["step_count"] >= self.settings.agent_max_steps:

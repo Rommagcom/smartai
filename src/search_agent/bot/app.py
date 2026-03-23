@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
@@ -68,27 +69,32 @@ def _parse_file_payload(answer: str) -> dict[str, Any] | None:
             payload = parsed
             break
 
-    if payload is None:
+    if payload is None or not isinstance(payload, dict):
         return None
 
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("type") != "file":
+    payload_type = str(payload.get("type") or "").strip().lower()
+    if payload_type not in {"file", "image"}:
         return None
 
     base64_data = payload.get("base64")
+    path_data = payload.get("path")
     filename = payload.get("filename")
     mime_type = payload.get("mime_type")
 
-    if not isinstance(base64_data, str) or not base64_data:
+    has_base64 = isinstance(base64_data, str) and bool(base64_data)
+    has_path = isinstance(path_data, str) and bool(path_data.strip())
+    if not has_base64 and not has_path:
         return None
+
     if not isinstance(filename, str) or not filename:
-        filename = "document.pdf"
+        filename = "image.png" if payload_type == "image" else "document.pdf"
     if not isinstance(mime_type, str) or not mime_type:
-        mime_type = "application/octet-stream"
+        mime_type = "image/png" if payload_type == "image" else "application/octet-stream"
 
     return {
+        "type": payload_type,
         "base64": base64_data,
+        "path": path_data,
         "filename": filename,
         "mime_type": mime_type,
     }
@@ -124,15 +130,33 @@ async def _send_answer_to_chat(
             await bot.send_message(chat_id=chat_id, text=chunk)
         return
 
-    try:
-        file_bytes = base64.b64decode(file_payload["base64"], validate=True)
-    except Exception:
-        await bot.send_message(chat_id=chat_id, text="File payload is invalid: cannot decode base64.")
+    file_bytes: bytes | None = None
+    base64_data = file_payload.get("base64")
+    if isinstance(base64_data, str) and base64_data:
+        try:
+            file_bytes = base64.b64decode(base64_data, validate=True)
+        except Exception:
+            file_bytes = None
+
+    if file_bytes is None:
+        path_value = file_payload.get("path")
+        if isinstance(path_value, str) and path_value.strip():
+            try:
+                file_bytes = Path(path_value).expanduser().resolve().read_bytes()
+            except Exception:
+                file_bytes = None
+
+    if file_bytes is None:
+        await bot.send_message(chat_id=chat_id, text="File payload is invalid: cannot read data from base64 or path.")
         return
 
     input_file = BufferedInputFile(file=BytesIO(file_bytes).getvalue(), filename=file_payload["filename"])
     caption = f"Generated file ({file_payload['mime_type']})"
-    await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
+    payload_type = str(file_payload.get("type") or "file").lower()
+    if payload_type == "image":
+        await bot.send_photo(chat_id=chat_id, photo=input_file, caption=caption)
+    else:
+        await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
 
     text_answer_payload = _parse_file_payload(answer)
     text_answer = answer.strip()
