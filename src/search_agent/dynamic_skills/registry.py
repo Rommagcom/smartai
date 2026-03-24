@@ -15,6 +15,7 @@ from typing import Any, Callable
 BUILTIN_TOOL_NAMES = {"web_search", "web_fetch"}
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
 _ARG_PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
+_SKILL_SUMMARY_MAX_CHARS = 320
 
 
 @dataclass(slots=True)
@@ -137,7 +138,7 @@ class DynamicToolRegistry:
     def _load_tool(self, skill_dir: Path, manifest: dict[str, Any]) -> DynamicTool:
         self._validate_manifest(manifest)
         name = str(manifest["name"])
-        description = str(manifest.get("description", f"Dynamic tool: {name}"))
+        description = self._build_tool_description(skill_dir=skill_dir, manifest=manifest, tool_name=name)
         entrypoint = str(manifest["entrypoint"])
         function_name = str(manifest["function"])
         parameters = manifest.get("schema") or {
@@ -162,6 +163,66 @@ class DynamicToolRegistry:
             func=func,
             skill_dir=skill_dir,
         )
+
+    @staticmethod
+    def _build_tool_description(*, skill_dir: Path, manifest: dict[str, Any], tool_name: str) -> str:
+        base = str(manifest.get("description") or f"Dynamic tool: {tool_name}").strip()
+        summary = DynamicToolRegistry._extract_skill_summary(skill_dir / "skill.md")
+        if not summary:
+            return base
+
+        normalized_base = base.lower()
+        normalized_summary = summary.lower()
+        if normalized_summary in normalized_base:
+            return base
+
+        combined = f"{base} Skill context: {summary}"
+        if len(combined) <= _SKILL_SUMMARY_MAX_CHARS:
+            return combined
+        return combined[: _SKILL_SUMMARY_MAX_CHARS - 3].rstrip() + "..."
+
+    @staticmethod
+    def _extract_skill_summary(skill_md_path: Path) -> str:
+        if not skill_md_path.exists() or not skill_md_path.is_file():
+            return ""
+
+        try:
+            text = skill_md_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+        lines = text.splitlines()
+        fragments: list[str] = []
+        in_code_block = False
+
+        for raw in lines:
+            stripped = raw.strip()
+            if not stripped:
+                if fragments:
+                    break
+                continue
+
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+
+            if stripped.startswith("#"):
+                continue
+
+            fragments.append(stripped)
+            if len(" ".join(fragments)) >= 220:
+                break
+
+        if not fragments:
+            return ""
+
+        summary = " ".join(fragments)
+        summary = re.sub(r"\s+", " ", summary).strip()
+        if len(summary) <= 220:
+            return summary
+        return summary[:217].rstrip() + "..."
 
     def _validate_manifest(self, manifest: dict[str, Any]) -> None:
         required_fields = ("name", "entrypoint", "function")

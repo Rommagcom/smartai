@@ -70,3 +70,39 @@ def test_argument_policy_rejects_unexpected_field() -> None:
         assert False, "Expected ValueError for unexpected argument"
     except ValueError as exc:
         assert "Unexpected argument" in str(exc)
+
+
+def test_extract_skill_summary_reads_first_text_paragraph(tmp_path: Path) -> None:
+    skill_md = tmp_path / "skill.md"
+    skill_md.write_text(
+        "# My Skill\n\n"
+        "This skill performs a focused SEO analysis for websites.\n"
+        "It prioritizes technical issues and ranking opportunities.\n\n"
+        "## Details\n"
+        "Extra details here.\n",
+        encoding="utf-8",
+    )
+
+    summary = DynamicToolRegistry._extract_skill_summary(skill_md)
+    assert "focused SEO analysis" in summary
+    assert "technical issues" in summary
+
+
+def test_build_tool_description_appends_skill_summary(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo_skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text(
+        "# Demo\n\n"
+        "Use this tool to create concise keyword plans for landing pages.\n",
+        encoding="utf-8",
+    )
+
+    description = DynamicToolRegistry._build_tool_description(
+        skill_dir=skill_dir,
+        manifest={"description": "Keyword planning tool"},
+        tool_name="demo_tool",
+    )
+
+    assert description.startswith("Keyword planning tool")
+    assert "Skill context:" in description
+    assert "keyword plans" in description.lower()

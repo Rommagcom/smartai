@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ _PROMPT_INJECTION_PATTERNS = [
     re.compile(r"reveal\s+(your\s+)?(instructions|prompt)", re.IGNORECASE),
     re.compile(r"jailbreak", re.IGNORECASE),
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict):
@@ -198,12 +202,54 @@ class OllamaLangGraphAgent:
             if self.settings.enable_dynamic_tools
             else []
         )
-        response = self.client.chat(
-            model=self.settings.ollama_model,
-            messages=state["messages"],
-            tools=[web_search, web_fetch, *dynamic_schemas],
-            think=self.settings.ollama_think,
-        )
+        response = None
+        attempts = [
+            {
+                "tools": [web_search, web_fetch, *dynamic_schemas],
+                "think": self.settings.ollama_think,
+                "label": "primary",
+            },
+            {
+                "tools": [web_search, web_fetch, *dynamic_schemas],
+                "think": False,
+                "label": "retry_no_think",
+            },
+            {
+                "tools": [],
+                "think": False,
+                "label": "retry_minimal",
+            },
+        ]
+
+        last_error: Exception | None = None
+        for attempt in attempts:
+            try:
+                response = self.client.chat(
+                    model=self.settings.ollama_model,
+                    messages=state["messages"],
+                    tools=attempt["tools"],
+                    think=bool(attempt["think"]),
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Ollama chat attempt failed (%s): %s", attempt["label"], exc)
+
+        if response is None:
+            details = str(last_error) if last_error is not None else "unknown error"
+            message = (
+                "Model provider is temporarily unavailable (HTTP 500). "
+                "Please retry in 10-30 seconds. "
+                f"Details: {details}"
+            )
+            return {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": message,
+                    }
+                ]
+            }
 
         assistant_message = self._normalize_assistant_message(response.message)
         usage = self._extract_token_usage(response)
@@ -256,16 +302,18 @@ class OllamaLangGraphAgent:
                     callables=callables,
                 )
 
+            file_payload = self._extract_file_payload_for_transport(content)
             content = self._sanitize_tool_content_for_model(content)
             model_limit = min(self.settings.max_tool_result_chars, _MAX_TOOL_CONTENT_CHARS_FOR_MODEL)
             content = content[:model_limit]
-            tool_messages.append(
-                {
-                    "role": "tool",
-                    "tool_name": tool_name,
-                    "content": content,
-                }
-            )
+            tool_message = {
+                "role": "tool",
+                "tool_name": tool_name,
+                "content": content,
+            }
+            if file_payload is not None:
+                tool_message["file_payload"] = file_payload
+            tool_messages.append(tool_message)
 
         return {
             "messages": tool_messages,
@@ -365,6 +413,31 @@ class OllamaLangGraphAgent:
             parsed["base64_size_chars"] = len(base64_data)
 
         return json.dumps(parsed, ensure_ascii=True)
+
+    @staticmethod
+    def _extract_file_payload_for_transport(content: str) -> dict[str, Any] | None:
+        text = str(content or "")
+        if not text:
+            return None
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+
+        payload_type = str(parsed.get("type") or "").strip().lower()
+        if payload_type not in {"file", "image"}:
+            return None
+
+        has_base64 = isinstance(parsed.get("base64"), str) and bool(parsed.get("base64"))
+        has_path = isinstance(parsed.get("path"), str) and bool(str(parsed.get("path")).strip())
+        if not has_base64 and not has_path:
+            return None
+
+        return parsed
 
     def _route_after_agent(self, state: AgentState) -> str:
         if state["step_count"] >= self.settings.agent_max_steps:

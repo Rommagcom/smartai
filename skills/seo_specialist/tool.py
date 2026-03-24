@@ -54,7 +54,7 @@ def seo_specialist(
         "task": task_name,
         "context": context,
         "output_format": "markdown",
-        "result": template,
+        "result": template ,
     }
     return json.dumps(payload, ensure_ascii=True)
 

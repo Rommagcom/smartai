@@ -1,7 +1,7 @@
 {
   "name": "seo_specialist",
   "package_version": "1.0.0",
-  "description": "Expert search engine optimization strategist for technical SEO, content, links, and reporting.",
+  "description": "SEO Specialist and analyst, expert search engine optimization strategist for technical SEO, content, links, and reporting.",
   "entrypoint": "tool.py",
   "function": "seo_specialist",
   "schema": {
@@ -34,8 +34,8 @@
   },
   "package_files_sha256": {
     "skill.md": "a881a37e038af9904325bd02b0ef12db74171dce20d14a747777e1702ce57517",
-    "tool.py": "70c2fe14967274c66389f5fbd52d1a443a6c8b5afa0043795c8b005bf59b3f58"
+    "tool.py": "abe7a4e0cb35cfdc3351112a44307de39c455bffa21b21b0eddb3557f26941aa"
   },
   "package_signature_algorithm": "hmac-sha256",
-  "package_signature": "11746a6235dec2c4e0518e390fa2389e00e6455f1a9749768965e00728b35877"
+  "package_signature": "4e4e91553ec07ac5181b084fbf35de4bea5f1678e0752a794717bdb2c5b8df02"
 }

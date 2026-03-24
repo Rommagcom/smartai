@@ -244,6 +244,10 @@ def _parse_file_payload(answer: str) -> dict[str, Any] | None:
             payload = parsed
             break
 
+    return _normalize_file_payload(payload)
+
+
+def _normalize_file_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if payload is None or not isinstance(payload, dict):
         return None
 
@@ -256,7 +260,8 @@ def _parse_file_payload(answer: str) -> dict[str, Any] | None:
     filename = payload.get("filename")
     mime_type = payload.get("mime_type")
 
-    has_base64 = isinstance(base64_data, str) and bool(base64_data)
+    base64_omitted = bool(payload.get("base64_omitted"))
+    has_base64 = isinstance(base64_data, str) and bool(base64_data) and base64_data != "<omitted>" and not base64_omitted
     has_path = isinstance(path_data, str) and bool(path_data.strip())
     if not has_base64 and not has_path:
         return None
@@ -279,6 +284,13 @@ def _extract_file_payload_from_messages(messages: list[dict[str, Any]]) -> dict[
     for msg in reversed(messages):
         if msg.get("role") != "tool":
             continue
+
+        raw_payload = msg.get("file_payload")
+        if isinstance(raw_payload, dict):
+            normalized = _normalize_file_payload(raw_payload)
+            if normalized is not None:
+                return normalized
+
         content = msg.get("content")
         if not isinstance(content, str) or not content.strip():
             continue
@@ -332,12 +344,7 @@ async def _send_answer_to_chat(
         await bot.send_photo(chat_id=chat_id, photo=input_file, caption=caption)
     else:
         await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
-
-    text_answer_payload = _parse_file_payload(answer)
-    text_answer = answer.strip()
-    if text_answer and text_answer_payload is None:
-        for chunk in _chunk_message(text_answer):
-            await bot.send_message(chat_id=chat_id, text=chunk)
+    return
 
 
 async def _send_answer(
