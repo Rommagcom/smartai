@@ -239,6 +239,22 @@ class SkillAssignmentRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=128)
 
 
+class TeamSkillAssignmentRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    tool_name: str = Field(min_length=1, max_length=128)
+
+
+class AdminUserSummary(BaseModel):
+    user_id: int
+    email: str
+    full_name: str
+    title: str
+    profile_bio: str = ""
+    role: str
+    in_team: bool
+    force_password_change: bool = False
+
+
 class ChatRequest(BaseModel):
     org_id: str = Field(min_length=1, max_length=128)
     team_id: str = Field(min_length=1, max_length=128)
@@ -255,6 +271,60 @@ class ChatMessage(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     messages: list[ChatMessage]
+
+
+class TeamSummary(BaseModel):
+    org_id: str
+    team_id: str
+    team_name: str
+
+
+class OrganizationSummary(BaseModel):
+    org_id: str
+    name: str
+
+
+class TeamMemberSummary(BaseModel):
+    user_id: int
+    email: str
+    full_name: str
+    title: str
+    profile_bio: str
+    role: str
+
+
+class AdminCreateUserRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    email: str
+    password: str | None = Field(default=None, min_length=8, max_length=256)
+    full_name: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=200)
+    profile_bio: str = Field(default="", max_length=2000)
+    role: Role = "member"
+
+
+class AdminUpdateUserRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    email: str
+    full_name: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=200)
+    profile_bio: str = Field(default="", max_length=2000)
+    role: Role = "member"
+    force_password_change: bool | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    ttl_minutes: int = Field(default=60, ge=5, le=1440)
+
+
+class ForcePasswordChangeRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class ClaudeSkillConvertRequest(BaseModel):
@@ -318,6 +388,27 @@ class ApiService:
         self.long_term = LongTermMemoryStore.from_settings(settings)
         self.settings.dynamic_skills_dir.mkdir(parents=True, exist_ok=True)
 
+    def _supports_auth_otp_fields(self) -> bool:
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM information_schema.columns
+                        WHERE table_name = 'auth_users'
+                          AND column_name IN (
+                            'force_password_change',
+                            'one_time_password_hash',
+                            'one_time_password_expires_at'
+                          )
+                        """
+                    )
+                ).mappings().first()
+            return int(row.get("cnt") or 0) >= 3 if row else False
+        except Exception:
+            return False
+
     def register_user(self, payload: RegisterRequest) -> int:
         password_hash = _hash_password(payload.password)
         now = datetime.now(UTC)
@@ -380,12 +471,53 @@ class ApiService:
         return user_id
 
     def create_token(self, *, email: str, password: str) -> TokenResponse:
+        supports_otp = self._supports_auth_otp_fields()
         with self.engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT user_id, password_hash FROM auth_users WHERE lower(email) = lower(:email) LIMIT 1"),
-                {"email": email.strip()},
-            ).mappings().first()
-            if row is None or not _verify_password(password, str(row["password_hash"])):
+            if supports_otp:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT
+                            user_id,
+                            password_hash,
+                            one_time_password_hash,
+                            one_time_password_expires_at,
+                            force_password_change
+                        FROM auth_users
+                        WHERE lower(email) = lower(:email)
+                        LIMIT 1
+                        """
+                    ),
+                    {"email": email.strip()},
+                ).mappings().first()
+            else:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT user_id, password_hash
+                        FROM auth_users
+                        WHERE lower(email) = lower(:email)
+                        LIMIT 1
+                        """
+                    ),
+                    {"email": email.strip()},
+                ).mappings().first()
+
+            if row is None:
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+
+            uses_otp = False
+            base_ok = _verify_password(password, str(row.get("password_hash") or ""))
+            if base_ok:
+                authenticated = True
+            else:
+                otp_hash = str(row.get("one_time_password_hash") or "")
+                otp_expires_at = row.get("one_time_password_expires_at")
+                otp_not_expired = isinstance(otp_expires_at, datetime) and otp_expires_at.astimezone(UTC) > datetime.now(UTC)
+                authenticated = bool(otp_hash) and otp_not_expired and _verify_password(password, otp_hash)
+                uses_otp = authenticated
+
+            if not authenticated:
                 raise HTTPException(status_code=401, detail="Invalid credentials")
 
             raw_token = secrets.token_urlsafe(48)
@@ -406,6 +538,23 @@ class ApiService:
                     "created_at": now,
                 },
             )
+            if uses_otp and supports_otp:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET force_password_change = TRUE,
+                            one_time_password_hash = NULL,
+                            one_time_password_expires_at = NULL,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "user_id": int(row["user_id"]),
+                        "updated_at": now,
+                    },
+                )
         return TokenResponse(access_token=raw_token, expires_at=expires_at.isoformat())
 
     def get_user_from_token(self, token: str) -> dict[str, Any]:
@@ -431,6 +580,81 @@ class ApiService:
                 raise HTTPException(status_code=401, detail="Token expired")
         return dict(row)
 
+    def change_password(self, *, user_id: int, current_password: str, new_password: str) -> None:
+        supports_otp = self._supports_auth_otp_fields()
+        with self.engine.begin() as conn:
+            if supports_otp:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT password_hash, one_time_password_hash, one_time_password_expires_at
+                        FROM auth_users
+                        WHERE user_id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": int(user_id)},
+                ).mappings().first()
+            else:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT password_hash
+                        FROM auth_users
+                        WHERE user_id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": int(user_id)},
+                ).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            base_ok = _verify_password(current_password, str(row.get("password_hash") or ""))
+            otp_hash = str(row.get("one_time_password_hash") or "")
+            otp_expires_at = row.get("one_time_password_expires_at")
+            otp_ok = bool(otp_hash) and isinstance(otp_expires_at, datetime) and otp_expires_at.astimezone(UTC) > datetime.now(UTC)
+            otp_ok = otp_ok and _verify_password(current_password, otp_hash)
+
+            if not base_ok and not otp_ok:
+                raise HTTPException(status_code=401, detail="Current password is invalid")
+
+            if supports_otp:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET password_hash = :password_hash,
+                            force_password_change = FALSE,
+                            one_time_password_hash = NULL,
+                            one_time_password_expires_at = NULL,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "password_hash": _hash_password(new_password),
+                        "updated_at": datetime.now(UTC),
+                        "user_id": int(user_id),
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET password_hash = :password_hash,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "password_hash": _hash_password(new_password),
+                        "updated_at": datetime.now(UTC),
+                        "user_id": int(user_id),
+                    },
+                )
+
     def link_telegram(self, *, user_id: int, telegram_id: int) -> None:
         with self.engine.begin() as conn:
             conn.execute(
@@ -447,6 +671,406 @@ class ApiService:
                     "user_id": int(user_id),
                 },
             )
+
+    def list_user_teams(self, *, user_id: int, org_id: str | None = None) -> list[TeamSummary]:
+        filter_org = (org_id or "").strip()
+        where_clause = "WHERE tm.user_id = :user_id"
+        params: dict[str, Any] = {"user_id": int(user_id)}
+        if filter_org:
+            where_clause += " AND tm.org_id = :org_id"
+            params["org_id"] = filter_org
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        tm.org_id,
+                        tm.team_id,
+                        COALESCE(t.name, tm.team_id) AS team_name
+                    FROM team_members tm
+                    LEFT JOIN teams t
+                      ON t.org_id = tm.org_id AND t.team_id = tm.team_id
+                    {where_clause}
+                    ORDER BY tm.org_id ASC, tm.team_id ASC
+                    """
+                ),
+                params,
+            ).mappings().all()
+
+        return [
+            TeamSummary(
+                org_id=str(row.get("org_id") or ""),
+                team_id=str(row.get("team_id") or ""),
+                team_name=str(row.get("team_name") or row.get("team_id") or ""),
+            )
+            for row in rows
+            if str(row.get("org_id") or "").strip() and str(row.get("team_id") or "").strip()
+        ]
+
+    def list_organizations(self, *, actor_user_id: int) -> list[OrganizationSummary]:
+        self._enforce_admin(actor_user_id)
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT org_id, name
+                    FROM organizations
+                    ORDER BY org_id ASC
+                    """
+                )
+            ).mappings().all()
+        return [
+            OrganizationSummary(org_id=str(row.get("org_id") or ""), name=str(row.get("name") or row.get("org_id") or ""))
+            for row in rows
+            if str(row.get("org_id") or "").strip()
+        ]
+
+    def list_org_teams(self, *, actor_user_id: int, org_id: str) -> list[TeamSummary]:
+        self._enforce_admin(actor_user_id)
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT org_id, team_id, name
+                    FROM teams
+                    WHERE org_id = :org_id
+                    ORDER BY team_id ASC
+                    """
+                ),
+                {"org_id": org_id},
+            ).mappings().all()
+        return [
+            TeamSummary(
+                org_id=str(row.get("org_id") or org_id),
+                team_id=str(row.get("team_id") or ""),
+                team_name=str(row.get("name") or row.get("team_id") or ""),
+            )
+            for row in rows
+            if str(row.get("team_id") or "").strip()
+        ]
+
+    def list_team_members(self, *, actor_user_id: int, org_id: str, team_id: str) -> list[TeamMemberSummary]:
+        self._enforce_admin(actor_user_id)
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        u.user_id,
+                        u.email,
+                        u.full_name,
+                        u.title,
+                        u.profile_bio,
+                        COALESCE(au.role, 'member') AS role
+                    FROM team_members tm
+                    JOIN auth_users u
+                      ON u.user_id = tm.user_id
+                    LEFT JOIN app_users au
+                      ON au.org_id = tm.org_id AND au.user_id = tm.user_id
+                    WHERE tm.org_id = :org_id AND tm.team_id = :team_id
+                    ORDER BY u.user_id ASC
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                },
+            ).mappings().all()
+        return [
+            TeamMemberSummary(
+                user_id=int(row.get("user_id") or 0),
+                email=str(row.get("email") or ""),
+                full_name=str(row.get("full_name") or ""),
+                title=str(row.get("title") or ""),
+                profile_bio=str(row.get("profile_bio") or ""),
+                role=str(row.get("role") or "member"),
+            )
+            for row in rows
+            if int(row.get("user_id") or 0) > 0
+        ]
+
+    def remove_from_team(self, *, actor_user_id: int, org_id: str, team_id: str, target_user_id: int) -> bool:
+        self._enforce_admin(actor_user_id)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    DELETE FROM team_members
+                    WHERE org_id = :org_id AND team_id = :team_id AND user_id = :user_id
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "user_id": int(target_user_id),
+                },
+            )
+        removed = int(result.rowcount or 0) > 0
+        self.rbac.audit(
+            org_id=org_id,
+            team_id=team_id,
+            actor_user_id=actor_user_id,
+            action="rbac.remove_user_from_team",
+            target_type="team_member",
+            target_id=f"{team_id}:{int(target_user_id)}",
+            details={"removed": removed},
+        )
+        return removed
+
+    def create_user_by_admin(self, *, actor_user_id: int, payload: AdminCreateUserRequest) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        now = datetime.now(UTC)
+        generated_password = payload.password or secrets.token_urlsafe(12)
+        supports_otp = self._supports_auth_otp_fields()
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text("SELECT user_id FROM auth_users WHERE lower(email) = lower(:email) LIMIT 1"),
+                {"email": payload.email.strip()},
+            ).mappings().first()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="Email already registered")
+
+            if supports_otp:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (
+                            email,
+                            password_hash,
+                            full_name,
+                            title,
+                            profile_bio,
+                            force_password_change,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            :email,
+                            :password_hash,
+                            :full_name,
+                            :title,
+                            :profile_bio,
+                            TRUE,
+                            :created_at,
+                            :updated_at
+                        )
+                        RETURNING user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "password_hash": _hash_password(generated_password),
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ).mappings().first()
+            else:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (
+                            email,
+                            password_hash,
+                            full_name,
+                            title,
+                            profile_bio,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            :email,
+                            :password_hash,
+                            :full_name,
+                            :title,
+                            :profile_bio,
+                            :created_at,
+                            :updated_at
+                        )
+                        RETURNING user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "password_hash": _hash_password(generated_password),
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ).mappings().first()
+
+            user_id = int(row["user_id"])
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_memberships (org_id, user_id, created_at)
+                    VALUES (:org_id, :user_id, :created_at)
+                    ON CONFLICT (org_id, user_id) DO NOTHING
+                    """
+                ),
+                {
+                    "org_id": payload.org_id,
+                    "user_id": user_id,
+                    "created_at": now,
+                },
+            )
+
+        self.rbac.upsert_user(org_id=payload.org_id, user_id=user_id, role=payload.role)
+        self.rbac.audit(
+            org_id=payload.org_id,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.create_user",
+            target_type="user",
+            target_id=str(user_id),
+            details={"role": payload.role, "email": payload.email.strip()},
+        )
+        return {
+            "user_id": user_id,
+            "email": payload.email.strip(),
+            "one_time_password": generated_password,
+        }
+
+    def update_user_by_admin(self, *, actor_user_id: int, target_user_id: int, payload: AdminUpdateUserRequest) -> None:
+        self._enforce_admin(actor_user_id)
+        supports_otp = self._supports_auth_otp_fields()
+        with self.engine.begin() as conn:
+            if supports_otp and payload.force_password_change is not None:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET email = :email,
+                            full_name = :full_name,
+                            title = :title,
+                            profile_bio = :profile_bio,
+                            force_password_change = :force_password_change,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "force_password_change": bool(payload.force_password_change),
+                        "updated_at": datetime.now(UTC),
+                        "user_id": int(target_user_id),
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET email = :email,
+                            full_name = :full_name,
+                            title = :title,
+                            profile_bio = :profile_bio,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "updated_at": datetime.now(UTC),
+                        "user_id": int(target_user_id),
+                    },
+                )
+
+        self.rbac.upsert_user(org_id=payload.org_id, user_id=target_user_id, role=payload.role)
+
+    def reset_user_password_one_time(
+        self,
+        *,
+        actor_user_id: int,
+        org_id: str,
+        target_user_id: int,
+        ttl_minutes: int,
+    ) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        if not self._supports_auth_otp_fields():
+            raise HTTPException(status_code=400, detail="OTP fields are not migrated. Run alembic upgrade head.")
+        otp = secrets.token_urlsafe(12)
+        expires_at = datetime.now(UTC) + timedelta(minutes=max(5, int(ttl_minutes)))
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE auth_users
+                    SET one_time_password_hash = :otp_hash,
+                        one_time_password_expires_at = :otp_expires_at,
+                        force_password_change = TRUE,
+                        updated_at = :updated_at
+                    WHERE user_id = :user_id
+                    """
+                ),
+                {
+                    "otp_hash": _hash_password(otp),
+                    "otp_expires_at": expires_at,
+                    "updated_at": datetime.now(UTC),
+                    "user_id": int(target_user_id),
+                },
+            )
+
+        self.rbac.audit(
+            org_id=org_id,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.reset_user_otp",
+            target_type="user",
+            target_id=str(target_user_id),
+            details={"ttl_minutes": int(ttl_minutes)},
+        )
+        return {
+            "user_id": int(target_user_id),
+            "one_time_password": otp,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def force_user_password_change(self, *, actor_user_id: int, org_id: str, target_user_id: int) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        if not self._supports_auth_otp_fields():
+            raise HTTPException(status_code=400, detail="OTP fields are not migrated. Run alembic upgrade head.")
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE auth_users
+                    SET force_password_change = TRUE,
+                        one_time_password_hash = NULL,
+                        one_time_password_expires_at = NULL,
+                        updated_at = :updated_at
+                    WHERE user_id = :user_id
+                    """
+                ),
+                {
+                    "updated_at": datetime.now(UTC),
+                    "user_id": int(target_user_id),
+                },
+            )
+
+        self.rbac.audit(
+            org_id=org_id,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.force_user_password_change",
+            target_type="user",
+            target_id=str(target_user_id),
+            details={},
+        )
+        return {"status": "ok", "user_id": int(target_user_id), "force_password_change": True}
 
     def _is_global_admin(self, user_id: int) -> bool:
         if int(user_id) in self.settings.telegram_admin_user_ids:
@@ -508,6 +1132,70 @@ class ApiService:
             role=payload.role,
         )
 
+    def list_org_users(self, *, actor_user_id: int, org_id: str, team_id: str | None = None) -> list[AdminUserSummary]:
+        self._enforce_admin(actor_user_id)
+        normalized_team_id = (team_id or "").strip()
+        supports_otp = self._supports_auth_otp_fields()
+        team_join = (
+            "LEFT JOIN team_members tm ON tm.org_id = om.org_id AND tm.team_id = :team_id AND tm.user_id = om.user_id"
+            if normalized_team_id
+            else "LEFT JOIN team_members tm ON 1 = 0"
+        )
+        force_password_select = "COALESCE(u.force_password_change, FALSE) AS force_password_change" if supports_otp else "FALSE AS force_password_change"
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        u.user_id,
+                        u.email,
+                        u.full_name,
+                        u.title,
+                        u.profile_bio,
+                        COALESCE(au.role, 'member') AS role,
+                        """
+                                        + force_password_select
+                                        +
+                                        """,
+                        CASE
+                            WHEN tm.user_id IS NULL THEN FALSE
+                            ELSE TRUE
+                        END AS in_team
+                    FROM org_memberships om
+                    JOIN auth_users u
+                      ON u.user_id = om.user_id
+                    LEFT JOIN app_users au
+                      ON au.org_id = om.org_id AND au.user_id = om.user_id
+                                        """
+                                        + team_join
+                                        +
+                                        """
+                    WHERE om.org_id = :org_id
+                    ORDER BY u.user_id ASC
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                                        "team_id": normalized_team_id,
+                },
+            ).mappings().all()
+
+        result: list[AdminUserSummary] = []
+        for row in rows:
+            result.append(
+                AdminUserSummary(
+                    user_id=int(row.get("user_id") or 0),
+                    email=str(row.get("email") or ""),
+                    full_name=str(row.get("full_name") or ""),
+                    title=str(row.get("title") or ""),
+                    profile_bio=str(row.get("profile_bio") or ""),
+                    role=str(row.get("role") or "member"),
+                    in_team=bool(row.get("in_team")),
+                    force_password_change=bool(row.get("force_password_change")),
+                )
+            )
+        return result
+
     def grant_skill(self, *, actor_user_id: int, target_user_id: int, payload: SkillAssignmentRequest) -> None:
         self._enforce_admin(actor_user_id)
         self.rbac.assign_skill(
@@ -529,6 +1217,28 @@ class ApiService:
     def list_user_skills(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> list[str]:
         self._enforce_admin(actor_user_id)
         return self.rbac.list_user_skills(org_id=org_id, user_id=target_user_id)
+
+    def list_team_skills(self, *, actor_user_id: int, org_id: str, team_id: str) -> list[str]:
+        self._enforce_admin(actor_user_id)
+        return self.rbac.list_team_skills(org_id=org_id, team_id=team_id)
+
+    def grant_team_skill(self, *, actor_user_id: int, team_id: str, payload: TeamSkillAssignmentRequest) -> None:
+        self._enforce_admin(actor_user_id)
+        self.rbac.assign_team_skill(
+            org_id=payload.org_id,
+            team_id=team_id,
+            actor_user_id=actor_user_id,
+            tool_name=payload.tool_name,
+        )
+
+    def revoke_team_skill(self, *, actor_user_id: int, team_id: str, payload: TeamSkillAssignmentRequest) -> bool:
+        self._enforce_admin(actor_user_id)
+        return self.rbac.revoke_team_skill(
+            org_id=payload.org_id,
+            team_id=team_id,
+            actor_user_id=actor_user_id,
+            tool_name=payload.tool_name,
+        )
 
     def list_dynamic_skills(self, *, actor_user_id: int) -> list[DynamicSkillSummary]:
         self._enforce_admin(actor_user_id)
@@ -835,42 +1545,55 @@ class ApiService:
             user_id=user_id,
             role=role,
             all_dynamic_tools=all_dynamic,
+            team_id=team_id,
         )
 
         user_profile = self._user_profile_text(user_id=user_id)
-        history = self._load_group_history(org_id=org_id, team_id=team_id)
+        team_roster_profile = self._team_members_context(org_id=org_id, team_id=team_id)
+        try:
+            history = self._load_group_history(org_id=org_id, team_id=team_id)
+        except Exception:
+            history = []
         memory_context = self._recall_shared_memory(org_id=org_id, team_id=team_id, user_id=user_id, query=payload.message)
         if user_profile:
             history = [{"role": "system", "content": user_profile}, *history]
+        if team_roster_profile:
+            history = [{"role": "system", "content": team_roster_profile}, *history]
         if memory_context:
             history = [{"role": "system", "content": memory_context}, *history]
 
-        answer_result = self.agent.run(
-            payload.message,
-            history,
-            _team_chat_id(org_id, team_id),
-            org_id,
-            team_id,
-            user_id,
-            role,
-            allowed_dynamic,
-        )
-        answer = answer_result.answer or "I could not generate a response."
+        try:
+            answer_result = self.agent.run(
+                payload.message,
+                history,
+                _team_chat_id(org_id, team_id),
+                org_id,
+                team_id,
+                user_id,
+                role,
+                allowed_dynamic,
+            )
+            answer = answer_result.answer or "I could not generate a response."
+        except Exception:
+            answer = "Assistant is temporarily unavailable. Please try again in a moment."
 
-        self._append_group_message(
-            org_id=org_id,
-            team_id=team_id,
-            sender_user_id=user_id,
-            sender_type="user",
-            content=payload.message,
-        )
-        self._append_group_message(
-            org_id=org_id,
-            team_id=team_id,
-            sender_user_id=None,
-            sender_type="assistant",
-            content=answer,
-        )
+        try:
+            self._append_group_message(
+                org_id=org_id,
+                team_id=team_id,
+                sender_user_id=user_id,
+                sender_type="user",
+                content=payload.message,
+            )
+            self._append_group_message(
+                org_id=org_id,
+                team_id=team_id,
+                sender_user_id=None,
+                sender_type="assistant",
+                content=answer,
+            )
+        except Exception:
+            pass
 
         if self.long_term is not None:
             try:
@@ -895,7 +1618,24 @@ class ApiService:
             except Exception:
                 pass
 
-        messages = self._read_group_messages(org_id=org_id, team_id=team_id)
+        try:
+            messages = self._read_group_messages(org_id=org_id, team_id=team_id)
+        except Exception:
+            now_iso = datetime.now(UTC).isoformat()
+            messages = [
+                ChatMessage(
+                    sender_type="user",
+                    sender_user_id=user_id,
+                    content=payload.message,
+                    created_at=now_iso,
+                ),
+                ChatMessage(
+                    sender_type="assistant",
+                    sender_user_id=None,
+                    content=answer,
+                    created_at=now_iso,
+                ),
+            ]
         return ChatResponse(answer=answer, messages=messages)
 
     def _user_profile_text(self, *, user_id: int) -> str:
@@ -924,6 +1664,36 @@ class ApiService:
             f"- Role/Title: {title or 'Unknown'}\n"
             f"- About: {bio or 'Not provided'}"
         )
+
+    def _team_members_context(self, *, org_id: str, team_id: str) -> str:
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT u.full_name, u.title, u.profile_bio
+                    FROM team_members tm
+                    JOIN auth_users u ON u.user_id = tm.user_id
+                    WHERE tm.org_id = :org_id AND tm.team_id = :team_id
+                    ORDER BY u.full_name ASC, u.user_id ASC
+                    LIMIT 30
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                },
+            ).mappings().all()
+
+        if not rows:
+            return ""
+
+        lines = ["Current team roster context:"]
+        for idx, row in enumerate(rows, start=1):
+            full_name = str(row.get("full_name") or "Unknown").strip() or "Unknown"
+            title = str(row.get("title") or "").strip() or "Unknown"
+            bio = str(row.get("profile_bio") or "").strip() or "Not provided"
+            lines.append(f"{idx}. {full_name} | {title} | {bio}")
+        return "\n".join(lines)
 
 
 settings = load_settings()
@@ -971,10 +1741,33 @@ def link_telegram(payload: TelegramLinkRequest, user: CurrentUser) -> dict[str, 
     return {"status": "linked"}
 
 
+@app.post("/api/v1/users/me/password/change", responses={401: {"description": "Current password is invalid"}})
+def change_my_password(payload: PasswordChangeRequest, user: CurrentUser) -> dict[str, str]:
+    service.change_password(
+        user_id=int(user["user_id"]),
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/users/me/teams")
+def list_my_teams(
+    user: CurrentUser,
+    org_id: str | None = None,
+) -> list[TeamSummary]:
+    return service.list_user_teams(user_id=int(user["user_id"]), org_id=org_id)
+
+
 @app.post("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def create_org(payload: CreateOrgRequest, user: CurrentUser) -> dict[str, str]:
     service.create_org(actor_user_id=int(user["user_id"]), payload=payload)
     return {"status": "ok"}
+
+
+@app.get("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
+def list_organizations(user: CurrentUser) -> list[OrganizationSummary]:
+    return service.list_organizations(actor_user_id=int(user["user_id"]))
 
 
 @app.post("/api/v1/admin/teams", responses={403: {"description": "Admin access required"}})
@@ -983,10 +1776,70 @@ def create_team(payload: CreateTeamRequest, user: CurrentUser) -> dict[str, str]
     return {"status": "ok"}
 
 
+@app.get("/api/v1/admin/organizations/{org_id}/teams", responses={403: {"description": "Admin access required"}})
+def list_org_teams(org_id: str, user: CurrentUser) -> list[TeamSummary]:
+    return service.list_org_teams(actor_user_id=int(user["user_id"]), org_id=org_id)
+
+
 @app.post("/api/v1/admin/teams/members", responses={403: {"description": "Admin access required"}})
 def add_to_team(payload: AddTeamMemberRequest, user: CurrentUser) -> dict[str, str]:
     service.add_to_team(actor_user_id=int(user["user_id"]), payload=payload)
     return {"status": "ok"}
+
+
+@app.get("/api/v1/admin/teams/{team_id}/members", responses={403: {"description": "Admin access required"}})
+def list_team_members(team_id: str, org_id: str, user: CurrentUser) -> list[TeamMemberSummary]:
+    return service.list_team_members(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
+
+
+@app.delete("/api/v1/admin/teams/{team_id}/members/{target_user_id}", responses={403: {"description": "Admin access required"}})
+def remove_from_team(team_id: str, target_user_id: int, org_id: str, user: CurrentUser) -> dict[str, Any]:
+    removed = service.remove_from_team(
+        actor_user_id=int(user["user_id"]),
+        org_id=org_id,
+        team_id=team_id,
+        target_user_id=target_user_id,
+    )
+    return {"status": "ok", "removed": removed}
+
+
+@app.get("/api/v1/admin/users", responses={403: {"description": "Admin access required"}})
+def list_org_users(
+    org_id: str,
+    user: CurrentUser,
+    team_id: str | None = None,
+) -> list[AdminUserSummary]:
+    return service.list_org_users(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
+
+
+@app.post("/api/v1/admin/users", responses={403: {"description": "Admin access required"}, 409: {"description": "Email already registered"}})
+def create_user_by_admin(payload: AdminCreateUserRequest, user: CurrentUser) -> dict[str, Any]:
+    return service.create_user_by_admin(actor_user_id=int(user["user_id"]), payload=payload)
+
+
+@app.patch("/api/v1/admin/users/{target_user_id}", responses={403: {"description": "Admin access required"}})
+def update_user_by_admin(target_user_id: int, payload: AdminUpdateUserRequest, user: CurrentUser) -> dict[str, str]:
+    service.update_user_by_admin(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/admin/users/{target_user_id}/otp", responses={403: {"description": "Admin access required"}})
+def reset_user_otp(target_user_id: int, payload: ResetPasswordRequest, user: CurrentUser) -> dict[str, Any]:
+    return service.reset_user_password_one_time(
+        actor_user_id=int(user["user_id"]),
+        org_id=payload.org_id,
+        target_user_id=target_user_id,
+        ttl_minutes=payload.ttl_minutes,
+    )
+
+
+@app.post("/api/v1/admin/users/{target_user_id}/force-password-change", responses={403: {"description": "Admin access required"}})
+def force_user_password_change(target_user_id: int, payload: ForcePasswordChangeRequest, user: CurrentUser) -> dict[str, Any]:
+    return service.force_user_password_change(
+        actor_user_id=int(user["user_id"]),
+        org_id=payload.org_id,
+        target_user_id=target_user_id,
+    )
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/role", responses={403: {"description": "Admin access required"}})
@@ -1033,6 +1886,42 @@ def list_user_skills(
 ) -> dict[str, Any]:
     skills = service.list_user_skills(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, org_id=org_id)
     return {"skills": skills}
+
+
+@app.get("/api/v1/admin/teams/{team_id}/skills", responses={403: {"description": "Admin access required"}})
+def list_team_skills(
+    team_id: str,
+    org_id: str,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    skills = service.list_team_skills(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
+    return {"skills": skills}
+
+
+@app.post(
+    "/api/v1/admin/teams/{team_id}/skills/grant",
+    responses={403: {"description": "Admin access required"}},
+)
+def grant_team_skill(
+    team_id: str,
+    payload: TeamSkillAssignmentRequest,
+    user: CurrentUser,
+) -> dict[str, str]:
+    service.grant_team_skill(actor_user_id=int(user["user_id"]), team_id=team_id, payload=payload)
+    return {"status": "ok"}
+
+
+@app.post(
+    "/api/v1/admin/teams/{team_id}/skills/revoke",
+    responses={403: {"description": "Admin access required"}},
+)
+def revoke_team_skill(
+    team_id: str,
+    payload: TeamSkillAssignmentRequest,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    removed = service.revoke_team_skill(actor_user_id=int(user["user_id"]), team_id=team_id, payload=payload)
+    return {"status": "ok", "removed": removed}
 
 
 @app.get("/api/v1/admin/skills", responses={403: {"description": "Admin access required"}})

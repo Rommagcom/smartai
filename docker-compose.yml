@@ -124,6 +124,48 @@ services:
       postgres:
         condition: service_healthy
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sai-bot:latest
+    container_name: sai-api
+    restart: unless-stopped
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      REMINDER_DATABASE_URL: ${REMINDER_DATABASE_URL:-postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders}
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app/src
+    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.api_main"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      ollama-pull:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend-assistant
+      dockerfile: Dockerfile
+    image: sai-frontend:latest
+    container_name: sai-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   ollama-data:
   postgres-data:

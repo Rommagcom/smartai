@@ -451,6 +451,30 @@ alembic upgrade head
 
 In Docker Compose this runs automatically before bot startup.
 
+## Docker Compose full stack
+Run all services (Ollama, Redis, PostgreSQL, bot, API, frontend UI):
+
+```powershell
+docker compose up --build -d
+```
+
+Endpoints:
+- Frontend UI: `http://127.0.0.1:8080`
+- API docs: `http://127.0.0.1:8000/docs`
+- Ollama API: `http://127.0.0.1:11434`
+
+View logs:
+
+```powershell
+docker compose logs -f api frontend bot
+```
+
+Stop stack:
+
+```powershell
+docker compose down
+```
+
 ## Long-term memory (pgvector)
 Long-term memory is stored in PostgreSQL using pgvector and is queried by cosine similarity.
 For this reason, Docker Compose uses `pgvector/pgvector:pg16` image for the `postgres` service.
