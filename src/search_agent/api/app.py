@@ -255,6 +255,20 @@ class AdminUserSummary(BaseModel):
     force_password_change: bool = False
 
 
+class GlobalAdminUserSummary(BaseModel):
+    user_id: int
+    email: str
+    full_name: str
+    title: str
+    profile_bio: str = ""
+    organization_ids: list[str]
+
+
+class MembershipUpsertRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    role: Role = "member"
+
+
 class ChatRequest(BaseModel):
     org_id: str = Field(min_length=1, max_length=128)
     team_id: str = Field(min_length=1, max_length=128)
@@ -1196,6 +1210,172 @@ class ApiService:
             )
         return result
 
+    def list_all_users(self, *, actor_user_id: int) -> list[GlobalAdminUserSummary]:
+        self._enforce_admin(actor_user_id)
+        with self.engine.begin() as conn:
+            user_rows = conn.execute(
+                text(
+                    """
+                    SELECT user_id, email, full_name, title, profile_bio
+                    FROM auth_users
+                    ORDER BY user_id ASC
+                    """
+                )
+            ).mappings().all()
+            membership_rows = conn.execute(
+                text(
+                    """
+                    SELECT user_id, org_id
+                    FROM org_memberships
+                    ORDER BY user_id ASC, org_id ASC
+                    """
+                )
+            ).mappings().all()
+
+        membership_map: dict[int, list[str]] = {}
+        for row in membership_rows:
+            uid = int(row.get("user_id") or 0)
+            org = str(row.get("org_id") or "").strip()
+            if uid <= 0 or not org:
+                continue
+            membership_map.setdefault(uid, []).append(org)
+
+        result: list[GlobalAdminUserSummary] = []
+        for row in user_rows:
+            uid = int(row.get("user_id") or 0)
+            if uid <= 0:
+                continue
+            result.append(
+                GlobalAdminUserSummary(
+                    user_id=uid,
+                    email=str(row.get("email") or ""),
+                    full_name=str(row.get("full_name") or ""),
+                    title=str(row.get("title") or ""),
+                    profile_bio=str(row.get("profile_bio") or ""),
+                    organization_ids=membership_map.get(uid, []),
+                )
+            )
+        return result
+
+    def bind_user_to_org(
+        self,
+        *,
+        actor_user_id: int,
+        target_user_id: int,
+        payload: MembershipUpsertRequest,
+    ) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        org_id = payload.org_id.strip()
+        if not org_id:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            user_exists = conn.execute(
+                text("SELECT 1 FROM auth_users WHERE user_id = :user_id LIMIT 1"),
+                {"user_id": int(target_user_id)},
+            ).first()
+            if user_exists is None:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM org_memberships
+                    WHERE org_id = :org_id AND user_id = :user_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "user_id": int(target_user_id),
+                },
+            ).first()
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_memberships (org_id, user_id, created_at)
+                    VALUES (:org_id, :user_id, :created_at)
+                    ON CONFLICT (org_id, user_id) DO NOTHING
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "user_id": int(target_user_id),
+                    "created_at": now,
+                },
+            )
+
+        self.rbac.upsert_user(org_id=org_id, user_id=int(target_user_id), role=payload.role)
+        self.rbac.audit(
+            org_id=org_id,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.bind_user_org",
+            target_type="user",
+            target_id=str(target_user_id),
+            details={"created": existing is None, "role": payload.role},
+        )
+        return {"status": "ok", "created": existing is None}
+
+    def unbind_user_from_org(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM team_members
+                    WHERE org_id = :org_id AND user_id = :user_id
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "user_id": int(target_user_id),
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM app_users
+                    WHERE org_id = :org_id AND user_id = :user_id
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "user_id": int(target_user_id),
+                },
+            )
+            deleted_membership = conn.execute(
+                text(
+                    """
+                    DELETE FROM org_memberships
+                    WHERE org_id = :org_id AND user_id = :user_id
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "user_id": int(target_user_id),
+                },
+            )
+
+        removed = int(deleted_membership.rowcount or 0) > 0
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.unbind_user_org",
+            target_type="user",
+            target_id=str(target_user_id),
+            details={"removed": removed},
+        )
+        return {"status": "ok", "removed": removed}
+
     def grant_skill(self, *, actor_user_id: int, target_user_id: int, payload: SkillAssignmentRequest) -> None:
         self._enforce_admin(actor_user_id)
         self.rbac.assign_skill(
@@ -1812,6 +1992,11 @@ def list_org_users(
     return service.list_org_users(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
 
 
+@app.get("/api/v1/admin/users/all", responses={403: {"description": "Admin access required"}})
+def list_all_users(user: CurrentUser) -> list[GlobalAdminUserSummary]:
+    return service.list_all_users(actor_user_id=int(user["user_id"]))
+
+
 @app.post("/api/v1/admin/users", responses={403: {"description": "Admin access required"}, 409: {"description": "Email already registered"}})
 def create_user_by_admin(payload: AdminCreateUserRequest, user: CurrentUser) -> dict[str, Any]:
     return service.create_user_by_admin(actor_user_id=int(user["user_id"]), payload=payload)
@@ -1839,6 +2024,24 @@ def force_user_password_change(target_user_id: int, payload: ForcePasswordChange
         actor_user_id=int(user["user_id"]),
         org_id=payload.org_id,
         target_user_id=target_user_id,
+    )
+
+
+@app.post("/api/v1/admin/users/{target_user_id}/organizations/add", responses={403: {"description": "Admin access required"}})
+def bind_user_to_org(target_user_id: int, payload: MembershipUpsertRequest, user: CurrentUser) -> dict[str, Any]:
+    return service.bind_user_to_org(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        payload=payload,
+    )
+
+
+@app.delete("/api/v1/admin/users/{target_user_id}/organizations/{org_id}", responses={403: {"description": "Admin access required"}})
+def unbind_user_from_org(target_user_id: int, org_id: str, user: CurrentUser) -> dict[str, Any]:
+    return service.unbind_user_from_org(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        org_id=org_id,
     )
 
 

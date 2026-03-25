@@ -13,6 +13,7 @@ const DEFAULT_EDIT_USER_FORM = {
   profile_bio: "",
   role: "member",
   force_password_change: false,
+  organization_ids: [],
 };
 const ADMIN_SECTIONS = [
   { key: "organizations", label: "Organizations" },
@@ -118,6 +119,7 @@ function App() {
   const [editUserForm, setEditUserForm] = useState(DEFAULT_EDIT_USER_FORM);
 
   const [userDirectory, setUserDirectory] = useState([]);
+  const [globalUsers, setGlobalUsers] = useState([]);
   const [generatedCredential, setGeneratedCredential] = useState("");
 
   const [availableSkills, setAvailableSkills] = useState([]);
@@ -166,6 +168,18 @@ function App() {
       return blob.includes(query);
     });
   }, [userDirectory, usersSearch]);
+
+  const filteredGlobalUsers = useMemo(() => {
+    const query = usersSearch.trim().toLowerCase();
+    if (!query) {
+      return globalUsers;
+    }
+    return globalUsers.filter((user) => {
+      const organizations = Array.isArray(user.organization_ids) ? user.organization_ids.join(" ") : "";
+      const blob = `${user.full_name || ""} ${user.email || ""} ${user.title || ""} ${user.user_id || ""} ${organizations}`.toLowerCase();
+      return blob.includes(query);
+    });
+  }, [globalUsers, usersSearch]);
 
   const filteredSkills = useMemo(() => {
     const query = skillsSearch.trim().toLowerCase();
@@ -410,6 +424,13 @@ function App() {
     return { users: list.length };
   }
 
+  async function loadAllUsersGlobal() {
+    const payload = await request("/admin/users/all");
+    const list = Array.isArray(payload) ? payload : [];
+    setGlobalUsers(list);
+    return { users: list.length };
+  }
+
   function selectUserForEdit(user) {
     setEditUserForm({
       user_id: String(user.user_id || ""),
@@ -419,6 +440,7 @@ function App() {
       profile_bio: String(user.profile_bio || ""),
       role: String(user.role || "member"),
       force_password_change: Boolean(user.force_password_change),
+      organization_ids: Array.isArray(user.organization_ids) ? user.organization_ids : [],
     });
   }
 
@@ -442,6 +464,7 @@ function App() {
     });
 
     await loadUserDirectory();
+    await loadAllUsersGlobal().catch(() => null);
     await loadTeamMembersAndUsers().catch(() => null);
     return { user_id: userId, status: "updated" };
   }
@@ -470,6 +493,8 @@ function App() {
     setGeneratedCredential(`User created. OTP/password: ${String(payload.one_time_password || "")}`);
     setCreateUserForm(DEFAULT_CREATE_USER_FORM);
     await loadUserDirectory();
+    await loadAllUsersGlobal().catch(() => null);
+    await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
     return payload;
   }
 
@@ -502,6 +527,48 @@ function App() {
     setEditUserForm((prev) => ({ ...prev, force_password_change: true }));
     setGeneratedCredential("Forced password reset enabled. User must change password on next login.");
     await loadUserDirectory();
+    await loadAllUsersGlobal().catch(() => null);
+    await loadTeamMembersAndUsers().catch(() => null);
+    return payload;
+  }
+
+  async function bindUserToActiveOrg() {
+    const userId = Number(editUserForm.user_id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new Error("Choose user first");
+    }
+    if (!selectedOrgId) {
+      throw new Error("Select organization first");
+    }
+
+    const payload = await request(`/admin/users/${userId}/organizations/add`, {
+      method: "POST",
+      body: JSON.stringify({ org_id: selectedOrgId, role: editUserForm.role || "member" }),
+    });
+
+    await loadUserDirectory(selectedOrgId).catch(() => null);
+    await loadAllUsersGlobal().catch(() => null);
+    await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
+    await loadTeamMembersAndUsers().catch(() => null);
+    return payload;
+  }
+
+  async function unbindUserFromActiveOrg() {
+    const userId = Number(editUserForm.user_id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new Error("Choose user first");
+    }
+    if (!selectedOrgId) {
+      throw new Error("Select organization first");
+    }
+
+    const payload = await request(`/admin/users/${userId}/organizations/${encodeURIComponent(selectedOrgId)}`, {
+      method: "DELETE",
+    });
+
+    await loadUserDirectory(selectedOrgId).catch(() => null);
+    await loadAllUsersGlobal().catch(() => null);
+    await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
     await loadTeamMembersAndUsers().catch(() => null);
     return payload;
   }
@@ -762,6 +829,7 @@ function App() {
 
     void loadTeamsForOrg(selectedOrgId).catch(() => null);
     void loadUserDirectory(selectedOrgId).catch(() => null);
+    void loadAllUsersGlobal().catch(() => null);
     void loadOrgUsersForTeams(selectedOrgId, "").catch(() => null);
   }, [selectedOrgId, isAuthenticated, isAdmin]);
 
@@ -1074,6 +1142,7 @@ function App() {
                         </label>
                         <div className="admin-actions">
                           <button type="button" className="secondary" disabled={isBusy || !hasOrgId} onClick={() => void runAdminAction("Refresh users", loadUserDirectory)}>Refresh Users</button>
+                          <button type="button" className="ghost" disabled={isBusy} onClick={() => void runAdminAction("Refresh global users", loadAllUsersGlobal)}>Refresh Global</button>
                         </div>
 
                         <h3>Create New User</h3>
@@ -1101,6 +1170,18 @@ function App() {
                           </div>
                         )}
 
+                        <h3>All Users (Cross-Organization)</h3>
+                        {globalUsers.length === 0 ? <div className="empty">No users found.</div> : (
+                          <div className="skills-grid">
+                            {filteredGlobalUsers.map((user) => (
+                              <button type="button" key={`global-${user.user_id}`} className="team-item" onClick={() => selectUserForEdit(user)}>
+                                <strong>{user.full_name || user.email}</strong>
+                                <span>{user.email} | id: {user.user_id} | orgs: {Array.isArray(user.organization_ids) && user.organization_ids.length > 0 ? user.organization_ids.join(", ") : "none"}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
                         <h3>Edit User / Reset Password</h3>
                         <div className="context-grid admin-grid">
                           <label>User ID<input value={editUserForm.user_id} disabled /></label>
@@ -1117,11 +1198,17 @@ function App() {
                               onChange={(event) => setEditUserForm((prev) => ({ ...prev, force_password_change: event.target.checked }))}
                             />
                           </label>
+                          <label>
+                            Organizations
+                            <input value={Array.isArray(editUserForm.organization_ids) && editUserForm.organization_ids.length > 0 ? editUserForm.organization_ids.join(", ") : "none"} disabled />
+                          </label>
                         </div>
                         <div className="admin-actions">
                           <button type="button" className="primary" disabled={isBusy || !editUserForm.user_id} onClick={() => void runAdminAction("Update user", updateUserProfile)}>Save User</button>
                           <button type="button" className="secondary" disabled={isBusy || !editUserForm.user_id} onClick={() => void runAdminAction("Generate one-time password", resetUserOtp)}>Generate OTP</button>
                           <button type="button" className="ghost" disabled={isBusy || !editUserForm.user_id} onClick={() => void runAdminAction("Force password reset", forcePasswordReset)}>Force Password Reset</button>
+                          <button type="button" className="secondary" disabled={isBusy || !editUserForm.user_id || !hasOrgId} onClick={() => void runAdminAction("Bind user to organization", bindUserToActiveOrg)}>Bind To Active Org</button>
+                          <button type="button" className="ghost" disabled={isBusy || !editUserForm.user_id || !hasOrgId} onClick={() => void runAdminAction("Unbind user from organization", unbindUserFromActiveOrg)}>Unbind From Active Org</button>
                         </div>
                         {generatedCredential ? <div className="status card">{generatedCredential}</div> : null}
                       </div>
