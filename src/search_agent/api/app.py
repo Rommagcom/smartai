@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -11,8 +13,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, ValidationError
+from redis import asyncio as redis_async
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -287,6 +290,13 @@ class ChatResponse(BaseModel):
     messages: list[ChatMessage]
 
 
+class WsSendMessageRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    team_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=8000)
+    client_message_id: str | None = Field(default=None, max_length=128)
+
+
 class TeamSummary(BaseModel):
     org_id: str
     team_id: str
@@ -401,6 +411,109 @@ class ApiService:
         self.rbac = RbacStore(db_url)
         self.long_term = LongTermMemoryStore.from_settings(settings)
         self.settings.dynamic_skills_dir.mkdir(parents=True, exist_ok=True)
+
+
+class RealtimeChatHub:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._lock = asyncio.Lock()
+        self._team_sockets: dict[str, set[WebSocket]] = {}
+        self._socket_team: dict[WebSocket, str] = {}
+        self._redis: redis_async.Redis | None = None
+        self._pubsub_task: asyncio.Task[Any] | None = None
+        self._broadcast_channel = f"{settings.redis_key_prefix}:ws:broadcast"
+
+    @staticmethod
+    def _team_key(org_id: str, team_id: str) -> str:
+        return f"{org_id}:{team_id}"
+
+    async def startup(self) -> None:
+        if not self.settings.redis_url:
+            return
+        self._redis = redis_async.from_url(self.settings.redis_url, decode_responses=True)
+        self._pubsub_task = asyncio.create_task(self._redis_listener(), name="chat-ws-redis-listener")
+
+    async def shutdown(self) -> None:
+        if self._pubsub_task is not None:
+            self._pubsub_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._pubsub_task
+            self._pubsub_task = None
+        if self._redis is not None:
+            await self._redis.close()
+            self._redis = None
+
+    async def register_team(self, websocket: WebSocket, org_id: str, team_id: str) -> None:
+        team_key = self._team_key(org_id, team_id)
+        async with self._lock:
+            previous = self._socket_team.get(websocket)
+            if previous and previous in self._team_sockets:
+                self._team_sockets[previous].discard(websocket)
+                if not self._team_sockets[previous]:
+                    del self._team_sockets[previous]
+            self._socket_team[websocket] = team_key
+            self._team_sockets.setdefault(team_key, set()).add(websocket)
+
+    async def unregister(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            team_key = self._socket_team.pop(websocket, None)
+            if team_key and team_key in self._team_sockets:
+                self._team_sockets[team_key].discard(websocket)
+                if not self._team_sockets[team_key]:
+                    del self._team_sockets[team_key]
+
+    async def publish_snapshot(self, snapshot_payload: dict[str, Any]) -> None:
+        if self._redis is not None:
+            await self._redis.publish(self._broadcast_channel, json.dumps(snapshot_payload, ensure_ascii=True))
+        await self._broadcast_local(snapshot_payload)
+
+    async def _broadcast_local(self, snapshot_payload: dict[str, Any]) -> None:
+        org_id = str(snapshot_payload.get("org_id") or "").strip()
+        team_id = str(snapshot_payload.get("team_id") or "").strip()
+        if not org_id or not team_id:
+            return
+        team_key = self._team_key(org_id, team_id)
+        async with self._lock:
+            sockets = list(self._team_sockets.get(team_key, set()))
+
+        dropped: list[WebSocket] = []
+        for socket in sockets:
+            try:
+                await socket.send_json(snapshot_payload)
+            except Exception:
+                dropped.append(socket)
+
+        if dropped:
+            async with self._lock:
+                for socket in dropped:
+                    old_key = self._socket_team.pop(socket, None)
+                    if old_key and old_key in self._team_sockets:
+                        self._team_sockets[old_key].discard(socket)
+                        if not self._team_sockets[old_key]:
+                            del self._team_sockets[old_key]
+
+    async def _redis_listener(self) -> None:
+        if self._redis is None:
+            return
+        pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+        await pubsub.subscribe(self._broadcast_channel)
+        try:
+            while True:
+                message = await pubsub.get_message(timeout=1.0)
+                if not message:
+                    await asyncio.sleep(0.01)
+                    continue
+                raw = message.get("data")
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(str(raw))
+                except json.JSONDecodeError:
+                    continue
+                await self._broadcast_local(payload)
+        finally:
+            await pubsub.unsubscribe(self._broadcast_channel)
+            await pubsub.close()
 
     def _supports_auth_otp_fields(self) -> bool:
         try:
@@ -1879,6 +1992,17 @@ class ApiService:
 settings = load_settings()
 service = ApiService(settings)
 app = FastAPI(title=APP_NAME)
+chat_hub = RealtimeChatHub(settings)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    await chat_hub.startup()
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    await chat_hub.shutdown()
 
 
 def _extract_bearer_token(authorization: str) -> str:
@@ -1894,6 +2018,24 @@ def _extract_bearer_token(authorization: str) -> str:
 def get_current_user(authorization: Annotated[str, Header(alias="Authorization")]) -> dict[str, Any]:
     token = _extract_bearer_token(authorization)
     return service.get_user_from_token(token)
+
+
+def _build_chat_snapshot_payload(
+    *,
+    org_id: str,
+    team_id: str,
+    messages: Sequence[ChatMessage],
+    client_message_id: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "chat.snapshot",
+        "org_id": org_id,
+        "team_id": team_id,
+        "messages": [message.model_dump() for message in messages],
+    }
+    if client_message_id:
+        payload["client_message_id"] = client_message_id
+    return payload
 
 
 @app.get("/api/v1/health")
@@ -2269,8 +2411,15 @@ def delete_dynamic_skill(skill_name: str, user: CurrentUser) -> DynamicSkillDele
 
 
 @app.post("/api/v1/chat/send", responses={403: {"description": "User is not a member of the target team"}})
-def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
-    return service.send_group_chat(user_id=int(user["user_id"]), payload=payload)
+async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
+    response = service.send_group_chat(user_id=int(user["user_id"]), payload=payload)
+    snapshot_payload = _build_chat_snapshot_payload(
+        org_id=payload.org_id,
+        team_id=payload.team_id,
+        messages=response.messages,
+    )
+    await chat_hub.publish_snapshot(snapshot_payload)
+    return response
 
 
 @app.get("/api/v1/chat/messages", responses={403: {"description": "User is not a member of the target team"}})
@@ -2281,3 +2430,87 @@ def chat_messages(
 ) -> list[ChatMessage]:
     service._assert_membership(org_id=org_id, team_id=team_id, user_id=int(user["user_id"]))
     return service._read_group_messages(org_id=org_id, team_id=team_id)
+
+
+@app.websocket("/api/v1/chat/ws")
+async def chat_websocket(websocket: WebSocket) -> None:
+    auth_header = str(websocket.headers.get("authorization") or "").strip()
+    query_token = str(websocket.query_params.get("token") or "").strip()
+    if not auth_header and query_token:
+        auth_header = f"Bearer {query_token}"
+
+    try:
+        token = _extract_bearer_token(auth_header)
+        current_user = service.get_user_from_token(token)
+    except HTTPException:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    await websocket.send_json({"type": "ready"})
+
+    try:
+        while True:
+            incoming = await websocket.receive_json()
+            action = str(incoming.get("action") or "").strip().lower()
+
+            if action == "subscribe":
+                org_id = str(incoming.get("org_id") or "").strip()
+                team_id = str(incoming.get("team_id") or "").strip()
+                if not org_id or not team_id:
+                    await websocket.send_json({"type": "error", "detail": "org_id and team_id are required"})
+                    continue
+
+                try:
+                    service._assert_membership(
+                        org_id=org_id,
+                        team_id=team_id,
+                        user_id=int(current_user["user_id"]),
+                    )
+                except HTTPException:
+                    await websocket.send_json({"type": "error", "detail": "forbidden"})
+                    continue
+
+                await chat_hub.register_team(websocket, org_id, team_id)
+                snapshot = _build_chat_snapshot_payload(
+                    org_id=org_id,
+                    team_id=team_id,
+                    messages=service._read_group_messages(org_id=org_id, team_id=team_id),
+                )
+                await websocket.send_json(snapshot)
+                continue
+
+            if action == "send":
+                try:
+                    request = WsSendMessageRequest.model_validate(incoming)
+                except ValidationError as exc:
+                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                    continue
+
+                try:
+                    response = service.send_group_chat(
+                        user_id=int(current_user["user_id"]),
+                        payload=ChatRequest(
+                            org_id=request.org_id,
+                            team_id=request.team_id,
+                            message=request.message,
+                        ),
+                    )
+                except HTTPException:
+                    await websocket.send_json({"type": "error", "detail": "forbidden"})
+                    continue
+
+                snapshot = _build_chat_snapshot_payload(
+                    org_id=request.org_id,
+                    team_id=request.team_id,
+                    messages=response.messages,
+                    client_message_id=request.client_message_id,
+                )
+                await chat_hub.publish_snapshot(snapshot)
+                continue
+
+            await websocket.send_json({"type": "error", "detail": "unknown action"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await chat_hub.unregister(websocket)

@@ -88,6 +88,7 @@ function App() {
   const [status, setStatus] = useState("Connect to your assistant workspace and start a team conversation.");
   const [isBusy, setIsBusy] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [wsStatus, setWsStatus] = useState("offline");
 
   const [isAdmin, setIsAdmin] = useState(false);
   const [isCheckingAdmin, setIsCheckingAdmin] = useState(false);
@@ -128,6 +129,10 @@ function App() {
   const [adminOutput, setAdminOutput] = useState("No admin actions yet.");
 
   const messagesEndRef = useRef(null);
+  const wsRef = useRef(null);
+  const wsRetryTimerRef = useRef(null);
+  const pendingSendTimeoutRef = useRef(null);
+  const pendingMessageRef = useRef(null);
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
@@ -598,6 +603,39 @@ function App() {
     }
   }
 
+  function clearPendingSendTimeout() {
+    if (pendingSendTimeoutRef.current) {
+      clearTimeout(pendingSendTimeoutRef.current);
+      pendingSendTimeoutRef.current = null;
+    }
+  }
+
+  function buildChatWsUrl() {
+    const httpUrl = new URL(apiBase, window.location.origin);
+    const wsProtocol = httpUrl.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${httpUrl.host}${httpUrl.pathname}/chat/ws?token=${encodeURIComponent(token)}`;
+  }
+
+  function closeChatSocket() {
+    if (wsRetryTimerRef.current) {
+      clearTimeout(wsRetryTimerRef.current);
+      wsRetryTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      const socket = wsRef.current;
+      try {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      } catch {
+        // ignore close errors
+      }
+      wsRef.current = null;
+    }
+  }
+
   async function handleRegister(event) {
     event.preventDefault();
     setIsBusy(true);
@@ -650,8 +688,10 @@ function App() {
       return;
     }
 
+    const clientMessageId = `msg-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
     setPendingMessage({
       temp_id: `pending-${Date.now()}`,
+      client_message_id: clientMessageId,
       sender_type: "user",
       sender_user_id: null,
       content: text,
@@ -659,6 +699,32 @@ function App() {
       pending: true,
     });
     setIsBusy(true);
+
+    const activeSocket = wsRef.current;
+    if (activeSocket && activeSocket.readyState === WebSocket.OPEN && autoRefresh) {
+      try {
+        activeSocket.send(
+          JSON.stringify({
+            action: "send",
+            org_id: activeTeam.org_id,
+            team_id: activeTeam.team_id,
+            message: text,
+            client_message_id: clientMessageId,
+          }),
+        );
+        setMessageDraft("");
+        setStatus("Message sent. Waiting for assistant...");
+        clearPendingSendTimeout();
+        pendingSendTimeoutRef.current = setTimeout(() => {
+          setIsBusy(false);
+          setStatus("Realtime response timeout. You can retry or use Refresh.");
+        }, 25000);
+        return;
+      } catch {
+        // fallback to REST below
+      }
+    }
+
     try {
       const payload = await request("/chat/send", {
         method: "POST",
@@ -672,6 +738,7 @@ function App() {
       setPendingMessage(null);
       setStatus(`Message failed: ${error.message}`);
     } finally {
+      clearPendingSendTimeout();
       setIsBusy(false);
     }
   }
@@ -761,6 +828,8 @@ function App() {
   }
 
   function logout() {
+    closeChatSocket();
+    clearPendingSendTimeout();
     writeStoredToken("");
     setToken("");
     setMessages([]);
@@ -775,10 +844,11 @@ function App() {
     setOrgUsers([]);
     setUserDirectory([]);
     setStatus("Signed out.");
+    setWsStatus("offline");
   }
 
   useEffect(() => {
-    if (!isAuthenticated || !autoRefresh || !activeTeam) {
+    if (!isAuthenticated || !autoRefresh || !activeTeam || wsStatus === "online") {
       return undefined;
     }
 
@@ -787,7 +857,107 @@ function App() {
     }, 7000);
 
     return () => clearInterval(timerId);
-  }, [isAuthenticated, autoRefresh, activeTeam?.org_id, activeTeam?.team_id]);
+  }, [isAuthenticated, autoRefresh, activeTeam?.org_id, activeTeam?.team_id, wsStatus]);
+
+  useEffect(() => {
+    pendingMessageRef.current = pendingMessage;
+  }, [pendingMessage]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !activeTeam || !autoRefresh) {
+      closeChatSocket();
+      setWsStatus("offline");
+      return undefined;
+    }
+
+    let disposed = false;
+
+    function connect() {
+      if (disposed) {
+        return;
+      }
+
+      closeChatSocket();
+      setWsStatus("connecting");
+
+      let socket;
+      try {
+        socket = new WebSocket(buildChatWsUrl());
+      } catch {
+        setWsStatus("offline");
+        wsRetryTimerRef.current = setTimeout(connect, 2000);
+        return;
+      }
+
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        if (disposed) {
+          return;
+        }
+        setWsStatus("online");
+        socket.send(JSON.stringify({ action: "subscribe", org_id: activeTeam.org_id, team_id: activeTeam.team_id }));
+      };
+
+      socket.onmessage = (event) => {
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (payload?.type === "error") {
+          setStatus(`Realtime error: ${payload.detail || "Unknown error"}`);
+          setIsBusy(false);
+          clearPendingSendTimeout();
+          return;
+        }
+
+        if (payload?.type !== "chat.snapshot") {
+          return;
+        }
+
+        if (payload.org_id !== activeTeam.org_id || payload.team_id !== activeTeam.team_id) {
+          return;
+        }
+
+        setMessages(Array.isArray(payload.messages) ? payload.messages : []);
+        const currentPending = pendingMessageRef.current;
+        if (!currentPending) {
+          return;
+        }
+        if (!payload.client_message_id || payload.client_message_id === currentPending.client_message_id) {
+          setPendingMessage(null);
+          setIsBusy(false);
+          clearPendingSendTimeout();
+          setStatus("Assistant responded.");
+        }
+      };
+
+      socket.onerror = () => {
+        if (disposed) {
+          return;
+        }
+        setWsStatus("degraded");
+      };
+
+      socket.onclose = () => {
+        if (disposed) {
+          return;
+        }
+        setWsStatus("offline");
+        wsRetryTimerRef.current = setTimeout(connect, 2000);
+      };
+    }
+
+    connect();
+
+    return () => {
+      disposed = true;
+      closeChatSocket();
+    };
+  }, [isAuthenticated, activeTeam?.org_id, activeTeam?.team_id, autoRefresh, token, apiBase]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -933,7 +1103,7 @@ function App() {
                         {activeTeam ? `${activeTeam.team_name} (${activeTeam.org_id}/${activeTeam.team_id})` : "Select team in sidebar"}
                       </p>
                     </div>
-                    <label className="toggle"><input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />Auto refresh</label>
+                    <label className="toggle"><input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} />Realtime ({wsStatus})</label>
                   </header>
 
                   <div className="messages-wrap">
