@@ -7,7 +7,7 @@ This dynamic tool generates an MP4 video from a source image and text prompt usi
 - Output: JSON string with video metadata and saved file path.
 
 ## Notes
-- Default model is Wan-AI/Wan2.1-I2V-14B-720P-Diffusers.
+- Default model is Wan-AI/Wan2.1-I2V-14B-Diffusers.
 - Input image can be a local path or URL.
 - Output video is saved to generated_videos/ as MP4.
 - GPU is strongly recommended for acceptable generation time.

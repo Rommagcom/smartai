@@ -23,7 +23,7 @@
       "model_id": {
         "type": "string",
         "description": "Hugging Face model id for image-to-video generation",
-        "default": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+        "default": "Wan-AI/Wan2.1-I2V-14B-Diffusers"
       },
       "width": {
         "type": "integer",
@@ -75,7 +75,7 @@
     ]
   },
   "package_files_sha256": {
-    "skill.md": "b8fd00cbf66621a8ab5556c23a4853116fd557d78991d579ac7ac6977e532868",
-    "tool.py": "4d9caf81ad50ea372ef4fc15ad3e2734bf1f81b1311faba6c686d2f9d959b4e4"
+    "skill.md": "9f33dbe7ab462033166c8383d1a974da6b3ed53c590bbf43e9050c22c725e140",
+    "tool.py": "c704a53308838759b634d3e4d1541cf91f9734025467f70e07660ad56a1889b1"
   }
 }

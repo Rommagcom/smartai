@@ -88,7 +88,7 @@ def image_to_video(
     image: str,
     prompt: str,
     negative_prompt: str = "",
-    model_id: str = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+    model_id: str = "Wan-AI/Wan2.1-I2V-14B-Diffusers",
     width: int = 1280,
     height: int = 720,
     num_frames: int = 81,
