@@ -79,7 +79,8 @@ def _load_pipeline(*, model_id: str, dtype: str) -> tuple[Any, Any]:
     pipe = WanPipeline.from_pretrained(
         model_id,
         torch_dtype=torch_dtype,
-        device_map="auto",
+        device_map="balanced",
+        low_cpu_mem_usage=True
     )
 
     # VAE tiling lowers peak VRAM on long clips and high resolution.
