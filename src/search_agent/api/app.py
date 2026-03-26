@@ -552,8 +552,9 @@ class RealtimeChatHub:
                 text(
                     """
                     SELECT 1
-                    FROM app_users
-                    WHERE org_id = :org_id AND role = 'admin'
+                    FROM app_users au
+                    JOIN auth_users u ON u.user_id = au.user_id
+                    WHERE au.org_id = :org_id AND au.role = 'admin'
                     LIMIT 1
                     """
                 ),
