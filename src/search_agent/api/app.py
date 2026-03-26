@@ -192,6 +192,52 @@ def _attach_manifest_hashes(skill_dir: Path, manifest: dict[str, Any]) -> dict[s
     return updated
 
 
+def _extract_image_data_uri_from_tool_messages(messages: list[dict[str, Any]] | None) -> str | None:
+    if not messages:
+        return None
+
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+
+        payload = msg.get("file_payload")
+        if not isinstance(payload, dict):
+            continue
+
+        payload_type = str(payload.get("type") or "").strip().lower()
+        if payload_type != "image":
+            continue
+
+        base64_data = payload.get("base64")
+        base64_omitted = bool(payload.get("base64_omitted"))
+        if not isinstance(base64_data, str) or not base64_data or base64_data == "<omitted>" or base64_omitted:
+            continue
+
+        mime_type = str(payload.get("mime_type") or "image/png").strip() or "image/png"
+        return f"data:{mime_type};base64,{base64_data}"
+
+    return None
+
+
+def _inject_image_markdown(answer: str, data_uri: str | None) -> str:
+    text = str(answer or "")
+    if not data_uri:
+        return text
+
+    # Replace broken placeholders like (data:image/png;base64,<omitted>) with real data URI.
+    replaced = re.sub(r"\(data:image/[^)]*<omitted>\)", f"({data_uri})", text, count=1)
+    if replaced != text:
+        return replaced
+
+    if "data:image/" in text:
+        return text
+
+    tail = text.rstrip()
+    if tail:
+        return f"{tail}\n\n![generated image]({data_uri})"
+    return f"![generated image]({data_uri})"
+
+
 class RegisterRequest(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=256)
@@ -1876,6 +1922,8 @@ class RealtimeChatHub:
                 allowed_dynamic,
             )
             answer = answer_result.answer or "I could not generate a response."
+            image_data_uri = _extract_image_data_uri_from_tool_messages(answer_result.messages)
+            answer = _inject_image_markdown(answer, image_data_uri)
         except Exception:
             answer = "Assistant is temporarily unavailable. Please try again in a moment."
 
