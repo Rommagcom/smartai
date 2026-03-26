@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 _DTYPE_MAP: dict[str, str] = {
-    "float8_e4m3fn": "float8_e4m3fn",
     "float16": "float16",
     "bfloat16": "bfloat16",
     "float32": "float32",
@@ -24,7 +23,7 @@ def _safe_filename(name: str) -> str:
 
 
 def _resolve_dtype(torch_module: Any, dtype: str) -> Any:
-    key = (dtype or "float8_e4m3fn").strip().lower()
+    key = (dtype or "bfloat16").strip().lower()
     if key not in _DTYPE_MAP:
         allowed = ", ".join(sorted(_DTYPE_MAP))
         raise ValueError(f"dtype must be one of: {allowed}")
@@ -54,6 +53,11 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
     except ModuleNotFoundError as exc:
         raise RuntimeError("diffusers is not installed. Install dependency: diffusers") from exc
 
+    try:
+        transformers_module = importlib.import_module("transformers")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("transformers is not installed. Install dependency: transformers") from exc
+
     torch_dtype = _resolve_dtype(torch_module, dtype)
 
     cache_key = (model_id, str(torch_dtype))
@@ -63,30 +67,57 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
 
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
 
-    wan_video_pipeline_cls = getattr(diffusers_module, "WanVideoPipeline", None)
-    auto_t2v_pipeline_cls = getattr(diffusers_module, "AutoPipelineForText2Video", None)
+    wan_pipeline_cls = getattr(diffusers_module, "WanPipeline", None)
+    wan_transformer_cls = getattr(diffusers_module, "WanTransformer3DModel", None)
+    bitsandbytes_cfg_cls = getattr(transformers_module, "BitsAndBytesConfig", None)
+    t5_encoder_cls = getattr(transformers_module, "T5EncoderModel", None)
 
-    if wan_video_pipeline_cls is not None:
-        pipe = wan_video_pipeline_cls.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            token=hf_token,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
-    elif auto_t2v_pipeline_cls is not None:
-        pipe = auto_t2v_pipeline_cls.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            token=hf_token,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
-    else:
+    if None in (wan_pipeline_cls, wan_transformer_cls, bitsandbytes_cfg_cls, t5_encoder_cls):
         raise RuntimeError(
-            "Unsupported diffusers build: neither WanVideoPipeline nor "
-            "AutoPipelineForText2Video is available"
+            "Unsupported runtime for Wan 2.1: required classes are missing "
+            "(WanPipeline, WanTransformer3DModel, BitsAndBytesConfig, T5EncoderModel)"
         )
+
+    bnb_config = bitsandbytes_cfg_cls(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch_dtype,
+        bnb_4bit_quant_type="nf4",
+    )
+
+    transformer = wan_transformer_cls.from_pretrained(
+        model_id,
+        subfolder="transformer",
+        quantization_config=bnb_config,
+        torch_dtype=torch_dtype,
+        token=hf_token,
+    )
+
+    text_encoder = None
+    for text_subfolder in ("text_encoder", "text_encoder_2"):
+        try:
+            text_encoder = t5_encoder_cls.from_pretrained(
+                model_id,
+                subfolder=text_subfolder,
+                quantization_config=bnb_config,
+                torch_dtype=torch_dtype,
+                token=hf_token,
+            )
+            break
+        except Exception:
+            text_encoder = None
+
+    if text_encoder is None:
+        raise RuntimeError("Failed to load T5 encoder from subfolder text_encoder or text_encoder_2")
+
+    pipe = wan_pipeline_cls.from_pretrained(
+        model_id,
+        transformer=transformer,
+        text_encoder=text_encoder,
+        torch_dtype=torch_dtype,
+        device_map="balanced",
+        token=hf_token,
+        low_cpu_mem_usage=True,
+    )
 
     # VAE tiling lowers peak VRAM on long clips and high resolution.
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
@@ -110,9 +141,9 @@ def text_to_video(
     guidance_scale: float = 6.0,
     fps: int = 16,
     seed: int | None = None,
-    dtype: str = "float8_e4m3fn",
+    dtype: str = "bfloat16",
     filename: str | None = None,
-    enable_model_cpu_offload: bool = True,
+    enable_model_cpu_offload: bool = False,
 ) -> str:
     prompt = str(prompt or "").strip()
     if not prompt:

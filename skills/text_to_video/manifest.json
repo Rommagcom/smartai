@@ -58,7 +58,7 @@
       "dtype": {
         "type": "string",
         "description": "Torch dtype for model loading",
-        "default": "float8_e4m3fn"
+        "default": "bfloat16"
       },
       "filename": {
         "type": "string",
@@ -76,6 +76,6 @@
   },
   "package_files_sha256": {
     "skill.md": "41de3e527122a539f8858bee732d0e7dbff29e8d7df772ece52966f5f4ed1c6c",
-    "tool.py": "a446ec1e92f2b9e79e25b85725d5f3e8c11f3976a51281f0913474e6de47959d"
+    "tool.py": "9f44113afa5f2b0bb7ca579d13f31ea1a8742ce89ec5df00c8681f368d47f2f1"
   }
 }
