@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import importlib
 import json
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import torch
+from diffusers import WanPipeline
+from diffusers.utils import export_to_video
 
 _DTYPE_MAP: dict[str, str] = {
     "float16": "float16",
@@ -15,6 +17,17 @@ _DTYPE_MAP: dict[str, str] = {
 }
 
 _PIPELINE_CACHE: dict[tuple[str, str], Any] = {}
+
+_DEFAULT_IMAGE = "smartai_success.png"
+_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+_DEFAULT_WIDTH = 1280
+_DEFAULT_HEIGHT = 720
+_DEFAULT_NUM_FRAMES = 101
+_DEFAULT_NUM_INFERENCE_STEPS = 50
+_DEFAULT_GUIDANCE_SCALE = 6.0
+_DEFAULT_FPS = 25
+_DEFAULT_DTYPE = "bfloat16"
+_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, distorted, static, text, watermark, shaky motion"
 
 
 def _safe_filename(name: str) -> str:
@@ -42,113 +55,11 @@ def _validated_dimension(value: int, field_name: str) -> int:
     return int(value)
 
 
-def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool) -> tuple[Any, Any]:
-    try:
-        torch_module = importlib.import_module("torch")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("torch is not installed. Install dependency: torch") from exc
-
-    try:
-        diffusers_module = importlib.import_module("diffusers")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("diffusers is not installed. Install dependency: diffusers") from exc
-
-    try:
-        transformers_module = importlib.import_module("transformers")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("transformers is not installed. Install dependency: transformers") from exc
-
-    torch_dtype = _resolve_dtype(torch_module, dtype)
-
-    cache_key = (model_id, str(torch_dtype))
-    cached = _PIPELINE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached, torch_module
-
-    hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
-
-    wan_pipeline_cls = getattr(diffusers_module, "WanPipeline", None)
-    wan_transformer_cls = getattr(diffusers_module, "WanTransformer3DModel", None)
-    bitsandbytes_cfg_cls = getattr(transformers_module, "BitsAndBytesConfig", None)
-    t5_encoder_cls = getattr(transformers_module, "T5EncoderModel", None)
-
-    if None in (wan_pipeline_cls, wan_transformer_cls, bitsandbytes_cfg_cls, t5_encoder_cls):
-        raise RuntimeError(
-            "Unsupported runtime for Wan 2.1: required classes are missing "
-            "(WanPipeline, WanTransformer3DModel, BitsAndBytesConfig, T5EncoderModel)"
-        )
-
-    bnb_config = bitsandbytes_cfg_cls(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch_dtype,
-        bnb_4bit_quant_type="nf4",
-    )
-
-    transformer = wan_transformer_cls.from_pretrained(
-        model_id,
-        subfolder="transformer",
-        quantization_config=bnb_config,
-        torch_dtype=torch_dtype,
-        token=hf_token,
-    )
-
-    text_encoder = None
-    for text_subfolder in ("text_encoder", "text_encoder_2"):
-        try:
-            text_encoder = t5_encoder_cls.from_pretrained(
-                model_id,
-                subfolder=text_subfolder,
-                quantization_config=bnb_config,
-                torch_dtype=torch_dtype,
-                token=hf_token,
-            )
-            break
-        except Exception:
-            text_encoder = None
-
-    if text_encoder is None:
-        raise RuntimeError("Failed to load T5 encoder from subfolder text_encoder or text_encoder_2")
-
-    pipe = wan_pipeline_cls.from_pretrained(
-        model_id,
-        transformer=transformer,
-        text_encoder=text_encoder,
-        torch_dtype=torch_dtype,
-        device_map="cuda",
-        token=hf_token,
-        low_cpu_mem_usage=False,
-    )
-
-    # VAE tiling lowers peak VRAM on long clips and high resolution.
-    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        pipe.vae.enable_tiling()
-
-    _PIPELINE_CACHE[cache_key] = pipe
-    return pipe, torch_module
-
-
-def text_to_video(
-    prompt: str,
-    negative_prompt: str = "blurry, low quality, distorted, static, text, watermark, shaky motion",
-    model_id: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers",
-    width: int = 1280,
-    height: int = 720,
-    num_frames: int = 81,
-    num_inference_steps: int = 40,
-    guidance_scale: float = 6.0,
-    fps: int = 16,
-    seed: int | None = None,
-    dtype: str = "bfloat16",
-    filename: str | None = None,
-    enable_model_cpu_offload: bool = False,
-) -> str:
-    prompt = str(prompt or "").strip()
+def _validate_generation_inputs(*, prompt: str, width: int, height: int, num_frames: int, num_inference_steps: int, fps: int) -> None:
     if not prompt:
         raise ValueError("prompt is required")
-
-    width = _validated_dimension(int(width), "width")
-    height = _validated_dimension(int(height), "height")
-
+    if int(width) <= 0 or int(height) <= 0:
+        raise ValueError("width and height must be greater than 0")
     if int(num_frames) <= 0:
         raise ValueError("num_frames must be greater than 0")
     if int(num_inference_steps) <= 0:
@@ -156,24 +67,70 @@ def text_to_video(
     if int(fps) <= 0:
         raise ValueError("fps must be greater than 0")
 
+
+def _load_pipeline(*, model_id: str, dtype: str) -> tuple[Any, Any]:
+    torch_dtype = _resolve_dtype(torch, dtype)
+
+    cache_key = (model_id, str(torch_dtype))
+    cached = _PIPELINE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached, torch
+
+    pipe = WanPipeline.from_pretrained(
+        model_id,
+        torch_dtype=torch_dtype,
+        device_map="auto",
+    )
+
+    # VAE tiling lowers peak VRAM on long clips and high resolution.
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
+
+    _PIPELINE_CACHE[cache_key] = pipe
+    return pipe, torch
+
+
+def text_to_video(
+    prompt: str,
+    filename: str | None = None,
+) -> str:
+    prompt = str(prompt or "").strip()
+
+    width = _validated_dimension(int(_DEFAULT_WIDTH), "width")
+    height = _validated_dimension(int(_DEFAULT_HEIGHT), "height")
+    num_frames = int(_DEFAULT_NUM_FRAMES)
+    num_inference_steps = int(_DEFAULT_NUM_INFERENCE_STEPS)
+    guidance_scale = float(_DEFAULT_GUIDANCE_SCALE)
+    fps = int(_DEFAULT_FPS)
+    seed = None
+    dtype = _DEFAULT_DTYPE
+    image_ref = _DEFAULT_IMAGE
+    model_id = _DEFAULT_MODEL_ID
+    negative_prompt = _DEFAULT_NEGATIVE_PROMPT
+
+    _validate_generation_inputs(
+        prompt=prompt,
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        num_inference_steps=num_inference_steps,
+        fps=fps,
+    )
+
     pipeline, torch_module = _load_pipeline(
         model_id=model_id,
         dtype=dtype,
-        enable_model_cpu_offload=bool(enable_model_cpu_offload),
     )
+
+
 
     generation_kwargs: dict[str, Any] = {
         "prompt": prompt,
-        "negative_prompt": str(negative_prompt or "").strip(),
-        "width": width,
-        "height": height,
-        "num_frames": int(num_frames),
-        "num_inference_steps": int(num_inference_steps),
-        "guidance_scale": float(guidance_scale),
+        "negative_prompt": negative_prompt,
+        "num_frames": num_frames,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
     }
-    if seed is not None:
-        generator_device = "cuda" if bool(getattr(torch_module.cuda, "is_available", lambda: False)()) else "cpu"
-        generation_kwargs["generator"] = torch_module.Generator(device=generator_device).manual_seed(int(seed))
 
     with torch_module.inference_mode():
         result = pipeline(**generation_kwargs)
@@ -189,25 +146,21 @@ def text_to_video(
             final_name += ".mp4"
     else:
         stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        final_name = f"video_{stamp}.mp4"
+        final_name = f"smartai_6000_pro_25fps_{stamp}.mp4"
 
     output_path = output_dir / final_name
-
-    try:
-        utils_module = importlib.import_module("diffusers.utils")
-        export_to_video = getattr(utils_module, "export_to_video")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("diffusers.utils is unavailable. Install dependency: diffusers") from exc
 
     export_to_video(frames, str(output_path), fps=int(fps))
 
     payload: dict[str, object] = {
         "type": "video",
+        "mode": "text_to_video",
         "mime_type": "video/mp4",
         "filename": final_name,
         "path": str(output_path),
         "size_bytes": output_path.stat().st_size,
         "model_id": model_id,
+        "source_image": image_ref,
         "width": width,
         "height": height,
         "num_frames": int(num_frames),
@@ -216,7 +169,6 @@ def text_to_video(
         "fps": int(fps),
         "seed": seed,
         "dtype": str(dtype),
-        "enable_model_cpu_offload": bool(enable_model_cpu_offload),
     }
 
     return json.dumps(payload, ensure_ascii=True)
