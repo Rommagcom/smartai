@@ -287,9 +287,29 @@ class DynamicToolRegistry:
                 check=False,
             )
             if proc.returncode != 0:
-                stderr = (proc.stderr or "").strip()
                 stdout = (proc.stdout or "").strip()
-                details = stderr or stdout or f"exit code {proc.returncode}"
+                stderr = (proc.stderr or "").strip()
+
+                # The sandbox worker reports structured errors to stdout as JSON.
+                # Prefer those details over stderr so warnings do not mask root cause.
+                details = ""
+                if stdout:
+                    try:
+                        failed_response = json.loads(stdout)
+                    except json.JSONDecodeError:
+                        failed_response = None
+
+                    if isinstance(failed_response, dict):
+                        error_text = str(failed_response.get("error") or "").strip()
+                        traceback_text = str(failed_response.get("traceback") or "").strip()
+                        if error_text and traceback_text:
+                            details = f"{error_text}\n{traceback_text}"
+                        else:
+                            details = error_text or traceback_text
+
+                if not details:
+                    details = stderr or stdout or f"exit code {proc.returncode}"
+
                 raise RuntimeError(f"Sandbox runner failed: {details}")
 
             try:
