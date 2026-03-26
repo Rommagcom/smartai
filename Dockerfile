@@ -22,6 +22,7 @@ COPY pyproject.toml README.md ./
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY src ./src
+COPY scripts ./scripts
 COPY skills ./skills
 
 RUN test -f /app/src/search_agent/main.py
@@ -31,7 +32,10 @@ RUN if [ ! -f /app/src/search_agent/__init__.py ]; then \
 
 RUN pip install --no-cache-dir . \
     && python -c "import search_agent; import search_agent.main" \
+    && chmod +x /app/scripts/container_entrypoint.sh \
     && chown -R app:app /app
 USER app
+
+ENTRYPOINT ["/app/scripts/container_entrypoint.sh"]
 
 CMD ["python", "-m", "search_agent.main"]
