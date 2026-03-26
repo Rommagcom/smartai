@@ -93,8 +93,56 @@ function isAllowedImageSrc(src) {
   return false;
 }
 
+function parseImagePayloadFromJson(content) {
+  const text = String(content || "").trim();
+  if (!text || !text.startsWith("{") || !text.endsWith("}")) {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const payloadType = String(parsed.type || "").toLowerCase();
+  if (payloadType !== "image") {
+    return null;
+  }
+
+  const rawBase64 = typeof parsed.base64 === "string" ? parsed.base64.trim() : "";
+  if (!rawBase64 || rawBase64 === "<omitted>") {
+    return null;
+  }
+
+  const mimeType = String(parsed.mime_type || "image/png").trim() || "image/png";
+  const src = `data:${mimeType};base64,${rawBase64}`;
+  if (!isAllowedImageSrc(src)) {
+    return null;
+  }
+
+  return {
+    src,
+    alt: String(parsed.filename || "generated image").trim() || "generated image",
+  };
+}
+
 function renderMessageContent(content) {
   const text = String(content || "");
+  const jsonImage = parseImagePayloadFromJson(text);
+  if (jsonImage) {
+    return (
+      <div className="message-content">
+        <img src={jsonImage.src} alt={jsonImage.alt} loading="lazy" />
+      </div>
+    );
+  }
+
   const imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
   const blocks = [];
   let lastIndex = 0;

@@ -192,7 +192,7 @@ def _attach_manifest_hashes(skill_dir: Path, manifest: dict[str, Any]) -> dict[s
     return updated
 
 
-def _extract_image_data_uri_from_tool_messages(messages: list[dict[str, Any]] | None) -> str | None:
+def _extract_file_payload_from_tool_messages(messages: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     if not messages:
         return None
 
@@ -205,37 +205,43 @@ def _extract_image_data_uri_from_tool_messages(messages: list[dict[str, Any]] | 
             continue
 
         payload_type = str(payload.get("type") or "").strip().lower()
-        if payload_type != "image":
+        if payload_type not in {"image", "file"}:
             continue
 
         base64_data = payload.get("base64")
-        base64_omitted = bool(payload.get("base64_omitted"))
-        if not isinstance(base64_data, str) or not base64_data or base64_data == "<omitted>" or base64_omitted:
+        path_data = payload.get("path")
+        has_base64 = isinstance(base64_data, str) and bool(base64_data) and base64_data != "<omitted>"
+        has_path = isinstance(path_data, str) and bool(path_data.strip())
+        if not has_base64 and not has_path:
             continue
 
-        mime_type = str(payload.get("mime_type") or "image/png").strip() or "image/png"
-        return f"data:{mime_type};base64,{base64_data}"
+        normalized: dict[str, Any] = {
+            "type": payload_type,
+            "filename": str(payload.get("filename") or "generated.bin"),
+            "mime_type": str(payload.get("mime_type") or "application/octet-stream"),
+        }
+        if has_base64:
+            normalized["base64"] = base64_data
+        if has_path:
+            normalized["path"] = path_data
+        for key in (
+            "model_id",
+            "source_image",
+            "width",
+            "height",
+            "num_frames",
+            "num_inference_steps",
+            "guidance_scale",
+            "fps",
+            "seed",
+            "dtype",
+            "size_bytes",
+        ):
+            if key in payload:
+                normalized[key] = payload[key]
+        return normalized
 
     return None
-
-
-def _inject_image_markdown(answer: str, data_uri: str | None) -> str:
-    text = str(answer or "")
-    if not data_uri:
-        return text
-
-    # Replace broken placeholders like (data:image/png;base64,<omitted>) with real data URI.
-    replaced = re.sub(r"\(data:image/[^)]*<omitted>\)", f"({data_uri})", text, count=1)
-    if replaced != text:
-        return replaced
-
-    if "data:image/" in text:
-        return text
-
-    tail = text.rstrip()
-    if tail:
-        return f"{tail}\n\n![generated image]({data_uri})"
-    return f"![generated image]({data_uri})"
 
 
 class RegisterRequest(BaseModel):
@@ -1922,8 +1928,9 @@ class RealtimeChatHub:
                 allowed_dynamic,
             )
             answer = answer_result.answer or "I could not generate a response."
-            image_data_uri = _extract_image_data_uri_from_tool_messages(answer_result.messages)
-            answer = _inject_image_markdown(answer, image_data_uri)
+            file_payload = _extract_file_payload_from_tool_messages(answer_result.messages)
+            if file_payload is not None:
+                answer = json.dumps(file_payload, ensure_ascii=True)
         except Exception:
             answer = "Assistant is temporarily unavailable. Please try again in a moment."
 
