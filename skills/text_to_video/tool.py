@@ -114,7 +114,7 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
         transformer=transformer,
         text_encoder=text_encoder,
         torch_dtype=torch_dtype,
-        device_map="auto",
+        device_map="cuda",
         token=hf_token,
         low_cpu_mem_usage=False,
     )
