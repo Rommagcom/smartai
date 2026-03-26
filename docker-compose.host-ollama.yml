@@ -1,4 +1,19 @@
 services:
+  hf-cache-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sai-bot:latest
+    container_name: sai-hf-cache-init
+    user: root
+    restart: "no"
+    command:
+      - sh
+      - -lc
+      - mkdir -p /home/app/.cache/huggingface ; chown -R app:app /home/app/.cache ; chmod -R u+rwX /home/app/.cache
+    volumes:
+      - huggingface-cache:/home/app/.cache/huggingface
+
   redis:
     image: redis:7.4-alpine
     container_name: sai-redis
@@ -52,6 +67,8 @@ services:
       - huggingface-cache:/home/app/.cache/huggingface
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
     depends_on:
+      hf-cache-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
@@ -88,6 +105,8 @@ services:
       retries: 20
       start_period: 20s
     depends_on:
+      hf-cache-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       postgres:
