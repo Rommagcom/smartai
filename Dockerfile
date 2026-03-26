@@ -9,7 +9,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends fonts-dejavu-core wkhtmltopdf \
+    && apt-get install -y --no-install-recommends git fonts-dejavu-core wkhtmltopdf \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app --create-home app
