@@ -549,6 +549,7 @@ async def start_bot() -> None:
             user_id=context.user_id,
             role=context.role,
             all_dynamic_tools=all_tools,
+            team_id=context.team_id,
         )
 
     reminder_task = asyncio.create_task(
