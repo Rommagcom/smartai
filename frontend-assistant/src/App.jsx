@@ -93,43 +93,105 @@ function isAllowedImageSrc(src) {
   return false;
 }
 
-function parseImagePayloadFromJson(content) {
+function parseJsonObjectCandidates(content) {
   const text = String(content || "").trim();
-  if (!text || !text.startsWith("{") || !text.endsWith("}")) {
+  if (!text) {
+    return [];
+  }
+
+  const candidates = [text];
+
+  if (text.includes("```")) {
+    const parts = text.split("```");
+    for (const part of parts) {
+      let candidate = String(part || "").trim();
+      if (!candidate) {
+        continue;
+      }
+      if (candidate.startsWith("json")) {
+        candidate = candidate.slice(4).trim();
+      }
+      if (candidate.startsWith("{") && candidate.endsWith("}")) {
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    candidates.push(text.slice(start, end + 1));
+  }
+
+  const parsedObjects = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        parsedObjects.push(parsed);
+        continue;
+      }
+      if (typeof parsed === "string") {
+        try {
+          const nested = JSON.parse(parsed);
+          if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+            parsedObjects.push(nested);
+          }
+        } catch {
+          // ignore non-JSON nested string
+        }
+      }
+    } catch {
+      // ignore non-JSON candidate
+    }
+  }
+
+  return parsedObjects;
+}
+
+function parseImagePayloadFromJson(content) {
+  const objects = parseJsonObjectCandidates(content);
+  if (objects.length === 0) {
     return null;
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
+  for (const parsed of objects) {
+    const payload = parsed && typeof parsed.file_payload === "object" ? parsed.file_payload : parsed;
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+
+    const payloadType = String(payload.type || "").trim().toLowerCase();
+    const mimeType = String(payload.mime_type || "").trim();
+    const isImagePayload = payloadType === "image" || (payloadType === "file" && mimeType.startsWith("image/"));
+    if (!isImagePayload) {
+      continue;
+    }
+
+    const base64Omitted = Boolean(payload.base64_omitted);
+    const rawBase64 = typeof payload.base64 === "string" ? payload.base64.trim() : "";
+    if (!rawBase64 || rawBase64 === "<omitted>" || base64Omitted) {
+      continue;
+    }
+
+    const resolvedMimeType = mimeType || "image/png";
+    const src = `data:${resolvedMimeType};base64,${rawBase64}`;
+    if (!isAllowedImageSrc(src)) {
+      continue;
+    }
+
+    return {
+      src,
+      alt: String(payload.filename || "generated image").trim() || "generated image",
+    };
   }
 
-  if (!parsed || typeof parsed !== "object") {
-    return null;
-  }
-
-  const payloadType = String(parsed.type || "").toLowerCase();
-  if (payloadType !== "image") {
-    return null;
-  }
-
-  const rawBase64 = typeof parsed.base64 === "string" ? parsed.base64.trim() : "";
-  if (!rawBase64 || rawBase64 === "<omitted>") {
-    return null;
-  }
-
-  const mimeType = String(parsed.mime_type || "image/png").trim() || "image/png";
-  const src = `data:${mimeType};base64,${rawBase64}`;
-  if (!isAllowedImageSrc(src)) {
-    return null;
-  }
-
-  return {
-    src,
-    alt: String(parsed.filename || "generated image").trim() || "generated image",
-  };
+  return null;
 }
 
 function renderMessageContent(content) {
@@ -141,6 +203,19 @@ function renderMessageContent(content) {
         <img src={jsonImage.src} alt={jsonImage.alt} loading="lazy" />
       </div>
     );
+  }
+
+  const inlineDataUrlPattern = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+/;
+  const inlineDataUrlMatch = inlineDataUrlPattern.exec(text);
+  if (inlineDataUrlMatch) {
+    const src = String(inlineDataUrlMatch[0] || "").replaceAll(/\s+/g, "").trim();
+    if (isAllowedImageSrc(src)) {
+      return (
+        <div className="message-content">
+          <img src={src} alt="generated" loading="lazy" />
+        </div>
+      );
+    }
   }
 
   const imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
