@@ -412,7 +412,7 @@ RBAC and reminder actions are written to `audit_events` with:
 - `DYNAMIC_SKILL_STRICT_ARGS=true|false`: enforce strict schema argument policy (required/type/enum/extra args)
 - `DYNAMIC_SKILL_MAX_STRING_LENGTH=10000`: max string length for a single tool argument
 - `DYNAMIC_SKILL_MAX_ARGS_BYTES=50000`: max serialized arguments payload size in bytes
-- `DYNAMIC_SKILL_TIMEOUT_SECONDS=20`: timeout for sandboxed dynamic skill execution
+- `DYNAMIC_SKILL_TIMEOUT_SECONDS=600`: timeout for sandboxed dynamic skill execution
 - `DYNAMIC_SKILL_REQUIRE_INTEGRITY=true|false`: require `package_files_sha256` in each manifest
 - `DYNAMIC_SKILL_REQUIRE_SIGNATURE=true|false`: require valid skill package signature
 - `DYNAMIC_SKILL_SIGNING_KEY=...`: shared secret used to verify `hmac-sha256` manifest signatures
