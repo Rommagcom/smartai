@@ -114,17 +114,14 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
         transformer=transformer,
         text_encoder=text_encoder,
         torch_dtype=torch_dtype,
-        device_map="balanced",
+        device_map="auto",
         token=hf_token,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False,
     )
 
     # VAE tiling lowers peak VRAM on long clips and high resolution.
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
-
-    if enable_model_cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
-        pipe.enable_model_cpu_offload()
 
     _PIPELINE_CACHE[cache_key] = pipe
     return pipe, torch_module
@@ -132,7 +129,7 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
 
 def text_to_video(
     prompt: str,
-    negative_prompt: str = "",
+    negative_prompt: str = "blurry, low quality, distorted, static, text, watermark, shaky motion",
     model_id: str = "Wan-AI/Wan2.1-T2V-14B-Diffusers",
     width: int = 1280,
     height: int = 720,

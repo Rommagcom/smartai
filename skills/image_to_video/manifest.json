@@ -77,5 +77,7 @@
   "package_files_sha256": {
     "skill.md": "9f33dbe7ab462033166c8383d1a974da6b3ed53c590bbf43e9050c22c725e140",
     "tool.py": "c704a53308838759b634d3e4d1541cf91f9734025467f70e07660ad56a1889b1"
-  }
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "6f8dfb247d0f2d32f236a84267dcae255d8a93814aa56ad3d7ffa779e4786542"
 }

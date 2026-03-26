@@ -11,63 +11,13 @@
         "type": "string",
         "description": "Text prompt describing the desired video"
       },
-      "negative_prompt": {
-        "type": "string",
-        "description": "Optional negative prompt to suppress unwanted artifacts",
-        "default": ""
-      },
-      "model_id": {
-        "type": "string",
-        "description": "Hugging Face model id for text-to-video generation",
-        "default": "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-      },
-      "width": {
-        "type": "integer",
-        "description": "Output width, must be a multiple of 16",
-        "default": 1280
-      },
-      "height": {
-        "type": "integer",
-        "description": "Output height, must be a multiple of 16",
-        "default": 720
-      },
-      "num_frames": {
-        "type": "integer",
-        "description": "Number of frames in generated video",
-        "default": 81
-      },
-      "num_inference_steps": {
-        "type": "integer",
-        "description": "Inference steps for generation quality/speed trade-off",
-        "default": 40
-      },
-      "guidance_scale": {
-        "type": "number",
-        "description": "Classifier-free guidance scale",
-        "default": 6.0
-      },
-      "fps": {
-        "type": "integer",
-        "description": "Frames per second of saved MP4",
-        "default": 16
-      },
       "seed": {
         "type": "integer",
         "description": "Optional random seed for reproducible outputs"
       },
-      "dtype": {
-        "type": "string",
-        "description": "Torch dtype for model loading",
-        "default": "bfloat16"
-      },
       "filename": {
         "type": "string",
         "description": "Optional output filename (mp4 extension added automatically)"
-      },
-      "enable_model_cpu_offload": {
-        "type": "boolean",
-        "description": "Enable model CPU offload to reduce GPU memory pressure",
-        "default": true
       }
     },
     "required": [
@@ -76,6 +26,8 @@
   },
   "package_files_sha256": {
     "skill.md": "41de3e527122a539f8858bee732d0e7dbff29e8d7df772ece52966f5f4ed1c6c",
-    "tool.py": "9f44113afa5f2b0bb7ca579d13f31ea1a8742ce89ec5df00c8681f368d47f2f1"
-  }
+    "tool.py": "ab8586e5002722fb370730bd846438c8bf65735cf202703f574cc42bb1f469b5"
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "935a051c1c186488af90369ec56a640edbe77319624c42867eb9c2bc02ec34cf"
 }
