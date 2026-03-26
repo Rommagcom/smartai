@@ -111,9 +111,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
       HF_HOME: /home/app/.cache/huggingface
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       REMINDER_DATABASE_URL: postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src
+    gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
@@ -141,9 +144,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
       HF_HOME: /home/app/.cache/huggingface
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       REMINDER_DATABASE_URL: postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src
+    gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.api_main"]
