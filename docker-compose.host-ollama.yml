@@ -44,9 +44,12 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      HF_HOME: /home/app/.cache/huggingface
       REMINDER_DATABASE_URL: postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src
+    volumes:
+      - huggingface-cache:/home/app/.cache/huggingface
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
     depends_on:
       redis:
@@ -69,9 +72,12 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      HF_HOME: /home/app/.cache/huggingface
       REMINDER_DATABASE_URL: postgresql+psycopg://postgresai:aipostgresai@postgres:5432/sai_reminders
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app/src
+    volumes:
+      - huggingface-cache:/home/app/.cache/huggingface
     command: ["sh", "-c", "alembic upgrade head && python -m search_agent.api_main"]
     ports:
       - "8000:8000"
@@ -102,3 +108,4 @@ services:
 
 volumes:
   postgres-data:
+  huggingface-cache:
