@@ -118,6 +118,16 @@ function App() {
   const [createTeamForm, setCreateTeamForm] = useState(DEFAULT_CREATE_TEAM_FORM);
   const [createUserForm, setCreateUserForm] = useState(DEFAULT_CREATE_USER_FORM);
   const [editUserForm, setEditUserForm] = useState(DEFAULT_EDIT_USER_FORM);
+  const [transferSourceOrgId, setTransferSourceOrgId] = useState("");
+  const [transferTargetOrgId, setTransferTargetOrgId] = useState("");
+  const [transferRole, setTransferRole] = useState("member");
+  const [keepSourceMembership, setKeepSourceMembership] = useState(false);
+  const [bulkTransferUserIds, setBulkTransferUserIds] = useState([]);
+  const [bulkTransferSourceOrgId, setBulkTransferSourceOrgId] = useState("");
+  const [bulkTransferTargetOrgId, setBulkTransferTargetOrgId] = useState("");
+  const [bulkTransferRole, setBulkTransferRole] = useState("member");
+  const [bulkKeepSourceMembership, setBulkKeepSourceMembership] = useState(false);
+  const [bulkFilterBySourceOrg, setBulkFilterBySourceOrg] = useState(true);
 
   const [userDirectory, setUserDirectory] = useState([]);
   const [globalUsers, setGlobalUsers] = useState([]);
@@ -185,6 +195,20 @@ function App() {
       return blob.includes(query);
     });
   }, [globalUsers, usersSearch]);
+
+  const bulkVisibleUsers = useMemo(() => {
+    if (!bulkFilterBySourceOrg) {
+      return filteredGlobalUsers;
+    }
+    const sourceOrg = String(bulkTransferSourceOrgId || "").trim();
+    if (!sourceOrg) {
+      return filteredGlobalUsers;
+    }
+    return filteredGlobalUsers.filter((user) => {
+      const orgIds = Array.isArray(user.organization_ids) ? user.organization_ids.map(String) : [];
+      return orgIds.includes(sourceOrg);
+    });
+  }, [filteredGlobalUsers, bulkFilterBySourceOrg, bulkTransferSourceOrgId]);
 
   const filteredSkills = useMemo(() => {
     const query = skillsSearch.trim().toLowerCase();
@@ -433,10 +457,23 @@ function App() {
     const payload = await request("/admin/users/all");
     const list = Array.isArray(payload) ? payload : [];
     setGlobalUsers(list);
-    return { users: list.length };
+    setBulkTransferUserIds((prev) => {
+      const available = new Set(list.map((item) => Number(item.user_id)));
+      return prev.filter((userId) => available.has(Number(userId)));
+    });
+    return { users: list.length, list };
   }
 
   function selectUserForEdit(user) {
+    const fallbackGlobal = globalUsers.find((item) => Number(item.user_id) === Number(user.user_id));
+    const sourceOrgIds = Array.isArray(user.organization_ids) ? user.organization_ids : fallbackGlobal?.organization_ids;
+    const orgIds = Array.isArray(sourceOrgIds) ? sourceOrgIds.filter(Boolean) : [];
+    const firstOrg = orgIds[0] || "";
+    const fallbackTarget =
+      orgIds.find((orgId) => String(orgId) !== firstOrg) ||
+      organizations.find((org) => String(org.org_id || "") !== firstOrg)?.org_id ||
+      "";
+
     setEditUserForm({
       user_id: String(user.user_id || ""),
       email: String(user.email || ""),
@@ -445,8 +482,13 @@ function App() {
       profile_bio: String(user.profile_bio || ""),
       role: String(user.role || "member"),
       force_password_change: Boolean(user.force_password_change),
-      organization_ids: Array.isArray(user.organization_ids) ? user.organization_ids : [],
+      organization_ids: orgIds,
     });
+
+    setTransferSourceOrgId(firstOrg);
+    setTransferTargetOrgId(String(fallbackTarget || ""));
+    setTransferRole(String(user.role || "member"));
+    setKeepSourceMembership(false);
   }
 
   async function updateUserProfile() {
@@ -576,6 +618,107 @@ function App() {
     await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
     await loadTeamMembersAndUsers().catch(() => null);
     return payload;
+  }
+
+  async function reassignUserOrganization() {
+    const userId = Number(editUserForm.user_id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new Error("Choose user first");
+    }
+
+    const sourceOrg = String(transferSourceOrgId || "").trim();
+    const targetOrg = String(transferTargetOrgId || "").trim();
+    if (!sourceOrg || !targetOrg) {
+      throw new Error("Select source and target organizations");
+    }
+    if (sourceOrg === targetOrg) {
+      throw new Error("Source and target organizations must be different");
+    }
+
+    await request(`/admin/users/${userId}/organizations/add`, {
+      method: "POST",
+      body: JSON.stringify({ org_id: targetOrg, role: transferRole || editUserForm.role || "member" }),
+    });
+
+    if (!keepSourceMembership) {
+      await request(`/admin/users/${userId}/organizations/${encodeURIComponent(sourceOrg)}`, {
+        method: "DELETE",
+      });
+    }
+
+    await loadUserDirectory(selectedOrgId).catch(() => null);
+    const refreshed = await loadAllUsersGlobal();
+    await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
+    await loadTeamMembersAndUsers().catch(() => null);
+
+    const updatedUser = Array.isArray(refreshed.list)
+      ? refreshed.list.find((item) => Number(item.user_id) === userId)
+      : null;
+    if (updatedUser) {
+      selectUserForEdit(updatedUser);
+    } else {
+      setTransferSourceOrgId("");
+      setTransferTargetOrgId("");
+    }
+
+    return {
+      user_id: userId,
+      source_org: sourceOrg,
+      target_org: targetOrg,
+      removed_from_source: !keepSourceMembership,
+    };
+  }
+
+  async function bulkReassignUsersOrganizations() {
+    const selectedIds = [...new Set(bulkTransferUserIds.map(Number).filter((item) => Number.isInteger(item) && item > 0))];
+    if (selectedIds.length === 0) {
+      throw new Error("Select users for bulk reassignment");
+    }
+
+    const sourceOrg = String(bulkTransferSourceOrgId || "").trim();
+    const targetOrg = String(bulkTransferTargetOrgId || "").trim();
+    if (!sourceOrg || !targetOrg) {
+      throw new Error("Select source and target organizations");
+    }
+    if (sourceOrg === targetOrg) {
+      throw new Error("Source and target organizations must be different");
+    }
+
+    let moved = 0;
+    let addedOnly = 0;
+    for (const userId of selectedIds) {
+      const user = globalUsers.find((item) => Number(item.user_id) === userId);
+      const orgIds = Array.isArray(user?.organization_ids) ? user.organization_ids.map(String) : [];
+      const hasSourceMembership = orgIds.includes(sourceOrg);
+
+      await request(`/admin/users/${userId}/organizations/add`, {
+        method: "POST",
+        body: JSON.stringify({ org_id: targetOrg, role: bulkTransferRole || "member" }),
+      });
+
+      if (!bulkKeepSourceMembership && hasSourceMembership) {
+        await request(`/admin/users/${userId}/organizations/${encodeURIComponent(sourceOrg)}`, {
+          method: "DELETE",
+        });
+        moved += 1;
+      } else {
+        addedOnly += 1;
+      }
+    }
+
+    await loadUserDirectory(selectedOrgId).catch(() => null);
+    await loadAllUsersGlobal();
+    await loadOrgUsersForTeams(selectedOrgId).catch(() => null);
+    await loadTeamMembersAndUsers().catch(() => null);
+
+    return {
+      selected_users: selectedIds.length,
+      moved,
+      added_only: addedOnly,
+      source_org: sourceOrg,
+      target_org: targetOrg,
+      kept_source_membership: bulkKeepSourceMembership,
+    };
   }
 
   async function fetchMessagesFor(team, silent = false) {
@@ -797,6 +940,25 @@ function App() {
     });
   }
 
+  function toggleBulkUserSelection(userId, checked) {
+    const normalized = Number(userId);
+    setBulkTransferUserIds((prev) => {
+      if (checked) {
+        return [...new Set([...prev, normalized])];
+      }
+      return prev.filter((item) => Number(item) !== normalized);
+    });
+  }
+
+  function selectAllVisibleGlobalUsers() {
+    const visibleIds = bulkVisibleUsers.map((user) => Number(user.user_id)).filter((userId) => Number.isInteger(userId) && userId > 0);
+    setBulkTransferUserIds((prev) => [...new Set([...prev, ...visibleIds])]);
+  }
+
+  function clearBulkUserSelection() {
+    setBulkTransferUserIds([]);
+  }
+
   function toggleTeamSkill(toolName, checked) {
     setTeamSelectedSkills((prev) => {
       if (checked) {
@@ -1000,8 +1162,29 @@ function App() {
     void loadTeamsForOrg(selectedOrgId).catch(() => null);
     void loadUserDirectory(selectedOrgId).catch(() => null);
     void loadAllUsersGlobal().catch(() => null);
-    void loadOrgUsersForTeams(selectedOrgId, "").catch(() => null);
+    void loadOrgUsersForTeams(selectedOrgId).catch(() => null);
   }, [selectedOrgId, isAuthenticated, isAdmin]);
+
+  useEffect(() => {
+    if (!selectedOrgId) {
+      return;
+    }
+    if (!transferTargetOrgId) {
+      setTransferTargetOrgId(String(selectedOrgId));
+    }
+  }, [selectedOrgId, transferTargetOrgId]);
+
+  useEffect(() => {
+    if (!selectedOrgId) {
+      return;
+    }
+    if (!bulkTransferSourceOrgId) {
+      setBulkTransferSourceOrgId(String(selectedOrgId));
+    }
+    if (!bulkTransferTargetOrgId) {
+      setBulkTransferTargetOrgId(String(selectedOrgId));
+    }
+  }, [selectedOrgId, bulkTransferSourceOrgId, bulkTransferTargetOrgId]);
 
   useEffect(() => {
     if (!isAuthenticated || !isAdmin || !selectedOrgId || !selectedTeamId) {
@@ -1352,6 +1535,86 @@ function App() {
                           </div>
                         )}
 
+                        <h3>Bulk Reassign Users Between Organizations</h3>
+                        <div className="context-grid admin-grid">
+                          <label>
+                            Source Organization
+                            <select value={bulkTransferSourceOrgId} onChange={(event) => setBulkTransferSourceOrgId(event.target.value)}>
+                              <option value="">Select source</option>
+                              {organizations.map((org) => (
+                                <option key={`bulk-source-${org.org_id}`} value={org.org_id}>{org.org_id}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Target Organization
+                            <select value={bulkTransferTargetOrgId} onChange={(event) => setBulkTransferTargetOrgId(event.target.value)}>
+                              <option value="">Select target</option>
+                              {organizations.map((org) => (
+                                <option key={`bulk-target-${org.org_id}`} value={org.org_id}>{org.org_id}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Role In Target Organization
+                            <select value={bulkTransferRole} onChange={(event) => setBulkTransferRole(event.target.value)}>
+                              <option value="admin">admin</option>
+                              <option value="manager">manager</option>
+                              <option value="member">member</option>
+                            </select>
+                          </label>
+                          <label>
+                            Keep Membership In Source Organization
+                            <input type="checkbox" checked={bulkKeepSourceMembership} onChange={(event) => setBulkKeepSourceMembership(event.target.checked)} />
+                          </label>
+                        </div>
+                        <div className="admin-actions">
+                          <button type="button" className="ghost" disabled={bulkVisibleUsers.length === 0} onClick={selectAllVisibleGlobalUsers}>Select Visible Users</button>
+                          <button type="button" className="ghost" disabled={bulkTransferUserIds.length === 0} onClick={clearBulkUserSelection}>Clear Selection</button>
+                        </div>
+                        <label>
+                          Show Only Users From Source Organization
+                          <input
+                            type="checkbox"
+                            checked={bulkFilterBySourceOrg}
+                            onChange={(event) => setBulkFilterBySourceOrg(event.target.checked)}
+                          />
+                        </label>
+                        <div className="skills-summary">
+                          <span>Selected users: {bulkTransferUserIds.length}</span>
+                          <span>Visible users: {bulkVisibleUsers.length}</span>
+                        </div>
+                        {bulkVisibleUsers.length === 0 ? <div className="empty">No users for bulk selection.</div> : (
+                          <div className="skills-grid">
+                            {bulkVisibleUsers.map((user) => (
+                              <label key={`bulk-user-${user.user_id}`} className="skill-item">
+                                <input
+                                  type="checkbox"
+                                  checked={bulkTransferUserIds.includes(Number(user.user_id))}
+                                  onChange={(event) => toggleBulkUserSelection(Number(user.user_id), event.target.checked)}
+                                />
+                                <span>{user.full_name || user.email} (id: {user.user_id}) | orgs: {Array.isArray(user.organization_ids) && user.organization_ids.length > 0 ? user.organization_ids.join(", ") : "none"}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                        <div className="admin-actions">
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={
+                              isBusy ||
+                              bulkTransferUserIds.length === 0 ||
+                              !bulkTransferSourceOrgId ||
+                              !bulkTransferTargetOrgId ||
+                              bulkTransferSourceOrgId === bulkTransferTargetOrgId
+                            }
+                            onClick={() => void runAdminAction("Bulk reassign users between organizations", bulkReassignUsersOrganizations)}
+                          >
+                            Bulk Reassign
+                          </button>
+                        </div>
+
                         <h3>Edit User / Reset Password</h3>
                         <div className="context-grid admin-grid">
                           <label>User ID<input value={editUserForm.user_id} disabled /></label>
@@ -1379,6 +1642,73 @@ function App() {
                           <button type="button" className="ghost" disabled={isBusy || !editUserForm.user_id} onClick={() => void runAdminAction("Force password reset", forcePasswordReset)}>Force Password Reset</button>
                           <button type="button" className="secondary" disabled={isBusy || !editUserForm.user_id || !hasOrgId} onClick={() => void runAdminAction("Bind user to organization", bindUserToActiveOrg)}>Bind To Active Org</button>
                           <button type="button" className="ghost" disabled={isBusy || !editUserForm.user_id || !hasOrgId} onClick={() => void runAdminAction("Unbind user from organization", unbindUserFromActiveOrg)}>Unbind From Active Org</button>
+                        </div>
+
+                        <h3>Reassign User Between Organizations</h3>
+                        <div className="context-grid admin-grid">
+                          <label>
+                            Source Organization
+                            <select
+                              value={transferSourceOrgId}
+                              onChange={(event) => setTransferSourceOrgId(event.target.value)}
+                              disabled={!editUserForm.user_id}
+                            >
+                              <option value="">Select source</option>
+                              {(Array.isArray(editUserForm.organization_ids) ? editUserForm.organization_ids : []).map((orgId) => (
+                                <option key={`source-${orgId}`} value={orgId}>{orgId}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Target Organization
+                            <select
+                              value={transferTargetOrgId}
+                              onChange={(event) => setTransferTargetOrgId(event.target.value)}
+                              disabled={!editUserForm.user_id}
+                            >
+                              <option value="">Select target</option>
+                              {organizations.map((org) => (
+                                <option key={`target-${org.org_id}`} value={org.org_id}>{org.org_id}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Role In Target Organization
+                            <select
+                              value={transferRole}
+                              onChange={(event) => setTransferRole(event.target.value)}
+                              disabled={!editUserForm.user_id}
+                            >
+                              <option value="admin">admin</option>
+                              <option value="manager">manager</option>
+                              <option value="member">member</option>
+                            </select>
+                          </label>
+                          <label>
+                            Keep Membership In Source Organization
+                            <input
+                              type="checkbox"
+                              checked={keepSourceMembership}
+                              onChange={(event) => setKeepSourceMembership(event.target.checked)}
+                              disabled={!editUserForm.user_id}
+                            />
+                          </label>
+                        </div>
+                        <div className="admin-actions">
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={
+                              isBusy ||
+                              !editUserForm.user_id ||
+                              !transferSourceOrgId ||
+                              !transferTargetOrgId ||
+                              transferSourceOrgId === transferTargetOrgId
+                            }
+                            onClick={() => void runAdminAction("Reassign user between organizations", reassignUserOrganization)}
+                          >
+                            Reassign Organization
+                          </button>
                         </div>
                         {generatedCredential ? <div className="status card">{generatedCredential}</div> : null}
                       </div>
