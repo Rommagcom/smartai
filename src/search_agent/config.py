@@ -68,7 +68,7 @@ def load_settings() -> Settings:
     admin_ids_raw = os.getenv("TELEGRAM_ADMIN_USER_IDS", "")
     admin_ids: set[int] = set()
     for part in admin_ids_raw.split(","):
-        part = part.strip()
+        part = part.strip().strip("\"'")
         if not part:
             continue
         try:
