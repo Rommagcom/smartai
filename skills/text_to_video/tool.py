@@ -54,7 +54,6 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
     except ModuleNotFoundError as exc:
         raise RuntimeError("diffusers is not installed. Install dependency: diffusers") from exc
 
-    wan_video_pipeline_cls = getattr(diffusers_module, "WanVideoPipeline")
     torch_dtype = _resolve_dtype(torch_module, dtype)
 
     cache_key = (model_id, str(torch_dtype))
@@ -64,13 +63,30 @@ def _load_pipeline(*, model_id: str, dtype: str, enable_model_cpu_offload: bool)
 
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
 
-    pipe = wan_video_pipeline_cls.from_pretrained(
-        model_id,
-        torch_dtype=torch_dtype,
-        token=hf_token,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-    )
+    wan_video_pipeline_cls = getattr(diffusers_module, "WanVideoPipeline", None)
+    auto_t2v_pipeline_cls = getattr(diffusers_module, "AutoPipelineForText2Video", None)
+
+    if wan_video_pipeline_cls is not None:
+        pipe = wan_video_pipeline_cls.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            token=hf_token,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+    elif auto_t2v_pipeline_cls is not None:
+        pipe = auto_t2v_pipeline_cls.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            token=hf_token,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+        )
+    else:
+        raise RuntimeError(
+            "Unsupported diffusers build: neither WanVideoPipeline nor "
+            "AutoPipelineForText2Video is available"
+        )
 
     # VAE tiling lowers peak VRAM on long clips and high resolution.
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
@@ -128,7 +144,8 @@ def text_to_video(
         "guidance_scale": float(guidance_scale),
     }
     if seed is not None:
-        generation_kwargs["generator"] = torch_module.Generator(device="cuda").manual_seed(int(seed))
+        generator_device = "cuda" if bool(getattr(torch_module.cuda, "is_available", lambda: False)()) else "cpu"
+        generation_kwargs["generator"] = torch_module.Generator(device=generator_device).manual_seed(int(seed))
 
     with torch_module.inference_mode():
         result = pipeline(**generation_kwargs)
