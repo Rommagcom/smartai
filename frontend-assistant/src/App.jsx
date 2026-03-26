@@ -79,6 +79,66 @@ function parseApiError(payload) {
   return "";
 }
 
+function isAllowedImageSrc(src) {
+  const value = String(src || "").trim();
+  if (!value) {
+    return false;
+  }
+  if (value.startsWith("data:image/")) {
+    return true;
+  }
+  if (value.startsWith("https://") || value.startsWith("http://") || value.startsWith("blob:")) {
+    return true;
+  }
+  return false;
+}
+
+function renderMessageContent(content) {
+  const text = String(content || "");
+  const imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const blocks = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = imagePattern.exec(text)) !== null) {
+    const fullMatch = match[0];
+    const alt = String(match[1] || "image").trim() || "image";
+    const src = String(match[2] || "").trim();
+    const start = match.index;
+
+    if (start > lastIndex) {
+      blocks.push({ type: "text", key: `txt-${lastIndex}-${start}`, value: text.slice(lastIndex, start) });
+    }
+
+    if (isAllowedImageSrc(src)) {
+      blocks.push({ type: "image", key: `img-${start}`, src, alt });
+    } else {
+      blocks.push({ type: "text", key: `txt-${start}`, value: fullMatch });
+    }
+
+    lastIndex = start + fullMatch.length;
+  }
+
+  if (lastIndex < text.length) {
+    blocks.push({ type: "text", key: `txt-${lastIndex}-end`, value: text.slice(lastIndex) });
+  }
+
+  if (blocks.length === 0) {
+    return <p>{text}</p>;
+  }
+
+  return (
+    <div className="message-content">
+      {blocks.map((block, index) => {
+        if (block.type === "image") {
+          return <img key={block.key} src={block.src} alt={block.alt} loading="lazy" />;
+        }
+        return <p key={block.key}>{block.value}</p>;
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [mode, setMode] = useState("login");
   const [registerForm, setRegisterForm] = useState(DEFAULT_REGISTER_FORM);
@@ -1302,7 +1362,7 @@ function App() {
                                 <span className="sender">{item.sender_type}</span>
                                 <span>{item.pending ? "sending..." : new Date(item.created_at).toLocaleString()}</span>
                               </div>
-                              <p>{item.content}</p>
+                              {renderMessageContent(item.content)}
                             </div>
                           );
                         })}

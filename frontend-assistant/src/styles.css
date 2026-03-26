@@ -647,6 +647,28 @@ input[type="checkbox"] {
   line-height: 1.45;
 }
 
+.message-content {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-content p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.message-content img {
+  display: block;
+  max-width: min(100%, 720px);
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
 .empty {
   border: 1px dashed var(--line);
   border-radius: 12px;
