@@ -1,0 +1,81 @@
+{
+  "name": "image_to_video",
+  "package_version": "1.0.0",
+  "description": "Generates an MP4 video from an input image and prompt using a Diffusers I2V model",
+  "entrypoint": "tool.py",
+  "function": "image_to_video",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "image": {
+        "type": "string",
+        "description": "Local image path or URL used as animation source"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Text prompt describing desired motion and scene"
+      },
+      "negative_prompt": {
+        "type": "string",
+        "description": "Optional negative prompt to suppress artifacts",
+        "default": ""
+      },
+      "model_id": {
+        "type": "string",
+        "description": "Hugging Face model id for image-to-video generation",
+        "default": "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+      },
+      "width": {
+        "type": "integer",
+        "description": "Output width, must be a multiple of 16",
+        "default": 1280
+      },
+      "height": {
+        "type": "integer",
+        "description": "Output height, must be a multiple of 16",
+        "default": 720
+      },
+      "num_frames": {
+        "type": "integer",
+        "description": "Number of frames in generated video",
+        "default": 81
+      },
+      "num_inference_steps": {
+        "type": "integer",
+        "description": "Inference steps for generation quality/speed trade-off",
+        "default": 40
+      },
+      "guidance_scale": {
+        "type": "number",
+        "description": "Classifier-free guidance scale",
+        "default": 5.0
+      },
+      "fps": {
+        "type": "integer",
+        "description": "Frames per second of saved MP4",
+        "default": 16
+      },
+      "seed": {
+        "type": "integer",
+        "description": "Optional random seed for reproducible outputs"
+      },
+      "dtype": {
+        "type": "string",
+        "description": "Torch dtype for model loading",
+        "default": "bfloat16"
+      },
+      "filename": {
+        "type": "string",
+        "description": "Optional output filename (mp4 extension added automatically)"
+      }
+    },
+    "required": [
+      "image",
+      "prompt"
+    ]
+  },
+  "package_files_sha256": {
+    "skill.md": "b8fd00cbf66621a8ab5556c23a4853116fd557d78991d579ac7ac6977e532868",
+    "tool.py": "4d9caf81ad50ea372ef4fc15ad3e2734bf1f81b1311faba6c686d2f9d959b4e4"
+  }
+}
