@@ -11,7 +11,7 @@ import shutil
 import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Sequence
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
@@ -411,6 +411,14 @@ class ApiService:
         self.rbac = RbacStore(db_url)
         self.long_term = LongTermMemoryStore.from_settings(settings)
         self.settings.dynamic_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    def __getattr__(self, name: str) -> Any:
+        # Temporary compatibility shim: several ApiService methods are currently
+        # defined on RealtimeChatHub with the same expected self attributes.
+        fallback = getattr(RealtimeChatHub, name, None)
+        if callable(fallback):
+            return fallback.__get__(self, type(self))
+        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
 
 class RealtimeChatHub:
