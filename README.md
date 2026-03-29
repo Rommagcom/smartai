@@ -168,7 +168,8 @@ Defaults:
 - `/reload`: reload dynamic skills from disk
 - `/reset`: clear current chat memory
 - `/tools`: show loaded tools and validation/load errors (admin only)
-- `/add_skill`: upload `.md` file as document with caption `/add_skill [skill_name] [overwrite]` (admin only)
+- `/rag_index`: attach `.txt/.md/.pdf` with caption `/rag_index [team|private]` to index into RAG
+- `/rag_query [team|private] <question>`: direct query against indexed RAG collection
 - `/usage`: show cumulative token consumption in current chat
 - `/set_role <user_id> <admin|manager|member>`: set user role (admin only)
 - `/grant_skill <user_id> <tool_name>`: assign dynamic skill to user (admin only)
