@@ -12,7 +12,7 @@ from langsmith import traceable
 from ollama import Client
 
 from search_agent.agent.prompts import SYSTEM_PROMPT
-from search_agent.agent.ollama_tools import web_search, web_fetch
+from search_agent.agent.ollama_tools import DOCUMENT_RAG_TOOL_SCHEMA, document_rag, web_search, web_fetch
 from search_agent.config import Settings
 from search_agent.dynamic_skills.registry import DynamicToolRegistry
 
@@ -205,12 +205,12 @@ class OllamaLangGraphAgent:
         response = None
         attempts = [
             {
-                "tools": [web_search, web_fetch, *dynamic_schemas],
+                "tools": [web_search, web_fetch, DOCUMENT_RAG_TOOL_SCHEMA, *dynamic_schemas],
                 "think": self.settings.ollama_think,
                 "label": "primary",
             },
             {
-                "tools": [web_search, web_fetch, *dynamic_schemas],
+                "tools": [web_search, web_fetch, DOCUMENT_RAG_TOOL_SCHEMA, *dynamic_schemas],
                 "think": False,
                 "label": "retry_no_think",
             },
@@ -275,6 +275,7 @@ class OllamaLangGraphAgent:
         callables = {
             "web_search": web_search,
             "web_fetch": web_fetch,
+            "document_rag": document_rag,
             **dynamic_callables,
         }
 
@@ -367,6 +368,13 @@ class OllamaLangGraphAgent:
                 arguments["chat_id"] = state_chat_id
 
         if tool_name == "reminder_scheduler":
+            arguments.setdefault("org_id", str(state.get("org_id") or "default-org"))
+            arguments.setdefault("team_id", str(state.get("team_id") or "chat"))
+            state_user_id = state.get("user_id")
+            if isinstance(state_user_id, int):
+                arguments.setdefault("user_id", state_user_id)
+
+        if tool_name == "document_rag":
             arguments.setdefault("org_id", str(state.get("org_id") or "default-org"))
             arguments.setdefault("team_id", str(state.get("team_id") or "chat"))
             state_user_id = state.get("user_id")

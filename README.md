@@ -147,6 +147,22 @@ It supports actions:
 
 When a reminder is due, the bot executes reminder `prompt` through the LLM as a user message and sends the model answer to the target chat.
 
+### Included document RAG tool
+The repository ships with built-in persistent tool `document_rag`.
+
+It supports actions:
+- `index`: process uploaded `.txt`, `.md`, or `.pdf` content in-memory and upsert chunks into Milvus.
+- `query`: retrieve relevant chunks from Milvus and answer with Ollama (`RetrievalQA`).
+
+Sharing behavior:
+- `scope=team`: shared vector collection for all users in the same `org_id/team_id`.
+- `scope=private`: user-specific collection (`org_id/team_id/user_id`).
+
+Defaults:
+- Embeddings model: `nomic-embed-text:latest`
+- LLM model: `gpt-4o-mini`
+- Milvus endpoint: `127.0.0.1:19530`
+
 ## Telegram commands
 - `/start`: show quick help
 - `/reload`: reload dynamic skills from disk
@@ -200,6 +216,19 @@ Authorization: Bearer <token>
 
 ### Admin API: organizations, teams, users, skills
 All endpoints below require admin user.
+
+### RAG API endpoints
+- `POST /api/v1/rag/index-file`: upload one file and index it through built-in `document_rag`.
+- `POST /api/v1/rag/query`: query already indexed RAG collection directly.
+
+RAG runtime defaults are read from `.env`:
+- `RAG_COLLECTION_NAME`
+- `RAG_DROP_OLD`
+- `RAG_CHUNK_SIZE`
+- `RAG_OVERLAP`
+- `RAG_EMBEDDING_MODEL`
+- `RAG_MILVUS_HOST`
+- `RAG_MILVUS_PORT`
 
 - Create organization:
 

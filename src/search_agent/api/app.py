@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -20,6 +21,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from search_agent.agent.graph import OllamaLangGraphAgent
+from search_agent.agent.document_rag_tool import document_rag
 from search_agent.config import Settings, load_settings
 from search_agent.memory.long_term import LongTermMemoryStore
 from search_agent.security.rbac import RbacStore, Role
@@ -30,6 +32,8 @@ TOKEN_TTL_HOURS = 24
 PBKDF2_ITERATIONS = 120_000
 GROUP_SHORT_MEMORY_LIMIT = 20
 _SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
+_RAG_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+_RAG_ALLOWED_SUFFIXES = {".txt", ".md", ".pdf"}
 
 
 def _resolve_db_url(explicit: str | None = None) -> str:
@@ -123,6 +127,26 @@ def _decode_uploaded_markdown(raw_bytes: bytes) -> str:
             continue
 
     raise ValueError("Unable to decode file content")
+
+
+def _validate_rag_upload_filename(filename: str) -> str:
+    normalized = str(filename or "").strip()
+    if not normalized:
+        raise ValueError("Uploaded file name is required")
+    suffix = "." + normalized.rsplit(".", 1)[-1].lower() if "." in normalized else ""
+    if suffix not in _RAG_ALLOWED_SUFFIXES:
+        allowed = ", ".join(sorted(_RAG_ALLOWED_SUFFIXES))
+        raise ValueError(f"Unsupported file extension: {suffix or '<none>'}. Allowed: {allowed}")
+    return normalized
+
+
+def _to_base64_ascii(raw_bytes: bytes) -> str:
+    if not raw_bytes:
+        raise ValueError("Uploaded file is empty")
+    if len(raw_bytes) > _RAG_UPLOAD_MAX_BYTES:
+        max_mb = _RAG_UPLOAD_MAX_BYTES // (1024 * 1024)
+        raise ValueError(f"Uploaded file exceeds {max_mb} MB")
+    return base64.b64encode(raw_bytes).decode("ascii")
 
 
 def _build_generated_tool_py(*, function_name: str, tool_name: str, instruction_text: str) -> str:
@@ -340,6 +364,16 @@ class ChatMessage(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     messages: list[ChatMessage]
+
+
+class RagQueryRequest(BaseModel):
+    org_id: str = Field(min_length=1, max_length=128)
+    team_id: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=8000)
+    scope: str = Field(default="team", min_length=1, max_length=32)
+    search_type: str = Field(default="mmr", min_length=1, max_length=64)
+    top_k: int = Field(default=5, ge=1, le=50)
+    return_source_documents: bool = True
 
 
 class WsSendMessageRequest(BaseModel):
@@ -2484,6 +2518,103 @@ async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
     )
     await chat_hub.publish_snapshot(snapshot_payload)
     return response
+
+
+@app.post("/api/v1/rag/index-file", responses={403: {"description": "User is not a member of the target team"}})
+async def rag_index_file(
+    user: CurrentUser,
+    org_id: str = Form(...),
+    team_id: str = Form(...),
+    file: UploadFile = File(...),
+    scope: str = Form(default="team"),
+) -> dict[str, Any]:
+    actor_user_id = int(user["user_id"])
+    normalized_org_id = str(org_id or "").strip()
+    normalized_team_id = str(team_id or "").strip()
+    if not normalized_org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    if not normalized_team_id:
+        raise HTTPException(status_code=400, detail="team_id is required")
+
+    service._assert_membership(org_id=normalized_org_id, team_id=normalized_team_id, user_id=actor_user_id)
+
+    try:
+        filename = _validate_rag_upload_filename(str(file.filename or ""))
+        raw_bytes = await file.read()
+        file_content_base64 = _to_base64_ascii(raw_bytes)
+
+        result_raw = document_rag(
+            action="index",
+            file_name=filename,
+            file_content_base64=file_content_base64,
+            chunk_size=int(service.settings.rag_chunk_size),
+            overlap=int(service.settings.rag_overlap),
+            collection_name=service.settings.rag_collection_name,
+            drop_old=bool(service.settings.rag_drop_old),
+            embedding_model=service.settings.rag_embedding_model,
+            scope=str(scope or "team").strip() or "team",
+            org_id=normalized_org_id,
+            team_id=normalized_team_id,
+            user_id=actor_user_id,
+            milvus_host=service.settings.rag_milvus_host,
+            milvus_port=int(service.settings.rag_milvus_port),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"RAG indexing failed: {exc}") from exc
+
+    try:
+        payload = json.loads(result_raw)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+
+    return {"status": "ok", "result": str(result_raw)}
+
+
+@app.post("/api/v1/rag/query", responses={403: {"description": "User is not a member of the target team"}})
+def rag_query(payload: RagQueryRequest, user: CurrentUser) -> dict[str, Any]:
+    actor_user_id = int(user["user_id"])
+    org_id = payload.org_id.strip()
+    team_id = payload.team_id.strip()
+
+    service._assert_membership(org_id=org_id, team_id=team_id, user_id=actor_user_id)
+
+    try:
+        result_raw = document_rag(
+            action="query",
+            query=payload.query,
+            collection_name=service.settings.rag_collection_name,
+            embedding_model=service.settings.rag_embedding_model,
+            scope=payload.scope,
+            org_id=org_id,
+            team_id=team_id,
+            user_id=actor_user_id,
+            search_type=payload.search_type,
+            top_k=int(payload.top_k),
+            return_source_documents=bool(payload.return_source_documents),
+            milvus_host=service.settings.rag_milvus_host,
+            milvus_port=int(service.settings.rag_milvus_port),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"RAG query failed: {exc}") from exc
+
+    try:
+        parsed = json.loads(result_raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    return {"status": "ok", "result": str(result_raw)}
 
 
 @app.get("/api/v1/chat/messages", responses={403: {"description": "User is not a member of the target team"}})

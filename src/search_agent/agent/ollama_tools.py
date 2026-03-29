@@ -6,6 +6,8 @@ from typing import Any
 
 import ollama
 
+from search_agent.agent.document_rag_tool import DOCUMENT_RAG_TOOL_SCHEMA, document_rag
+
 logger = logging.getLogger(__name__)
 
 ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
