@@ -10,6 +10,7 @@ import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatAction
@@ -372,15 +373,33 @@ async def _run_reminder_worker(
     admin_user_ids: set[int],
     poll_interval_seconds: int,
     max_jobs_per_tick: int,
+    lease_seconds: int,
+    failure_retry_seconds: int,
 ) -> None:
+    worker_id = f"reminder-worker-{uuid4()}"
     while True:
         try:
-            due_items = await asyncio.to_thread(reminder_store.pop_due, limit=max_jobs_per_tick)
+            due_items = await asyncio.to_thread(
+                reminder_store.claim_due,
+                limit=max_jobs_per_tick,
+                lease_seconds=lease_seconds,
+                lease_owner=worker_id,
+            )
             for item in due_items:
                 chat_id = int(item.chat_id)
                 try:
                     prompt = item.prompt.strip()
                     if not prompt:
+                        await asyncio.to_thread(
+                            reminder_store.fail_reminder,
+                            item.id,
+                            error_text="Reminder prompt is empty",
+                            retry_delay_seconds=failure_retry_seconds,
+                            org_id=item.org_id,
+                            team_id=item.team_id,
+                            user_id=item.user_id,
+                            chat_id=chat_id,
+                        )
                         continue
 
                     notify_prefix = item.notify_text.strip()
@@ -466,6 +485,15 @@ async def _run_reminder_worker(
                         answer=final_answer,
                         messages=result.messages,
                     )
+
+                    await asyncio.to_thread(
+                        reminder_store.complete_reminder,
+                        item.id,
+                        org_id=item.org_id,
+                        team_id=item.team_id,
+                        user_id=item.user_id,
+                        chat_id=chat_id,
+                    )
                 except TelegramBadRequest as exc:
                     message = str(exc).lower()
                     if (
@@ -488,8 +516,29 @@ async def _run_reminder_worker(
                             deactivated,
                         )
                         continue
+
+                    await asyncio.to_thread(
+                        reminder_store.fail_reminder,
+                        item.id,
+                        error_text=str(exc),
+                        retry_delay_seconds=failure_retry_seconds,
+                        org_id=item.org_id,
+                        team_id=item.team_id,
+                        user_id=item.user_id,
+                        chat_id=chat_id,
+                    )
                     logger.warning("Reminder %s failed for chat %s: %s", item.id, chat_id, exc)
                 except Exception as exc:
+                    await asyncio.to_thread(
+                        reminder_store.fail_reminder,
+                        item.id,
+                        error_text=str(exc),
+                        retry_delay_seconds=failure_retry_seconds,
+                        org_id=item.org_id,
+                        team_id=item.team_id,
+                        user_id=item.user_id,
+                        chat_id=chat_id,
+                    )
                     logger.exception("Reminder %s failed for chat %s: %s", item.id, chat_id, exc)
         except asyncio.CancelledError:
             raise
@@ -564,6 +613,8 @@ async def start_bot() -> None:
             admin_user_ids=settings.telegram_admin_user_ids,
             poll_interval_seconds=settings.reminder_poll_interval_seconds,
             max_jobs_per_tick=settings.reminder_max_jobs_per_tick,
+            lease_seconds=settings.reminder_lease_seconds,
+            failure_retry_seconds=settings.reminder_failure_retry_seconds,
         ),
         name="reminder-worker",
     )

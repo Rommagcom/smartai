@@ -48,7 +48,11 @@ _reminders_table = Table(
     Column("cron_expr", String(128), nullable=True),
     Column("max_runs", Integer, nullable=True),
     Column("run_count", Integer, nullable=False, server_default="0"),
+    Column("failure_count", Integer, nullable=False, server_default="0"),
     Column("active", Boolean, nullable=False, server_default="true", index=True),
+    Column("lease_owner", String(64), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
@@ -177,7 +181,11 @@ class ReminderStore:
             "cron_expr": cron_expr.strip() if cron_expr else None,
             "max_runs": int(max_runs) if max_runs is not None else None,
             "run_count": 0,
+            "failure_count": 0,
             "active": True,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "last_error": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -252,6 +260,8 @@ class ReminderStore:
             .values(
                 active=False,
                 next_run_at=None,
+                lease_owner=None,
+                lease_expires_at=None,
                 updated_at=datetime.now(UTC),
             )
         )
@@ -269,7 +279,18 @@ class ReminderStore:
         return int(result.rowcount or 0) > 0
 
     def pop_due(self, *, limit: int = 10) -> list[ReminderRecord]:
+        return self.claim_due(limit=limit)
+
+    def claim_due(
+        self,
+        *,
+        limit: int = 10,
+        lease_seconds: int = 120,
+        lease_owner: str | None = None,
+    ) -> list[ReminderRecord]:
         now = datetime.now(UTC)
+        lease_ttl = max(5, int(lease_seconds))
+        owner = (lease_owner or str(uuid4())).strip() or str(uuid4())
         due: list[ReminderRecord] = []
 
         with self.engine.begin() as conn:
@@ -280,6 +301,10 @@ class ReminderStore:
                         _reminders_table.c.active.is_(True),
                         _reminders_table.c.next_run_at.is_not(None),
                         _reminders_table.c.next_run_at <= now,
+                        (
+                            _reminders_table.c.lease_expires_at.is_(None)
+                            | (_reminders_table.c.lease_expires_at <= now)
+                        ),
                     )
                 )
                 .order_by(_reminders_table.c.next_run_at.asc())
@@ -292,28 +317,120 @@ class ReminderStore:
                 raw = dict(row)
                 due.append(self._from_raw(raw))
 
-                raw["run_count"] = int(raw.get("run_count") or 0) + 1
-                raw["updated_at"] = now
-
-                next_dt = self._advance_next_run(raw, now=now)
-                if next_dt is None:
-                    raw["active"] = False
-                    raw["next_run_at"] = None
-                else:
-                    raw["next_run_at"] = next_dt
-
                 conn.execute(
                     update(_reminders_table)
                     .where(_reminders_table.c.id == str(raw.get("id")))
                     .values(
-                        run_count=int(raw["run_count"]),
-                        updated_at=raw["updated_at"],
-                        active=bool(raw.get("active", False)),
-                        next_run_at=raw.get("next_run_at"),
+                        lease_owner=owner,
+                        lease_expires_at=now + timedelta(seconds=lease_ttl),
+                        updated_at=now,
                     )
                 )
 
         return due
+
+    def complete_reminder(
+        self,
+        reminder_id: str,
+        *,
+        org_id: str | None = None,
+        team_id: str | None = None,
+        user_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            stmt = select(_reminders_table).where(_reminders_table.c.id == reminder_id)
+            if org_id is not None:
+                stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
+            if team_id is not None:
+                stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
+            if user_id is not None:
+                stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
+            if chat_id is not None:
+                stmt = stmt.where(_reminders_table.c.chat_id == int(chat_id))
+            stmt = stmt.with_for_update(skip_locked=True)
+
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return False
+
+            raw = dict(row)
+            if not bool(raw.get("active", False)):
+                return False
+
+            raw["run_count"] = int(raw.get("run_count") or 0) + 1
+            raw["updated_at"] = now
+
+            next_dt = self._advance_next_run(raw, now=now)
+            active = True
+            if next_dt is None:
+                active = False
+
+            result = conn.execute(
+                update(_reminders_table)
+                .where(_reminders_table.c.id == reminder_id)
+                .values(
+                    run_count=int(raw["run_count"]),
+                    active=active,
+                    next_run_at=next_dt,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    last_error=None,
+                    updated_at=now,
+                )
+            )
+        return int(result.rowcount or 0) > 0
+
+    def fail_reminder(
+        self,
+        reminder_id: str,
+        *,
+        error_text: str,
+        retry_delay_seconds: int = 30,
+        org_id: str | None = None,
+        team_id: str | None = None,
+        user_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> bool:
+        now = datetime.now(UTC)
+        retry_at = now + timedelta(seconds=max(1, int(retry_delay_seconds)))
+        with self.engine.begin() as conn:
+            stmt = select(_reminders_table).where(_reminders_table.c.id == reminder_id)
+            if org_id is not None:
+                stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
+            if team_id is not None:
+                stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
+            if user_id is not None:
+                stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
+            if chat_id is not None:
+                stmt = stmt.where(_reminders_table.c.chat_id == int(chat_id))
+            stmt = stmt.with_for_update(skip_locked=True)
+
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return False
+
+            raw = dict(row)
+            failure_count = int(raw.get("failure_count") or 0) + 1
+            next_run_at = self._as_utc(raw.get("next_run_at"))
+            if next_run_at is None or next_run_at < retry_at:
+                next_run_at = retry_at
+
+            result = conn.execute(
+                update(_reminders_table)
+                .where(_reminders_table.c.id == reminder_id)
+                .values(
+                    failure_count=failure_count,
+                    last_error=str(error_text or "")[:1000],
+                    next_run_at=next_run_at,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+
+        return int(result.rowcount or 0) > 0
 
     def _advance_next_run(self, raw: dict[str, Any], *, now: datetime) -> datetime | None:
         schedule_type = str(raw.get("schedule_type", "once")).strip().lower()
