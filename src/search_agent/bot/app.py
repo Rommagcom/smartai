@@ -474,7 +474,7 @@ async def start_bot() -> None:
             return
 
         parts = ((message.caption or message.text or "").strip()).split()
-        scope = "team"
+        scope = "private"
         for part in parts[1:]:
             raw = part.strip().lower()
             if raw in {"team", "private"}:
