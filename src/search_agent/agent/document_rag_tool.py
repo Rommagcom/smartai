@@ -7,7 +7,10 @@ import os
 import re
 from typing import Any
 
-from langchain.chains import RetrievalQA
+try:
+    from langchain.chains import RetrievalQA
+except ImportError:  # LangChain v1 moved classic chains to a separate package.
+    from langchain_classic.chains import RetrievalQA
 from langchain_core.documents import Document
 from langchain_milvus import Milvus
 from langchain_ollama import ChatOllama, OllamaEmbeddings
