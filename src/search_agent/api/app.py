@@ -483,6 +483,27 @@ class BulkClaudeDryRunResponse(BaseModel):
     results: list[BulkClaudeDryRunItem]
 
 
+class RagIndexJobSummary(BaseModel):
+    job_id: str
+    org_id: str
+    team_id: str
+    user_id: int
+    scope: str
+    file_name: str
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    collection_name: str | None = None
+    documents_count: int | None = None
+    chunks_count: int | None = None
+    error: str | None = None
+
+
+class RagIndexJobListResponse(BaseModel):
+    jobs: list[RagIndexJobSummary]
+
+
 class ApiService:
     def __init__(self, settings: Settings) -> None:
         db_url = _resolve_db_url(settings.long_term_memory_database_url)
@@ -605,6 +626,167 @@ class RealtimeChatHub:
         finally:
             await pubsub.unsubscribe(self._broadcast_channel)
             await pubsub.close()
+
+
+class RagIndexJobManager:
+    def __init__(self, service: ApiService) -> None:
+        self.service = service
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._task: asyncio.Task[Any] | None = None
+        self._lock = asyncio.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    async def startup(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._worker_loop(), name="rag-index-worker")
+
+    async def shutdown(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    async def enqueue(
+        self,
+        *,
+        org_id: str,
+        team_id: str,
+        user_id: int,
+        scope: str,
+        file_name: str,
+        raw_bytes: bytes,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        job_id = secrets.token_urlsafe(12)
+        job = {
+            "job_id": job_id,
+            "org_id": org_id,
+            "team_id": team_id,
+            "user_id": int(user_id),
+            "scope": scope,
+            "file_name": file_name,
+            "status": "queued",
+            "created_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "collection_name": None,
+            "documents_count": None,
+            "chunks_count": None,
+            "error": None,
+        }
+        async with self._lock:
+            self._jobs[job_id] = job
+
+        await self._queue.put(
+            {
+                "job_id": job_id,
+                "org_id": org_id,
+                "team_id": team_id,
+                "user_id": int(user_id),
+                "scope": scope,
+                "file_name": file_name,
+                "raw_bytes": raw_bytes,
+            }
+        )
+        return dict(job)
+
+    async def list_jobs(self, *, org_id: str, team_id: str, actor_user_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        async with self._lock:
+            values = list(self._jobs.values())
+
+        filtered: list[dict[str, Any]] = []
+        for job in values:
+            if str(job.get("org_id") or "") != org_id:
+                continue
+            if str(job.get("team_id") or "") != team_id:
+                continue
+            scope = str(job.get("scope") or "team")
+            if scope == "private" and int(job.get("user_id") or 0) != int(actor_user_id):
+                continue
+            filtered.append(job)
+
+        filtered.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return [dict(item) for item in filtered[: max(1, int(limit))]]
+
+    async def _worker_loop(self) -> None:
+        while True:
+            item = await self._queue.get()
+            job_id = str(item.get("job_id") or "")
+            try:
+                await self._mark_running(job_id)
+                result = await asyncio.to_thread(self._run_index_job, item)
+                await self._mark_succeeded(job_id, result)
+            except Exception as exc:
+                await self._mark_failed(job_id, str(exc))
+            finally:
+                self._queue.task_done()
+
+    def _run_index_job(self, item: dict[str, Any]) -> dict[str, Any]:
+        raw_bytes = bytes(item.get("raw_bytes") or b"")
+        result_raw = document_rag(
+            action="index",
+            file_name=str(item.get("file_name") or ""),
+            file_content_base64=_to_base64_ascii(raw_bytes),
+            chunk_size=int(self.service.settings.rag_chunk_size),
+            overlap=int(self.service.settings.rag_overlap),
+            collection_name=self.service.settings.rag_collection_name,
+            drop_old=bool(self.service.settings.rag_drop_old),
+            embedding_model=self.service.settings.rag_embedding_model,
+            scope=str(item.get("scope") or "team"),
+            org_id=str(item.get("org_id") or ""),
+            team_id=str(item.get("team_id") or ""),
+            user_id=int(item.get("user_id") or 0),
+            milvus_host=self.service.settings.rag_milvus_host,
+            milvus_port=int(self.service.settings.rag_milvus_port),
+        )
+        try:
+            payload = json.loads(str(result_raw))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {"result": str(result_raw)}
+
+    async def _mark_running(self, job_id: str) -> None:
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job["status"] = "running"
+            job["started_at"] = datetime.now(UTC).isoformat()
+            job["error"] = None
+
+    async def _mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
+        def _safe_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job["status"] = "succeeded"
+            job["finished_at"] = datetime.now(UTC).isoformat()
+            job["collection_name"] = str(result.get("collection_name") or "") or None
+            docs_count = result.get("documents_count")
+            chunks_count = result.get("chunks_count")
+            job["documents_count"] = _safe_int(docs_count)
+            job["chunks_count"] = _safe_int(chunks_count)
+            job["error"] = None
+
+    async def _mark_failed(self, job_id: str, error_text: str) -> None:
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job["status"] = "failed"
+            job["finished_at"] = datetime.now(UTC).isoformat()
+            job["error"] = str(error_text or "unknown error")[:4000]
 
     def _supports_auth_otp_fields(self) -> bool:
         try:
@@ -2088,16 +2270,19 @@ settings = load_settings()
 service = ApiService(settings)
 app = FastAPI(title=APP_NAME)
 chat_hub = RealtimeChatHub(settings)
+rag_jobs = RagIndexJobManager(service)
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
     await chat_hub.startup()
+    await rag_jobs.startup()
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     await chat_hub.shutdown()
+    await rag_jobs.shutdown()
 
 
 def _extract_bearer_token(authorization: str) -> str:
@@ -2538,39 +2723,56 @@ async def rag_index_file(
     try:
         filename = _validate_rag_upload_filename(str(file.filename or ""))
         raw_bytes = await file.read()
-        file_content_base64 = _to_base64_ascii(raw_bytes)
-
-        result_raw = document_rag(
-            action="index",
-            file_name=filename,
-            file_content_base64=file_content_base64,
-            chunk_size=int(service.settings.rag_chunk_size),
-            overlap=int(service.settings.rag_overlap),
-            collection_name=service.settings.rag_collection_name,
-            drop_old=bool(service.settings.rag_drop_old),
-            embedding_model=service.settings.rag_embedding_model,
-            scope=str(scope or "team").strip() or "team",
+        if not raw_bytes:
+            raise ValueError("Uploaded file is empty")
+        if len(raw_bytes) > _RAG_UPLOAD_MAX_BYTES:
+            max_mb = _RAG_UPLOAD_MAX_BYTES // (1024 * 1024)
+            raise ValueError(f"Uploaded file exceeds {max_mb} MB")
+        normalized_scope = str(scope or "team").strip() or "team"
+        job = await rag_jobs.enqueue(
             org_id=normalized_org_id,
             team_id=normalized_team_id,
             user_id=actor_user_id,
-            milvus_host=service.settings.rag_milvus_host,
-            milvus_port=int(service.settings.rag_milvus_port),
+            scope=normalized_scope,
+            file_name=filename,
+            raw_bytes=raw_bytes,
         )
+        return {
+            "status": "queued",
+            "job": job,
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"RAG indexing failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"RAG indexing enqueue failed: {exc}") from exc
 
-    try:
-        payload = json.loads(result_raw)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
 
-    return {"status": "ok", "result": str(result_raw)}
+@app.get("/api/v1/rag/index-jobs", responses={403: {"description": "User is not a member of the target team"}})
+async def rag_index_jobs(
+    org_id: str,
+    team_id: str,
+    user: CurrentUser,
+    limit: int = 100,
+) -> RagIndexJobListResponse:
+    actor_user_id = int(user["user_id"])
+    normalized_org_id = str(org_id or "").strip()
+    normalized_team_id = str(team_id or "").strip()
+    if not normalized_org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    if not normalized_team_id:
+        raise HTTPException(status_code=400, detail="team_id is required")
+
+    service._assert_membership(org_id=normalized_org_id, team_id=normalized_team_id, user_id=actor_user_id)
+
+    jobs = await rag_jobs.list_jobs(
+        org_id=normalized_org_id,
+        team_id=normalized_team_id,
+        actor_user_id=actor_user_id,
+        limit=max(1, min(int(limit), 200)),
+    )
+    return RagIndexJobListResponse(
+        jobs=[RagIndexJobSummary(**item) for item in jobs],
+    )
 
 
 @app.post("/api/v1/rag/query", responses={403: {"description": "User is not a member of the target team"}})

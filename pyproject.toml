@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "aiogram>=3.17.0",
   "fastapi>=0.116.0",
-  "uvicorn>=0.35.0",
+  "uvicorn[standard]>=0.35.0",
   "python-multipart>=0.0.9",
   "langgraph>=0.3.1",
   "langsmith>=0.3.18",

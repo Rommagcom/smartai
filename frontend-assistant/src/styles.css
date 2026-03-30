@@ -686,6 +686,86 @@ input[type="checkbox"] {
   max-height: 280px;
 }
 
+.rag-jobs {
+  display: grid;
+  gap: 8px;
+}
+
+.rag-jobs-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rag-jobs-top h4 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.rag-jobs-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.rag-job-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.85);
+  display: grid;
+  gap: 6px;
+}
+
+.rag-job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rag-job-status {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status-running {
+  background: #eef5ff;
+  color: #0b5cc6;
+  border: 1px solid #cfe0fb;
+}
+
+.status-ok {
+  background: #e7fff6;
+  color: #13734f;
+  border: 1px solid #b9f0db;
+}
+
+.status-failed {
+  background: #fff1f1;
+  color: #9a2424;
+  border: 1px solid #f6cdcd;
+}
+
+.rag-job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+.rag-job-error {
+  color: #9a2424;
+  font-size: 0.84rem;
+  white-space: pre-wrap;
+}
+
 .messages-list {
   display: grid;
   gap: 10px;

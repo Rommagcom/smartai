@@ -292,6 +292,8 @@ function App() {
   const [ragQueryForm, setRagQueryForm] = useState(DEFAULT_RAG_QUERY_FORM);
   const [ragBusy, setRagBusy] = useState(false);
   const [ragResult, setRagResult] = useState(null);
+  const [ragJobs, setRagJobs] = useState([]);
+  const [ragJobsBusy, setRagJobsBusy] = useState(false);
 
   const [adminSection, setAdminSection] = useState("organizations");
   const [organizations, setOrganizations] = useState([]);
@@ -1123,20 +1125,49 @@ function App() {
       const payload = await request("/rag/index-file", {
         method: "POST",
         body: formData,
-        timeoutMs: 180000,
+        timeoutMs: 600000,
       });
 
       setRagResult(payload);
+      await loadRagJobs({ silent: true });
       setRagUploadFile(null);
       if (ragFileInputRef.current) {
         ragFileInputRef.current.value = "";
       }
-      const chunksCount = Number(payload?.chunks_count || 0);
-      setStatus(`RAG index updated (${chunksCount} chunks).`);
+      const jobId = String(payload?.job?.job_id || "").trim();
+      setStatus(jobId ? `RAG indexing queued (job: ${jobId}).` : "RAG indexing queued.");
     } catch (error) {
       setStatus(`RAG indexing failed: ${error.message}`);
     } finally {
       setRagBusy(false);
+    }
+  }
+
+  async function loadRagJobs({ silent = false } = {}) {
+    if (!activeTeam) {
+      setRagJobs([]);
+      return;
+    }
+
+    if (!silent) {
+      setRagJobsBusy(true);
+    }
+    try {
+      const query = new URLSearchParams({
+        org_id: activeTeam.org_id,
+        team_id: activeTeam.team_id,
+        limit: "100",
+      }).toString();
+      const payload = await request(`/rag/index-jobs?${query}`, { timeoutMs: 20000 });
+      setRagJobs(Array.isArray(payload?.jobs) ? payload.jobs : []);
+    } catch (error) {
+      if (!silent) {
+        setStatus(`RAG jobs load failed: ${error.message}`);
+      }
+    } finally {
+      if (!silent) {
+        setRagJobsBusy(false);
+      }
     }
   }
 
@@ -1298,10 +1329,25 @@ function App() {
     setRagUploadFile(null);
     setRagQueryForm(DEFAULT_RAG_QUERY_FORM);
     setRagResult(null);
+    setRagJobs([]);
     if (ragFileInputRef.current) {
       ragFileInputRef.current.value = "";
     }
   }
+
+  useEffect(() => {
+    if (!isAuthenticated || !activeTeam) {
+      setRagJobs([]);
+      return undefined;
+    }
+
+    void loadRagJobs({ silent: true });
+    const timerId = setInterval(() => {
+      void loadRagJobs({ silent: true });
+    }, 5000);
+
+    return () => clearInterval(timerId);
+  }, [isAuthenticated, activeTeam?.org_id, activeTeam?.team_id]);
 
   useEffect(() => {
     if (!isAuthenticated || !autoRefresh || !activeTeam || wsStatus === "online") {
@@ -1698,6 +1744,49 @@ function App() {
                         <pre>{JSON.stringify(ragResult, null, 2)}</pre>
                       </div>
                     ) : null}
+
+                    <div className="rag-jobs">
+                      <div className="rag-jobs-top">
+                        <h4>Indexing Jobs</h4>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={ragBusy || ragJobsBusy || !activeTeam}
+                          onClick={() => void loadRagJobs({ silent: false })}
+                        >
+                          {ragJobsBusy ? "Refreshing..." : "Refresh Jobs"}
+                        </button>
+                      </div>
+                      {ragJobs.length === 0 ? (
+                        <div className="empty">No indexing jobs yet.</div>
+                      ) : (
+                        <div className="rag-jobs-list">
+                          {ragJobs.map((job) => {
+                            const statusValue = String(job.status || "unknown").toLowerCase();
+                            const badgeClass =
+                              statusValue === "succeeded"
+                                ? "rag-job-status status-ok"
+                                : statusValue === "failed"
+                                  ? "rag-job-status status-failed"
+                                  : "rag-job-status status-running";
+                            return (
+                              <div key={String(job.job_id || `${job.file_name}-${job.created_at}`)} className="rag-job-item">
+                                <div className="rag-job-head">
+                                  <strong>{String(job.file_name || "unknown file")}</strong>
+                                  <span className={badgeClass}>{statusValue}</span>
+                                </div>
+                                <div className="rag-job-meta">
+                                  <span>scope: {String(job.scope || "team")}</span>
+                                  <span>created: {job.created_at ? new Date(job.created_at).toLocaleString() : "n/a"}</span>
+                                  <span>chunks: {job.chunks_count ?? "-"}</span>
+                                </div>
+                                {job.error ? <div className="rag-job-error">{String(job.error)}</div> : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </section>
                 </>
               ) : (
