@@ -60,13 +60,12 @@ def _resolve_schedule_type(args: dict[str, Any]) -> str:
 
 def _audit_event(args: dict[str, Any], *, action: str, details: dict[str, object]) -> None:
     org_id = _text_value(args.get("org_id")) or "default-org"
-    team_id = _text_value(args.get("team_id")) or f"chat:{_text_value(args.get('chat_id')) or '0'}"
     user_id = int(args["user_id"]) if args.get("user_id") is not None else 0
     try:
         rbac = RbacStore()
         rbac.audit(
             org_id=org_id,
-            team_id=team_id,
+            team_id="",
             actor_user_id=user_id,
             action=f"reminder.{action}",
             target_type="reminder",
@@ -92,7 +91,6 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
     record = store.create_reminder(
         owner=ReminderOwnerContext(
             org_id=_text_value(args.get("org_id")) or "default-org",
-            team_id=_text_value(args.get("team_id")) or f"chat:{int(chat_id)}",
             user_id=int(args["user_id"]) if args.get("user_id") is not None else 0,
         ),
         chat_id=int(chat_id),
@@ -128,7 +126,6 @@ def _handle_create(store: ReminderStore, args: dict[str, Any]) -> str:
 def _handle_list(store: ReminderStore, args: dict[str, Any]) -> str:
     reminders = store.list_reminders(
         org_id=_text_value(args.get("org_id")) or None,
-        team_id=_text_value(args.get("team_id")) or None,
         user_id=int(args["user_id"]) if args.get("user_id") is not None else None,
         chat_id=int(args["chat_id"]) if args.get("chat_id") is not None else None,
         active_only=bool(args.get("active_only", True)),
@@ -159,7 +156,6 @@ def _handle_delete(store: ReminderStore, args: dict[str, Any]) -> str:
     removed = store.delete_reminder(
         reminder_id,
         org_id=_text_value(args.get("org_id")) or None,
-        team_id=_text_value(args.get("team_id")) or None,
         user_id=int(args["user_id"]) if args.get("user_id") is not None else None,
         chat_id=int(args["chat_id"]) if args.get("chat_id") is not None else None,
     )

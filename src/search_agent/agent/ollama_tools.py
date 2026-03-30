@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 import ollama
-
-from search_agent.agent.document_rag_tool import DOCUMENT_RAG_TOOL_SCHEMA, document_rag
 
 logger = logging.getLogger(__name__)
 

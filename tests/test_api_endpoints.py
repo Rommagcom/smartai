@@ -24,12 +24,9 @@ class _FakeApiService:
         self.users_by_email: dict[str, int] = {}
         self.tokens: dict[str, int] = {}
 
-        self.orgs: dict[str, str] = {}
-        self.teams: dict[tuple[str, str], str] = {}
-        self.team_members: set[tuple[str, str, int]] = set()
         self.roles: dict[tuple[str, int], str] = {}
         self.skills: dict[tuple[str, int], set[str]] = {}
-        self.messages: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.messages: dict[int, list[dict[str, Any]]] = {}
         self.dynamic_skills: dict[str, dict[str, str]] = {}
 
     def register_user(self, payload: Any) -> int:
@@ -81,20 +78,6 @@ class _FakeApiService:
 
     def create_org(self, *, actor_user_id: int, payload: Any) -> None:
         self._ensure_admin(actor_user_id)
-        self.orgs[payload.org_id] = payload.name
-
-    def create_team(self, *, actor_user_id: int, payload: Any) -> None:
-        self._ensure_admin(actor_user_id)
-        if payload.org_id not in self.orgs:
-            raise HTTPException(status_code=404, detail="Organization does not exist")
-        self.teams[(payload.org_id, payload.team_id)] = payload.name
-
-    def add_to_team(self, *, actor_user_id: int, payload: Any) -> None:
-        self._ensure_admin(actor_user_id)
-        team_key = (payload.org_id, payload.team_id)
-        if team_key not in self.teams:
-            raise HTTPException(status_code=404, detail="Team does not exist")
-        self.team_members.add((payload.org_id, payload.team_id, int(payload.user_id)))
 
     def set_role(self, *, actor_user_id: int, target_user_id: int, payload: Any) -> None:
         self._ensure_admin(actor_user_id)
@@ -195,18 +178,12 @@ class _FakeApiService:
 
         return api_app.BulkClaudeDryRunResponse(total=len(files), valid=valid, invalid=invalid, results=results)
 
-    def _assert_membership(self, *, org_id: str, team_id: str, user_id: int) -> None:
-        if (org_id, team_id, int(user_id)) not in self.team_members:
-            raise HTTPException(status_code=403, detail="User is not a member of the target team")
-
-    def _read_group_messages(self, *, org_id: str, team_id: str, limit: int = 30) -> list[dict[str, Any]]:
-        history = self.messages.get((org_id, team_id), [])
+    def _read_group_messages(self, *, user_id: int, limit: int = 30) -> list[dict[str, Any]]:
+        history = self.messages.get(int(user_id), [])
         return history[-max(1, int(limit)) :]
 
     def send_group_chat(self, *, user_id: int, payload: Any) -> Any:
-        self._assert_membership(org_id=payload.org_id, team_id=payload.team_id, user_id=user_id)
-
-        history = self.messages.setdefault((payload.org_id, payload.team_id), [])
+        history = self.messages.setdefault(int(user_id), [])
         now = datetime.now(UTC).isoformat()
         history.append(
             api_app.ChatMessage(
@@ -312,11 +289,11 @@ def test_admin_endpoint_forbidden_for_non_admin(client: tuple[TestClient, _FakeA
         json={"org_id": "beta", "name": "Beta Org"},
         headers=_auth_headers(token),
     )
-    assert create_org_response.status_code == 403
-    assert "Admin access required" in create_org_response.text
+    assert create_org_response.status_code == 410
+    assert "removed" in create_org_response.text
 
 
-def test_api_smoke_register_login_admin_team_chat_flow(client: tuple[TestClient, _FakeApiService]) -> None:
+def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _FakeApiService]) -> None:
     test_client, _ = client
 
     member_register = test_client.post(
@@ -344,43 +321,7 @@ def test_api_smoke_register_login_admin_team_chat_flow(client: tuple[TestClient,
         json={"org_id": "acme", "name": "Acme Corp"},
         headers=_auth_headers(admin_token),
     )
-    assert create_org.status_code == 200
-
-    create_team = test_client.post(
-        "/api/v1/admin/teams",
-        json={"org_id": "acme", "team_id": "finance", "name": "Finance Team"},
-        headers=_auth_headers(admin_token),
-    )
-    assert create_team.status_code == 200
-
-    add_member = test_client.post(
-        "/api/v1/admin/teams/members",
-        json={"org_id": "acme", "team_id": "finance", "user_id": member_id},
-        headers=_auth_headers(admin_token),
-    )
-    assert add_member.status_code == 200
-
-    set_role = test_client.post(
-        f"/api/v1/admin/users/{member_id}/role",
-        json={"org_id": "acme", "role": "manager"},
-        headers=_auth_headers(admin_token),
-    )
-    assert set_role.status_code == 200
-
-    grant_skill = test_client.post(
-        f"/api/v1/admin/users/{member_id}/skills/grant",
-        json={"org_id": "acme", "tool_name": "reminder_scheduler"},
-        headers=_auth_headers(admin_token),
-    )
-    assert grant_skill.status_code == 200
-
-    list_skills = test_client.get(
-        f"/api/v1/admin/users/{member_id}/skills",
-        params={"org_id": "acme"},
-        headers=_auth_headers(admin_token),
-    )
-    assert list_skills.status_code == 200
-    assert list_skills.json()["skills"] == ["reminder_scheduler"]
+    assert create_org.status_code == 410
 
     member_login = test_client.post(
         "/api/v1/auth/login",
@@ -391,7 +332,7 @@ def test_api_smoke_register_login_admin_team_chat_flow(client: tuple[TestClient,
 
     chat_send = test_client.post(
         "/api/v1/chat/send",
-        json={"org_id": "acme", "team_id": "finance", "message": "Budget risk for Q3"},
+        json={"message": "Budget risk for Q3"},
         headers=_auth_headers(member_token),
     )
     assert chat_send.status_code == 200
@@ -399,7 +340,6 @@ def test_api_smoke_register_login_admin_team_chat_flow(client: tuple[TestClient,
 
     chat_messages = test_client.get(
         "/api/v1/chat/messages",
-        params={"org_id": "acme", "team_id": "finance"},
         headers=_auth_headers(member_token),
     )
     assert chat_messages.status_code == 200
@@ -409,7 +349,7 @@ def test_api_smoke_register_login_admin_team_chat_flow(client: tuple[TestClient,
     assert payload[1]["sender_type"] == "assistant"
 
 
-def test_chat_send_forbidden_if_user_not_in_team(client: tuple[TestClient, _FakeApiService]) -> None:
+def test_chat_send_is_available_for_new_user_scope(client: tuple[TestClient, _FakeApiService]) -> None:
     test_client, _ = client
 
     member_register = test_client.post(
@@ -430,13 +370,13 @@ def test_chat_send_forbidden_if_user_not_in_team(client: tuple[TestClient, _Fake
     )
     token = member_login.json()["access_token"]
 
-    denied = test_client.post(
+    chat_send = test_client.post(
         "/api/v1/chat/send",
-        json={"org_id": "acme", "team_id": "finance", "message": "Hello"},
+        json={"message": "Hello"},
         headers=_auth_headers(token),
     )
-    assert denied.status_code == 403
-    assert "not a member" in denied.text
+    assert chat_send.status_code == 200
+    assert chat_send.json()["answer"] == "ACK: Hello"
 
 
 def test_admin_dynamic_skill_endpoints_with_uploaded_markdown_file(client: tuple[TestClient, _FakeApiService]) -> None:

@@ -58,42 +58,6 @@ class RbacStore:
                 },
             )
 
-    def ensure_team_membership(self, *, org_id: str, team_id: str, user_id: int) -> None:
-        self.ensure_organization(org_id=org_id, name=org_id)
-        now = datetime.now(UTC)
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO teams (org_id, team_id, name, created_at, updated_at)
-                    VALUES (:org_id, :team_id, :name, :now, :now)
-                    ON CONFLICT (org_id, team_id)
-                    DO UPDATE SET updated_at = EXCLUDED.updated_at
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "name": team_id,
-                    "now": now,
-                },
-            )
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO team_members (org_id, team_id, user_id, created_at)
-                    VALUES (:org_id, :team_id, :user_id, :now)
-                    ON CONFLICT (org_id, team_id, user_id) DO NOTHING
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "user_id": int(user_id),
-                    "now": now,
-                },
-            )
-
     def ensure_organization(self, *, org_id: str, name: str) -> None:
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
@@ -128,64 +92,6 @@ class RbacStore:
             target_type="organization",
             target_id=normalized_org,
             details={"name": normalized_name},
-        )
-
-    def create_team(self, *, actor_user_id: int, org_id: str, team_id: str, name: str) -> None:
-        normalized_org = org_id.strip()
-        normalized_team = team_id.strip()
-        if not normalized_org:
-            raise ValueError(ORG_ID_EMPTY_TEXT)
-        if not normalized_team:
-            raise ValueError("team_id must not be empty")
-
-        self.ensure_organization(org_id=normalized_org, name=normalized_org)
-        now = datetime.now(UTC)
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO teams (org_id, team_id, name, created_at, updated_at)
-                    VALUES (:org_id, :team_id, :name, :created_at, :updated_at)
-                    ON CONFLICT (org_id, team_id)
-                    DO UPDATE SET name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
-                    """
-                ),
-                {
-                    "org_id": normalized_org,
-                    "team_id": normalized_team,
-                    "name": name.strip() or normalized_team,
-                    "created_at": now,
-                    "updated_at": now,
-                },
-            )
-
-        self.audit(
-            org_id=normalized_org,
-            team_id=normalized_team,
-            actor_user_id=actor_user_id,
-            action="rbac.create_team",
-            target_type="team",
-            target_id=normalized_team,
-            details={"name": name.strip() or normalized_team},
-        )
-
-    def add_user_to_team(self, *, actor_user_id: int, org_id: str, team_id: str, user_id: int) -> None:
-        normalized_org = org_id.strip()
-        normalized_team = team_id.strip()
-        if not normalized_org:
-            raise ValueError(ORG_ID_EMPTY_TEXT)
-        if not normalized_team:
-            raise ValueError("team_id must not be empty")
-
-        self.ensure_team_membership(org_id=normalized_org, team_id=normalized_team, user_id=user_id)
-        self.audit(
-            org_id=normalized_org,
-            team_id=normalized_team,
-            actor_user_id=actor_user_id,
-            action="rbac.add_user_to_team",
-            target_type="team_member",
-            target_id=f"{normalized_team}:{int(user_id)}",
-            details={"user_id": int(user_id)},
         )
 
     def get_role(self, *, org_id: str, user_id: int, fallback_role: Role = "member") -> Role:
@@ -290,80 +196,6 @@ class RbacStore:
             ).mappings().all()
         return [str(row.get("tool_name") or "").strip() for row in rows if str(row.get("tool_name") or "").strip()]
 
-    def assign_team_skill(self, *, org_id: str, team_id: str, actor_user_id: int, tool_name: str) -> None:
-        now = datetime.now(UTC)
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO team_skill_assignments (org_id, team_id, tool_name, assigned_by, created_at)
-                    VALUES (:org_id, :team_id, :tool_name, :assigned_by, :created_at)
-                    ON CONFLICT (org_id, team_id, tool_name) DO NOTHING
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "tool_name": tool_name,
-                    "assigned_by": int(actor_user_id),
-                    "created_at": now,
-                },
-            )
-        self.audit(
-            org_id=org_id,
-            team_id=team_id,
-            actor_user_id=actor_user_id,
-            action="rbac.assign_team_skill",
-            target_type="team_skill",
-            target_id=tool_name,
-            details={"team_id": team_id},
-        )
-
-    def revoke_team_skill(self, *, org_id: str, team_id: str, actor_user_id: int, tool_name: str) -> bool:
-        with self.engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    """
-                    DELETE FROM team_skill_assignments
-                    WHERE org_id = :org_id AND team_id = :team_id AND tool_name = :tool_name
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "tool_name": tool_name,
-                },
-            )
-        removed = int(result.rowcount or 0) > 0
-        self.audit(
-            org_id=org_id,
-            team_id=team_id,
-            actor_user_id=actor_user_id,
-            action="rbac.revoke_team_skill",
-            target_type="team_skill",
-            target_id=tool_name,
-            details={"team_id": team_id, "removed": removed},
-        )
-        return removed
-
-    def list_team_skills(self, *, org_id: str, team_id: str) -> list[str]:
-        with self.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT tool_name
-                    FROM team_skill_assignments
-                    WHERE org_id = :org_id AND team_id = :team_id
-                    ORDER BY tool_name ASC
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                },
-            ).mappings().all()
-        return [str(row.get("tool_name") or "").strip() for row in rows if str(row.get("tool_name") or "").strip()]
-
     def resolve_allowed_skills(
         self,
         *,
@@ -371,19 +203,9 @@ class RbacStore:
         user_id: int,
         role: Role,
         all_dynamic_tools: set[str],
-        team_id: str | None = None,
     ) -> set[str]:
         if role == "admin":
             return set(all_dynamic_tools)
-
-        if team_id:
-            try:
-                assigned_team_skills = set(self.list_team_skills(org_id=org_id, team_id=team_id))
-                return assigned_team_skills.intersection(all_dynamic_tools)
-            except Exception:
-                # Fallback for environments where team-skill schema is not migrated yet.
-                assigned = set(self.list_user_skills(org_id=org_id, user_id=user_id))
-                return assigned.intersection(all_dynamic_tools)
 
         assigned = set(self.list_user_skills(org_id=org_id, user_id=user_id))
         if role == "manager":

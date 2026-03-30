@@ -241,7 +241,6 @@ class LongTermMemoryStore:
         self,
         *,
         org_id: str,
-        team_id: str,
         user_id: int,
         chat_id: int,
         query_text: str,
@@ -264,11 +263,11 @@ class LongTermMemoryStore:
         stmt = text(
             """
             INSERT INTO long_term_recall_metrics (
-                org_id, team_id, user_id, chat_id, query_text, result_count,
+                org_id, user_id, chat_id, query_text, result_count,
                 top_score, degraded, error_text, created_at
             )
             VALUES (
-                :org_id, :team_id, :user_id, :chat_id, :query_text, :result_count,
+                :org_id, :user_id, :chat_id, :query_text, :result_count,
                 :top_score, :degraded, :error_text, :created_at
             )
             """
@@ -279,7 +278,6 @@ class LongTermMemoryStore:
                     stmt,
                     {
                         "org_id": org_id,
-                        "team_id": team_id,
                         "user_id": int(user_id),
                         "chat_id": int(chat_id),
                         "query_text": safe_query,
@@ -324,13 +322,13 @@ class LongTermMemoryStore:
                     ORDER BY created_at ASC
                     LIMIT :batch_size
                 )
-                RETURNING id, org_id, team_id, user_id, chat_id, source, content, embedding, embedding_model, created_at
+                RETURNING id, org_id, user_id, chat_id, source, content, embedding, embedding_model, created_at
             ),
             inserted AS (
                 INSERT INTO long_term_memories_archive (
-                    id, org_id, team_id, user_id, chat_id, source, content, embedding, embedding_model, created_at, archived_at
+                    id, org_id, user_id, chat_id, source, content, embedding, embedding_model, created_at, archived_at
                 )
-                SELECT id, org_id, team_id, user_id, chat_id, source, content, embedding, embedding_model, created_at, now()
+                SELECT id, org_id, user_id, chat_id, source, content, embedding, embedding_model, created_at, now()
                 FROM moved
                 RETURNING 1
             )
@@ -353,7 +351,6 @@ class LongTermMemoryStore:
         self,
         *,
         org_id: str,
-        team_id: str,
         user_id: int,
         chat_id: int,
         query_text: str,
@@ -369,7 +366,6 @@ class LongTermMemoryStore:
             logger.warning("Long-term recall degraded: embedding failed: %s", exc)
             self._record_recall_quality(
                 org_id=org_id,
-                team_id=team_id,
                 user_id=user_id,
                 chat_id=chat_id,
                 query_text=normalized_query,
@@ -390,10 +386,9 @@ class LongTermMemoryStore:
                 created_at::text AS created_at,
                 1 - (embedding <=> CAST(:query_vector AS vector)) AS score
             FROM long_term_memories
-                        WHERE org_id = :org_id
-                            AND team_id = :team_id
-                            AND user_id = :user_id
-                            AND chat_id = :chat_id
+            WHERE org_id = :org_id
+                AND user_id = :user_id
+                AND chat_id = :chat_id
             ORDER BY embedding <=> CAST(:query_vector AS vector)
             LIMIT :row_limit
             """
@@ -406,7 +401,6 @@ class LongTermMemoryStore:
                     stmt,
                     {
                         "org_id": org_id,
-                        "team_id": team_id,
                         "user_id": int(user_id),
                         "chat_id": int(chat_id),
                         "query_vector": query_vector,
@@ -428,7 +422,6 @@ class LongTermMemoryStore:
             logger.warning("Long-term recall degraded: query failed: %s", exc)
             self._record_recall_quality(
                 org_id=org_id,
-                team_id=team_id,
                 user_id=user_id,
                 chat_id=chat_id,
                 query_text=normalized_query,
@@ -442,7 +435,6 @@ class LongTermMemoryStore:
         top_score = max((item.score for item in items), default=None)
         self._record_recall_quality(
             org_id=org_id,
-            team_id=team_id,
             user_id=user_id,
             chat_id=chat_id,
             query_text=normalized_query,
@@ -458,7 +450,6 @@ class LongTermMemoryStore:
         self,
         *,
         org_id: str,
-        team_id: str,
         user_id: int,
         chat_id: int,
         user_text: str,
@@ -487,10 +478,10 @@ class LongTermMemoryStore:
         stmt = text(
             """
             INSERT INTO long_term_memories (
-                org_id, team_id, user_id, chat_id, source, content, embedding, embedding_model, created_at
+                org_id, user_id, chat_id, source, content, embedding, embedding_model, created_at
             )
             VALUES (
-                :org_id, :team_id, :user_id, :chat_id, :source, :content, CAST(:embedding AS vector),
+                :org_id, :user_id, :chat_id, :source, :content, CAST(:embedding AS vector),
                 :embedding_model, :created_at
             )
             """
@@ -501,7 +492,6 @@ class LongTermMemoryStore:
                 stmt,
                 {
                     "org_id": org_id,
-                    "team_id": team_id,
                     "user_id": int(user_id),
                     "chat_id": int(chat_id),
                     "source": source,

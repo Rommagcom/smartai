@@ -51,15 +51,7 @@ class Settings:
     long_term_memory_retention_days: int
     long_term_memory_archive_batch_size: int
     long_term_memory_maintenance_interval_seconds: int
-    tenant_default_org_id: str
     rbac_enabled: bool
-    rag_collection_name: str | None
-    rag_drop_old: bool
-    rag_chunk_size: int
-    rag_overlap: int
-    rag_embedding_model: str
-    rag_milvus_host: str
-    rag_milvus_port: int
 
 
 
@@ -140,15 +132,5 @@ def load_settings() -> Settings:
         long_term_memory_maintenance_interval_seconds=int(
             os.getenv("LONG_TERM_MEMORY_MAINTENANCE_INTERVAL_SECONDS", "300")
         ),
-        tenant_default_org_id=os.getenv("TENANT_DEFAULT_ORG_ID", "default-org").strip() or "default-org",
         rbac_enabled=_to_bool(os.getenv("RBAC_ENABLED"), default=True),
-        rag_collection_name=(os.getenv("RAG_COLLECTION_NAME") or "").strip() or None,
-        rag_drop_old=_to_bool(os.getenv("RAG_DROP_OLD"), default=False),
-        rag_chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "768")),
-        rag_overlap=int(os.getenv("RAG_OVERLAP", "200")),
-        rag_embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text:latest").strip()
-        or "nomic-embed-text:latest",
-        rag_milvus_host=os.getenv("RAG_MILVUS_HOST", os.getenv("MILVUS_HOST", "127.0.0.1")).strip()
-        or "127.0.0.1",
-        rag_milvus_port=int(os.getenv("RAG_MILVUS_PORT", os.getenv("MILVUS_PORT", "19530"))),
     )

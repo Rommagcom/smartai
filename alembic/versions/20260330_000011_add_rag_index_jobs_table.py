@@ -1,4 +1,4 @@
-"""add rag index jobs table
+"""drop rag index jobs table after RAG removal
 
 Revision ID: 20260330_000011
 Revises: 20260328_000010
@@ -17,24 +17,30 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_rag_index_jobs_status_created")
+    op.execute("DROP INDEX IF EXISTS ix_rag_index_jobs_org_team_created")
+    op.execute("DROP TABLE IF EXISTS rag_index_jobs")
+
+
+def downgrade() -> None:
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS rag_index_jobs (
             id BIGSERIAL PRIMARY KEY,
-            job_id VARCHAR(64) NOT NULL UNIQUE,
+            job_id VARCHAR(128) NOT NULL UNIQUE,
             org_id VARCHAR(128) NOT NULL,
             team_id VARCHAR(128) NOT NULL,
-            user_id INTEGER NOT NULL,
-            scope VARCHAR(32) NOT NULL DEFAULT 'team',
+            user_id BIGINT NOT NULL,
+            scope VARCHAR(32) NOT NULL,
             file_name VARCHAR(512) NOT NULL,
             status VARCHAR(32) NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            started_at TIMESTAMPTZ,
-            finished_at TIMESTAMPTZ,
-            collection_name VARCHAR(255),
-            documents_count INTEGER,
-            chunks_count INTEGER,
-            error_text TEXT
+            created_at TIMESTAMPTZ NOT NULL,
+            started_at TIMESTAMPTZ NULL,
+            finished_at TIMESTAMPTZ NULL,
+            collection_name VARCHAR(256) NULL,
+            documents_count INTEGER NULL,
+            chunks_count INTEGER NULL,
+            error_text TEXT NULL
         )
         """
     )
@@ -50,9 +56,3 @@ def upgrade() -> None:
         ON rag_index_jobs (status, created_at DESC)
         """
     )
-
-
-def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS ix_rag_index_jobs_status_created")
-    op.execute("DROP INDEX IF EXISTS ix_rag_index_jobs_org_team_created")
-    op.execute("DROP TABLE IF EXISTS rag_index_jobs")

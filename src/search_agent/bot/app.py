@@ -15,7 +15,6 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, Message
 
-from search_agent.agent.document_rag_tool import document_rag
 from search_agent.agent.graph import OllamaLangGraphAgent
 from search_agent.config import load_settings
 from search_agent.memory.long_term import LongTermMemoryStore
@@ -28,7 +27,12 @@ logger = logging.getLogger(__name__)
 ADMIN_ONLY_TEXT = "This command is admin-only."
 RBAC_DISABLED_TEXT = "RBAC is disabled by configuration."
 USER_ID_INT_TEXT = "user_id must be integer"
-ORG_ID_EMPTY_TEXT = "org_id must not be empty"
+USER_SCOPE_ORG_ID = "user"
+
+
+def _user_scope_id(user_id: int) -> str:
+    normalized = max(0, int(user_id))
+    return f"user:{normalized}"
 
 
 def _chunk_message(text: str, max_length: int = 4096) -> list[str]:
@@ -195,7 +199,6 @@ async def _run_reminder_worker(
     reminder_store: ReminderStore,
     long_term_memory: LongTermMemoryStore | None,
     rbac_store: RbacStore | None,
-    default_org_id: str,
     admin_user_ids: set[int],
     poll_interval_seconds: int,
     max_jobs_per_tick: int,
@@ -222,7 +225,6 @@ async def _run_reminder_worker(
                             error_text="Reminder prompt is empty",
                             retry_delay_seconds=failure_retry_seconds,
                             org_id=item.org_id,
-                            team_id=item.team_id,
                             user_id=item.user_id,
                             chat_id=chat_id,
                         )
@@ -236,7 +238,7 @@ async def _run_reminder_worker(
                     if rbac_store is not None:
                         role = await asyncio.to_thread(
                             rbac_store.get_role,
-                            org_id=item.org_id or default_org_id,
+                            org_id=item.org_id or USER_SCOPE_ORG_ID,
                             user_id=item.user_id,
                             fallback_role=role,
                         )
@@ -246,7 +248,7 @@ async def _run_reminder_worker(
                             all_tools = set(agent.registry.tools.keys())
                             allowed_dynamic_tools = await asyncio.to_thread(
                                 rbac_store.resolve_allowed_skills,
-                                org_id=item.org_id or default_org_id,
+                                org_id=item.org_id or USER_SCOPE_ORG_ID,
                                 user_id=item.user_id,
                                 role=role,
                                 all_dynamic_tools=all_tools,
@@ -256,8 +258,7 @@ async def _run_reminder_worker(
                         try:
                             memories = await asyncio.to_thread(
                                 long_term_memory.recall,
-                                org_id=item.org_id or default_org_id,
-                                team_id=item.team_id or f"chat:{chat_id}",
+                                org_id=item.org_id or USER_SCOPE_ORG_ID,
                                 user_id=item.user_id,
                                 chat_id=chat_id,
                                 query_text=prompt,
@@ -273,8 +274,8 @@ async def _run_reminder_worker(
                         prompt,
                         history,
                         chat_id,
-                        item.org_id or default_org_id,
-                        item.team_id or f"chat:{chat_id}",
+                        item.org_id or USER_SCOPE_ORG_ID,
+                        _user_scope_id(item.user_id),
                         item.user_id,
                         role,
                         allowed_dynamic_tools,
@@ -293,8 +294,7 @@ async def _run_reminder_worker(
                         try:
                             await asyncio.to_thread(
                                 long_term_memory.remember,
-                                org_id=item.org_id or default_org_id,
-                                team_id=item.team_id or f"chat:{chat_id}",
+                                org_id=item.org_id or USER_SCOPE_ORG_ID,
                                 user_id=item.user_id,
                                 chat_id=chat_id,
                                 user_text=prompt,
@@ -316,7 +316,6 @@ async def _run_reminder_worker(
                         reminder_store.complete_reminder,
                         item.id,
                         org_id=item.org_id,
-                        team_id=item.team_id,
                         user_id=item.user_id,
                         chat_id=chat_id,
                     )
@@ -331,7 +330,6 @@ async def _run_reminder_worker(
                             reminder_store.deactivate_reminder,
                             item.id,
                             org_id=item.org_id,
-                            team_id=item.team_id,
                             user_id=item.user_id,
                             chat_id=chat_id,
                         )
@@ -349,7 +347,6 @@ async def _run_reminder_worker(
                         error_text=str(exc),
                         retry_delay_seconds=failure_retry_seconds,
                         org_id=item.org_id,
-                        team_id=item.team_id,
                         user_id=item.user_id,
                         chat_id=chat_id,
                     )
@@ -361,7 +358,6 @@ async def _run_reminder_worker(
                         error_text=str(exc),
                         retry_delay_seconds=failure_retry_seconds,
                         org_id=item.org_id,
-                        team_id=item.team_id,
                         user_id=item.user_id,
                         chat_id=chat_id,
                     )
@@ -392,8 +388,8 @@ async def start_bot() -> None:
     def _build_tenant_context(message: Message) -> TenantContext:
         user = message.from_user
         user_id = int(user.id) if user is not None else 0
-        org_id = settings.tenant_default_org_id
-        team_id = f"chat:{message.chat.id}"
+        org_id = USER_SCOPE_ORG_ID
+        team_id = _user_scope_id(user_id)
         role: Role = "admin" if user_id in settings.telegram_admin_user_ids else "member"
 
         if rbac_store is not None:
@@ -401,7 +397,6 @@ async def start_bot() -> None:
             if user_id in settings.telegram_admin_user_ids:
                 role = "admin"
             rbac_store.upsert_user(org_id=org_id, user_id=user_id, role=role)
-            rbac_store.ensure_team_membership(org_id=org_id, team_id=team_id, user_id=user_id)
 
         return TenantContext(
             org_id=org_id,
@@ -424,7 +419,6 @@ async def start_bot() -> None:
             user_id=context.user_id,
             role=context.role,
             all_dynamic_tools=all_tools,
-            team_id=context.team_id,
         )
 
     reminder_task = asyncio.create_task(
@@ -435,7 +429,6 @@ async def start_bot() -> None:
             reminder_store=reminder_store,
             long_term_memory=long_term_memory,
             rbac_store=rbac_store,
-            default_org_id=settings.tenant_default_org_id,
             admin_user_ids=settings.telegram_admin_user_ids,
             poll_interval_seconds=settings.reminder_poll_interval_seconds,
             max_jobs_per_tick=settings.reminder_max_jobs_per_tick,
@@ -455,140 +448,8 @@ async def start_bot() -> None:
             "Search agent is online. Send any query to run the Ollama + LangGraph flow.\\n"
             "Use /reload to re-read dynamic tools from the skills folder.\\n"
             "Use /reset to clear your conversation memory.\\n"
-            "Use /usage to see cumulative token consumption for this chat.\n"
-            "Use /rag_index with a document attachment to index it into RAG (caption supports team/private scope).\n"
-            "Use /rag_query [team|private] <question> to query indexed RAG documents."
+            "Use /usage to see cumulative token consumption for this chat."
         )
-
-    @dp.message(Command("rag_index"), F.document)
-    async def on_rag_index_document(message: Message) -> None:
-        document = message.document
-        if document is None:
-            await message.answer("Attach a file with caption: /rag_index [team|private]")
-            return
-
-        filename = str(document.file_name or "").strip()
-        suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if suffix not in {".txt", ".md", ".pdf"}:
-            await message.answer("Only .txt, .md, .pdf are supported for RAG indexing.")
-            return
-
-        parts = ((message.caption or message.text or "").strip()).split()
-        scope = "private"
-        for part in parts[1:]:
-            raw = part.strip().lower()
-            if raw in {"team", "private"}:
-                scope = raw
-
-        context = _build_tenant_context(message)
-
-        try:
-            telegram_file = await bot.get_file(document.file_id)
-            buffer = BytesIO()
-            if hasattr(bot, "download_file"):
-                await bot.download_file(telegram_file.file_path, destination=buffer)
-            else:
-                await bot.download(document, destination=buffer)
-
-            raw_bytes = buffer.getvalue()
-            if not raw_bytes:
-                await message.answer("Uploaded file is empty.")
-                return
-
-            file_content_base64 = base64.b64encode(raw_bytes).decode("ascii")
-            result_raw = await asyncio.to_thread(
-                document_rag,
-                action="index",
-                file_name=filename,
-                file_content_base64=file_content_base64,
-                chunk_size=int(settings.rag_chunk_size),
-                overlap=int(settings.rag_overlap),
-                collection_name=settings.rag_collection_name,
-                drop_old=bool(settings.rag_drop_old),
-                embedding_model=settings.rag_embedding_model,
-                scope=scope,
-                org_id=context.org_id,
-                team_id=context.team_id,
-                user_id=context.user_id,
-                milvus_host=settings.rag_milvus_host,
-                milvus_port=int(settings.rag_milvus_port),
-            )
-
-            payload = json.loads(str(result_raw))
-            if not isinstance(payload, dict):
-                await message.answer(f"RAG indexed, raw result: {result_raw}")
-                return
-
-            await message.answer(
-                "RAG index updated:\n"
-                f"- collection: {payload.get('collection_name', 'n/a')}\n"
-                f"- scope: {payload.get('scope', scope)}\n"
-                f"- documents: {payload.get('documents_count', 0)}\n"
-                f"- chunks: {payload.get('chunks_count', 0)}"
-            )
-        except Exception as exc:
-            logger.exception("RAG index failed from Telegram document: %s", exc)
-            await message.answer(f"RAG index failed: {exc}")
-
-    @dp.message(Command("rag_index"))
-    async def on_rag_index_help(message: Message) -> None:
-        await message.answer(
-            "Attach a .txt/.md/.pdf file with caption:\n"
-            "/rag_index [team|private]\n\n"
-            "Examples:\n"
-            "- /rag_index\n"
-            "- /rag_index private"
-        )
-
-    @dp.message(Command("rag_query"))
-    async def on_rag_query(message: Message) -> None:
-        text = (message.text or "").strip()
-        parts = text.split()
-        if len(parts) < 2:
-            await message.answer("Usage: /rag_query [team|private] <question>")
-            return
-
-        scope = "team"
-        query_start = 1
-        candidate_scope = parts[1].strip().lower()
-        if candidate_scope in {"team", "private"}:
-            scope = candidate_scope
-            query_start = 2
-
-        query = " ".join(parts[query_start:]).strip()
-        if not query:
-            await message.answer("Usage: /rag_query [team|private] <question>")
-            return
-
-        context = _build_tenant_context(message)
-
-        try:
-            result_raw = await asyncio.to_thread(
-                document_rag,
-                action="query",
-                query=query,
-                collection_name=settings.rag_collection_name,
-                embedding_model=settings.rag_embedding_model,
-                scope=scope,
-                org_id=context.org_id,
-                team_id=context.team_id,
-                user_id=context.user_id,
-                search_type="mmr",
-                top_k=5,
-                return_source_documents=True,
-                milvus_host=settings.rag_milvus_host,
-                milvus_port=int(settings.rag_milvus_port),
-            )
-            payload = json.loads(str(result_raw))
-            if isinstance(payload, dict):
-                answer = str(payload.get("answer") or "")
-                if answer:
-                    await message.answer(answer)
-                    return
-            await message.answer(str(result_raw))
-        except Exception as exc:
-            logger.exception("RAG query failed in Telegram: %s", exc)
-            await message.answer(f"RAG query failed: {exc}")
 
     @dp.message(Command("reload"))
     async def on_reload(message: Message) -> None:
@@ -655,114 +516,12 @@ async def start_bot() -> None:
         actor_id = int(message.from_user.id) if message.from_user else 0
         await asyncio.to_thread(
             rbac_store.set_role,
-            org_id=settings.tenant_default_org_id,
+            org_id=USER_SCOPE_ORG_ID,
             actor_user_id=actor_id,
             target_user_id=target_user_id,
             role=role_raw,
         )
         await message.answer(f"Role updated: user {target_user_id} -> {role_raw}")
-
-    @dp.message(Command("create_org"))
-    async def on_create_org(message: Message) -> None:
-        if not _is_admin(message):
-            await message.answer(ADMIN_ONLY_TEXT)
-            return
-        if rbac_store is None:
-            await message.answer(RBAC_DISABLED_TEXT)
-            return
-
-        parts = (message.text or "").split(maxsplit=2)
-        if len(parts) < 2:
-            await message.answer("Usage: /create_org <org_id> [display_name]")
-            return
-
-        org_id = parts[1].strip()
-        name = parts[2].strip() if len(parts) > 2 else org_id
-        if not org_id:
-            await message.answer(ORG_ID_EMPTY_TEXT)
-            return
-
-        actor_id = int(message.from_user.id) if message.from_user else 0
-        await asyncio.to_thread(
-            rbac_store.create_organization,
-            actor_user_id=actor_id,
-            org_id=org_id,
-            name=name,
-        )
-        await message.answer(f"Organization created/updated: {org_id} ({name})")
-
-    @dp.message(Command("create_team"))
-    async def on_create_team(message: Message) -> None:
-        if not _is_admin(message):
-            await message.answer(ADMIN_ONLY_TEXT)
-            return
-        if rbac_store is None:
-            await message.answer(RBAC_DISABLED_TEXT)
-            return
-
-        parts = (message.text or "").split(maxsplit=3)
-        if len(parts) < 3:
-            await message.answer("Usage: /create_team <org_id> <team_id> [display_name]")
-            return
-
-        org_id = parts[1].strip()
-        team_id = parts[2].strip()
-        name = parts[3].strip() if len(parts) > 3 else team_id
-        if not org_id:
-            await message.answer(ORG_ID_EMPTY_TEXT)
-            return
-        if not team_id:
-            await message.answer("team_id must not be empty")
-            return
-
-        actor_id = int(message.from_user.id) if message.from_user else 0
-        await asyncio.to_thread(
-            rbac_store.create_team,
-            actor_user_id=actor_id,
-            org_id=org_id,
-            team_id=team_id,
-            name=name,
-        )
-        await message.answer(f"Team created/updated: {org_id}/{team_id} ({name})")
-
-    @dp.message(Command("add_to_team"))
-    async def on_add_to_team(message: Message) -> None:
-        if not _is_admin(message):
-            await message.answer(ADMIN_ONLY_TEXT)
-            return
-        if rbac_store is None:
-            await message.answer(RBAC_DISABLED_TEXT)
-            return
-
-        parts = (message.text or "").split()
-        if len(parts) != 4:
-            await message.answer("Usage: /add_to_team <org_id> <team_id> <user_id>")
-            return
-
-        org_id = parts[1].strip()
-        team_id = parts[2].strip()
-        try:
-            target_user_id = int(parts[3])
-        except ValueError:
-            await message.answer(USER_ID_INT_TEXT)
-            return
-
-        if not org_id:
-            await message.answer(ORG_ID_EMPTY_TEXT)
-            return
-        if not team_id:
-            await message.answer("team_id must not be empty")
-            return
-
-        actor_id = int(message.from_user.id) if message.from_user else 0
-        await asyncio.to_thread(
-            rbac_store.add_user_to_team,
-            actor_user_id=actor_id,
-            org_id=org_id,
-            team_id=team_id,
-            user_id=target_user_id,
-        )
-        await message.answer(f"User {target_user_id} added to team {org_id}/{team_id}")
 
     @dp.message(Command("grant_skill"))
     async def on_grant_skill(message: Message) -> None:
@@ -792,7 +551,7 @@ async def start_bot() -> None:
         actor_id = int(message.from_user.id) if message.from_user else 0
         await asyncio.to_thread(
             rbac_store.assign_skill,
-            org_id=settings.tenant_default_org_id,
+            org_id=USER_SCOPE_ORG_ID,
             actor_user_id=actor_id,
             target_user_id=target_user_id,
             tool_name=tool_name,
@@ -827,7 +586,7 @@ async def start_bot() -> None:
         actor_id = int(message.from_user.id) if message.from_user else 0
         removed = await asyncio.to_thread(
             rbac_store.revoke_skill,
-            org_id=settings.tenant_default_org_id,
+            org_id=USER_SCOPE_ORG_ID,
             actor_user_id=actor_id,
             target_user_id=target_user_id,
             tool_name=tool_name,
@@ -842,7 +601,7 @@ async def start_bot() -> None:
         user_id = int(message.from_user.id) if message.from_user else 0
         skills = await asyncio.to_thread(
             rbac_store.list_user_skills,
-            org_id=settings.tenant_default_org_id,
+            org_id=USER_SCOPE_ORG_ID,
             user_id=user_id,
         )
         if not skills:
@@ -866,7 +625,6 @@ async def start_bot() -> None:
                 memories = await asyncio.to_thread(
                     long_term_memory.recall,
                     org_id=context.org_id,
-                    team_id=context.team_id,
                     user_id=context.user_id,
                     chat_id=message.chat.id,
                     query_text=text,
@@ -904,7 +662,6 @@ async def start_bot() -> None:
                 await asyncio.to_thread(
                     long_term_memory.remember,
                     org_id=context.org_id,
-                    team_id=context.team_id,
                     user_id=context.user_id,
                     chat_id=message.chat.id,
                     user_text=text,

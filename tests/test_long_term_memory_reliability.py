@@ -130,7 +130,6 @@ def test_remember_degrades_when_embedding_unavailable(monkeypatch: pytest.Monkey
 
     store.remember(
         org_id="acme",
-        team_id="finance",
         user_id=10,
         chat_id=99,
         user_text="hi",
@@ -149,7 +148,6 @@ def test_recall_degrades_to_empty_on_embedding_failure(monkeypatch: pytest.Monke
 
     results = store.recall(
         org_id="acme",
-        team_id="finance",
         user_id=7,
         chat_id=42,
         query_text="budget",

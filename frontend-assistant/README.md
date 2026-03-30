@@ -4,10 +4,9 @@ Standalone frontend application for the SmartAi API.
 
 ## Features
 - Login and registration against SmartAi auth endpoints
-- Team-scoped chat (`org_id` + `team_id`)
+- User-scoped chat (personal context by authenticated `user_id`)
 - Message history refresh
-- Auto refresh polling every 7 seconds (toggle in UI)
-- Admin panel for organizations, teams, members, roles, and dynamic skills
+- WebSocket live updates
 - Local token persistence in browser storage
 
 ## API routes used
@@ -15,14 +14,8 @@ Standalone frontend application for the SmartAi API.
 - `POST /api/v1/auth/login`
 - `POST /api/v1/chat/send`
 - `GET /api/v1/chat/messages`
-- `POST /api/v1/admin/organizations`
-- `POST /api/v1/admin/teams`
-- `POST /api/v1/admin/teams/members`
-- `POST /api/v1/admin/users/{target_user_id}/role`
-- `POST /api/v1/admin/users/{target_user_id}/skills/grant`
-- `POST /api/v1/admin/users/{target_user_id}/skills/revoke`
-- `GET /api/v1/admin/users/{target_user_id}/skills`
-- `GET /api/v1/admin/skills`
+- `GET /api/v1/ws-token`
+- `WS /api/v1/chat/ws?token=...`
 
 ## Run locally
 1. Install Node.js 20+ (includes npm).

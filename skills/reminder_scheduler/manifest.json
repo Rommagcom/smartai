@@ -3,7 +3,7 @@
   "package_version": "1.0.0",
   "package_files_sha256": {
     "skill.md": "55a7d6dcb6354dbc6c4c733b14f12c9d23d7458ef155ab084540d6c0b2b88c84",
-    "tool.py": "d3972c533046f78be77c46798298479d49187d140efe858ee24f12e67b2b8585"
+    "tool.py": "661079739093e36d5efe5489919b4c8f376b18bb8b3149518784c5db03ff4680"
   },
   "description": "Creates, lists and deletes scheduled reminders and notifications",
   "entrypoint": "tool.py",
@@ -27,10 +27,6 @@
       "org_id": {
         "type": "string",
         "description": "Organization tenant id"
-      },
-      "team_id": {
-        "type": "string",
-        "description": "Team id within organization"
       },
       "user_id": {
         "type": "integer",
@@ -118,6 +114,5 @@
       "action"
     ]
   },
-  "package_signature_algorithm": "hmac-sha256",
-  "package_signature": "72ec429b1ce61391f0fa92e7cbd10eb0b074979c372b7a27365123c6ca9b1090"
+  "package_signature_algorithm": "hmac-sha256"
 }

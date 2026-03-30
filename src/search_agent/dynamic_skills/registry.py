@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-BUILTIN_TOOL_NAMES = {"web_search", "web_fetch", "document_rag"}
+BUILTIN_TOOL_NAMES = {"web_search", "web_fetch"}
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$")
 _ARG_PRIMITIVE_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 _SKILL_SUMMARY_MAX_CHARS = 320

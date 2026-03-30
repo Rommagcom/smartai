@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import hashlib
 import json
@@ -12,7 +11,7 @@ import shutil
 import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any, NoReturn, Sequence
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
@@ -21,7 +20,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from search_agent.agent.graph import OllamaLangGraphAgent
-from search_agent.agent.document_rag_tool import document_rag
 from search_agent.config import Settings, load_settings
 from search_agent.memory.long_term import LongTermMemoryStore
 from search_agent.security.rbac import RbacStore, Role
@@ -31,9 +29,8 @@ APP_NAME = "SmartAi API"
 TOKEN_TTL_HOURS = 24
 PBKDF2_ITERATIONS = 120_000
 GROUP_SHORT_MEMORY_LIMIT = 20
+USER_SCOPE_ORG_ID = "user"
 _SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
-_RAG_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
-_RAG_ALLOWED_SUFFIXES = {".txt", ".md", ".pdf"}
 
 
 def _resolve_db_url(explicit: str | None = None) -> str:
@@ -73,9 +70,14 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _team_chat_id(org_id: str, team_id: str) -> int:
-    key = f"{org_id}:{team_id}"
+def _scope_chat_id(user_id: int) -> int:
+    key = f"user:{max(0, int(user_id))}"
     return int(zlib.crc32(key.encode("utf-8")) & 0x7FFFFFFF)
+
+
+def _user_scope_id(user_id: int) -> str:
+    normalized = max(0, int(user_id))
+    return f"user:{normalized}"
 
 
 def _slugify_skill_name(raw: str) -> str:
@@ -127,26 +129,6 @@ def _decode_uploaded_markdown(raw_bytes: bytes) -> str:
             continue
 
     raise ValueError("Unable to decode file content")
-
-
-def _validate_rag_upload_filename(filename: str) -> str:
-    normalized = str(filename or "").strip()
-    if not normalized:
-        raise ValueError("Uploaded file name is required")
-    suffix = "." + normalized.rsplit(".", 1)[-1].lower() if "." in normalized else ""
-    if suffix not in _RAG_ALLOWED_SUFFIXES:
-        allowed = ", ".join(sorted(_RAG_ALLOWED_SUFFIXES))
-        raise ValueError(f"Unsupported file extension: {suffix or '<none>'}. Allowed: {allowed}")
-    return normalized
-
-
-def _to_base64_ascii(raw_bytes: bytes) -> str:
-    if not raw_bytes:
-        raise ValueError("Uploaded file is empty")
-    if len(raw_bytes) > _RAG_UPLOAD_MAX_BYTES:
-        max_mb = _RAG_UPLOAD_MAX_BYTES // (1024 * 1024)
-        raise ValueError(f"Uploaded file exceeds {max_mb} MB")
-    return base64.b64encode(raw_bytes).decode("ascii")
 
 
 def _build_generated_tool_py(*, function_name: str, tool_name: str, instruction_text: str) -> str:
@@ -296,29 +278,12 @@ class CreateOrgRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
-class CreateTeamRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    team_id: str = Field(min_length=1, max_length=128)
-    name: str = Field(min_length=1, max_length=200)
-
-
-class AddTeamMemberRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    team_id: str = Field(min_length=1, max_length=128)
-    user_id: int
-
-
 class SetRoleRequest(BaseModel):
     org_id: str = Field(min_length=1, max_length=128)
     role: Role
 
 
 class SkillAssignmentRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    tool_name: str = Field(min_length=1, max_length=128)
-
-
-class TeamSkillAssignmentRequest(BaseModel):
     org_id: str = Field(min_length=1, max_length=128)
     tool_name: str = Field(min_length=1, max_length=128)
 
@@ -349,8 +314,6 @@ class MembershipUpsertRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    team_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=8000)
 
 
@@ -366,38 +329,14 @@ class ChatResponse(BaseModel):
     messages: list[ChatMessage]
 
 
-class RagQueryRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    team_id: str = Field(min_length=1, max_length=128)
-    query: str = Field(min_length=1, max_length=8000)
-    scope: str = Field(default="team", min_length=1, max_length=32)
-
-
 class WsSendMessageRequest(BaseModel):
-    org_id: str = Field(min_length=1, max_length=128)
-    team_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=8000)
     client_message_id: str | None = Field(default=None, max_length=128)
-
-
-class TeamSummary(BaseModel):
-    org_id: str
-    team_id: str
-    team_name: str
 
 
 class OrganizationSummary(BaseModel):
     org_id: str
     name: str
-
-
-class TeamMemberSummary(BaseModel):
-    user_id: int
-    email: str
-    full_name: str
-    title: str
-    profile_bio: str
-    role: str
 
 
 class AdminCreateUserRequest(BaseModel):
@@ -483,27 +422,6 @@ class BulkClaudeDryRunResponse(BaseModel):
     results: list[BulkClaudeDryRunItem]
 
 
-class RagIndexJobSummary(BaseModel):
-    job_id: str
-    org_id: str
-    team_id: str
-    user_id: int
-    scope: str
-    file_name: str
-    status: str
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    collection_name: str | None = None
-    documents_count: int | None = None
-    chunks_count: int | None = None
-    error: str | None = None
-
-
-class RagIndexJobListResponse(BaseModel):
-    jobs: list[RagIndexJobSummary]
-
-
 class ApiService:
     def __init__(self, settings: Settings) -> None:
         db_url = _resolve_db_url(settings.long_term_memory_database_url)
@@ -552,15 +470,15 @@ class RealtimeChatHub:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._lock = asyncio.Lock()
-        self._team_sockets: dict[str, set[WebSocket]] = {}
-        self._socket_team: dict[WebSocket, str] = {}
+        self._scope_sockets: dict[str, set[WebSocket]] = {}
+        self._socket_scope: dict[WebSocket, str] = {}
         self._redis: redis_async.Redis | None = None
         self._pubsub_task: asyncio.Task[Any] | None = None
         self._broadcast_channel = f"{settings.redis_key_prefix}:ws:broadcast"
 
     @staticmethod
-    def _team_key(org_id: str, team_id: str) -> str:
-        return f"{org_id}:{team_id}"
+    def _scope_key(user_id: int) -> str:
+        return str(max(0, int(user_id)))
 
     async def startup(self) -> None:
         if not self.settings.redis_url:
@@ -578,24 +496,24 @@ class RealtimeChatHub:
             await self._redis.close()
             self._redis = None
 
-    async def register_team(self, websocket: WebSocket, org_id: str, team_id: str) -> None:
-        team_key = self._team_key(org_id, team_id)
+    async def register_scope(self, websocket: WebSocket, user_id: int) -> None:
+        scope_key = self._scope_key(user_id)
         async with self._lock:
-            previous = self._socket_team.get(websocket)
-            if previous and previous in self._team_sockets:
-                self._team_sockets[previous].discard(websocket)
-                if not self._team_sockets[previous]:
-                    del self._team_sockets[previous]
-            self._socket_team[websocket] = team_key
-            self._team_sockets.setdefault(team_key, set()).add(websocket)
+            previous = self._socket_scope.get(websocket)
+            if previous and previous in self._scope_sockets:
+                self._scope_sockets[previous].discard(websocket)
+                if not self._scope_sockets[previous]:
+                    del self._scope_sockets[previous]
+            self._socket_scope[websocket] = scope_key
+            self._scope_sockets.setdefault(scope_key, set()).add(websocket)
 
     async def unregister(self, websocket: WebSocket) -> None:
         async with self._lock:
-            team_key = self._socket_team.pop(websocket, None)
-            if team_key and team_key in self._team_sockets:
-                self._team_sockets[team_key].discard(websocket)
-                if not self._team_sockets[team_key]:
-                    del self._team_sockets[team_key]
+            scope_key = self._socket_scope.pop(websocket, None)
+            if scope_key and scope_key in self._scope_sockets:
+                self._scope_sockets[scope_key].discard(websocket)
+                if not self._scope_sockets[scope_key]:
+                    del self._scope_sockets[scope_key]
 
     async def publish_snapshot(self, snapshot_payload: dict[str, Any]) -> None:
         if self._redis is not None:
@@ -603,13 +521,16 @@ class RealtimeChatHub:
         await self._broadcast_local(snapshot_payload)
 
     async def _broadcast_local(self, snapshot_payload: dict[str, Any]) -> None:
-        org_id = str(snapshot_payload.get("org_id") or "").strip()
-        team_id = str(snapshot_payload.get("team_id") or "").strip()
-        if not org_id or not team_id:
+        raw_user_id = snapshot_payload.get("user_id")
+        if raw_user_id is None:
             return
-        team_key = self._team_key(org_id, team_id)
+        try:
+            user_id = int(raw_user_id)
+        except Exception:
+            return
+        scope_key = self._scope_key(user_id)
         async with self._lock:
-            sockets = list(self._team_sockets.get(team_key, set()))
+            sockets = list(self._scope_sockets.get(scope_key, set()))
 
         dropped: list[WebSocket] = []
         for socket in sockets:
@@ -621,11 +542,11 @@ class RealtimeChatHub:
         if dropped:
             async with self._lock:
                 for socket in dropped:
-                    old_key = self._socket_team.pop(socket, None)
-                    if old_key and old_key in self._team_sockets:
-                        self._team_sockets[old_key].discard(socket)
-                        if not self._team_sockets[old_key]:
-                            del self._team_sockets[old_key]
+                    old_key = self._socket_scope.pop(socket, None)
+                    if old_key and old_key in self._scope_sockets:
+                        self._scope_sockets[old_key].discard(socket)
+                        if not self._scope_sockets[old_key]:
+                            del self._scope_sockets[old_key]
 
     async def _redis_listener(self) -> None:
         if self._redis is None:
@@ -686,7 +607,7 @@ class RealtimeChatHub:
                     LIMIT 1
                     """
                 ),
-                {"org_id": self.settings.tenant_default_org_id},
+                {"org_id": USER_SCOPE_ORG_ID},
             ).first()
             existing = conn.execute(
                 text("SELECT user_id FROM auth_users WHERE lower(email) = lower(:email) LIMIT 1"),
@@ -715,9 +636,9 @@ class RealtimeChatHub:
             ).mappings().first()
 
             user_id = int(row["user_id"])
-            self.rbac.ensure_organization(org_id=self.settings.tenant_default_org_id, name=self.settings.tenant_default_org_id)
+            self.rbac.ensure_organization(org_id=USER_SCOPE_ORG_ID, name=USER_SCOPE_ORG_ID)
             role: Role = "admin" if existing_admin is None else "member"
-            self.rbac.upsert_user(org_id=self.settings.tenant_default_org_id, user_id=user_id, role=role)
+            self.rbac.upsert_user(org_id=USER_SCOPE_ORG_ID, user_id=user_id, role=role)
             conn.execute(
                 text(
                     """
@@ -727,7 +648,7 @@ class RealtimeChatHub:
                     """
                 ),
                 {
-                    "org_id": self.settings.tenant_default_org_id,
+                    "org_id": USER_SCOPE_ORG_ID,
                     "user_id": user_id,
                     "created_at": now,
                 },
@@ -936,42 +857,6 @@ class RealtimeChatHub:
                 },
             )
 
-    def list_user_teams(self, *, user_id: int, org_id: str | None = None) -> list[TeamSummary]:
-        filter_org = (org_id or "").strip()
-        where_clause = "WHERE tm.user_id = :user_id"
-        params: dict[str, Any] = {"user_id": int(user_id)}
-        if filter_org:
-            where_clause += " AND tm.org_id = :org_id"
-            params["org_id"] = filter_org
-
-        with self.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    f"""
-                    SELECT
-                        tm.org_id,
-                        tm.team_id,
-                        COALESCE(t.name, tm.team_id) AS team_name
-                    FROM team_members tm
-                    LEFT JOIN teams t
-                      ON t.org_id = tm.org_id AND t.team_id = tm.team_id
-                    {where_clause}
-                    ORDER BY tm.org_id ASC, tm.team_id ASC
-                    """
-                ),
-                params,
-            ).mappings().all()
-
-        return [
-            TeamSummary(
-                org_id=str(row.get("org_id") or ""),
-                team_id=str(row.get("team_id") or ""),
-                team_name=str(row.get("team_name") or row.get("team_id") or ""),
-            )
-            for row in rows
-            if str(row.get("org_id") or "").strip() and str(row.get("team_id") or "").strip()
-        ]
-
     def list_organizations(self, *, actor_user_id: int) -> list[OrganizationSummary]:
         self._enforce_admin(actor_user_id)
         with self.engine.begin() as conn:
@@ -989,98 +874,6 @@ class RealtimeChatHub:
             for row in rows
             if str(row.get("org_id") or "").strip()
         ]
-
-    def list_org_teams(self, *, actor_user_id: int, org_id: str) -> list[TeamSummary]:
-        self._enforce_admin(actor_user_id)
-        with self.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT org_id, team_id, name
-                    FROM teams
-                    WHERE org_id = :org_id
-                    ORDER BY team_id ASC
-                    """
-                ),
-                {"org_id": org_id},
-            ).mappings().all()
-        return [
-            TeamSummary(
-                org_id=str(row.get("org_id") or org_id),
-                team_id=str(row.get("team_id") or ""),
-                team_name=str(row.get("name") or row.get("team_id") or ""),
-            )
-            for row in rows
-            if str(row.get("team_id") or "").strip()
-        ]
-
-    def list_team_members(self, *, actor_user_id: int, org_id: str, team_id: str) -> list[TeamMemberSummary]:
-        self._enforce_admin(actor_user_id)
-        with self.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        u.user_id,
-                        u.email,
-                        u.full_name,
-                        u.title,
-                        u.profile_bio,
-                        COALESCE(au.role, 'member') AS role
-                    FROM team_members tm
-                    JOIN auth_users u
-                      ON u.user_id = tm.user_id
-                    LEFT JOIN app_users au
-                      ON au.org_id = tm.org_id AND au.user_id = tm.user_id
-                    WHERE tm.org_id = :org_id AND tm.team_id = :team_id
-                    ORDER BY u.user_id ASC
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                },
-            ).mappings().all()
-        return [
-            TeamMemberSummary(
-                user_id=int(row.get("user_id") or 0),
-                email=str(row.get("email") or ""),
-                full_name=str(row.get("full_name") or ""),
-                title=str(row.get("title") or ""),
-                profile_bio=str(row.get("profile_bio") or ""),
-                role=str(row.get("role") or "member"),
-            )
-            for row in rows
-            if int(row.get("user_id") or 0) > 0
-        ]
-
-    def remove_from_team(self, *, actor_user_id: int, org_id: str, team_id: str, target_user_id: int) -> bool:
-        self._enforce_admin(actor_user_id)
-        with self.engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    """
-                    DELETE FROM team_members
-                    WHERE org_id = :org_id AND team_id = :team_id AND user_id = :user_id
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "user_id": int(target_user_id),
-                },
-            )
-        removed = int(result.rowcount or 0) > 0
-        self.rbac.audit(
-            org_id=org_id,
-            team_id=team_id,
-            actor_user_id=actor_user_id,
-            action="rbac.remove_user_from_team",
-            target_type="team_member",
-            target_id=f"{team_id}:{int(target_user_id)}",
-            details={"removed": removed},
-        )
-        return removed
 
     def create_user_by_admin(self, *, actor_user_id: int, payload: AdminCreateUserRequest) -> dict[str, Any]:
         self._enforce_admin(actor_user_id)
@@ -1340,7 +1133,7 @@ class RealtimeChatHub:
         if int(user_id) in self.settings.telegram_admin_user_ids:
             return True
         role = self.rbac.get_role(
-            org_id=self.settings.tenant_default_org_id,
+            org_id=USER_SCOPE_ORG_ID,
             user_id=int(user_id),
             fallback_role="member",
         )
@@ -1354,38 +1147,6 @@ class RealtimeChatHub:
         self._enforce_admin(actor_user_id)
         self.rbac.create_organization(actor_user_id=actor_user_id, org_id=payload.org_id, name=payload.name)
 
-    def create_team(self, *, actor_user_id: int, payload: CreateTeamRequest) -> None:
-        self._enforce_admin(actor_user_id)
-        self.rbac.create_team(
-            actor_user_id=actor_user_id,
-            org_id=payload.org_id,
-            team_id=payload.team_id,
-            name=payload.name,
-        )
-
-    def add_to_team(self, *, actor_user_id: int, payload: AddTeamMemberRequest) -> None:
-        self._enforce_admin(actor_user_id)
-        self.rbac.add_user_to_team(
-            actor_user_id=actor_user_id,
-            org_id=payload.org_id,
-            team_id=payload.team_id,
-            user_id=payload.user_id,
-        )
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO org_memberships (org_id, user_id, created_at)
-                    VALUES (:org_id, :user_id, :created_at)
-                    ON CONFLICT (org_id, user_id) DO NOTHING
-                    """
-                ),
-                {
-                    "org_id": payload.org_id,
-                    "user_id": int(payload.user_id),
-                    "created_at": datetime.now(UTC),
-                },
-            )
 
     def set_role(self, *, actor_user_id: int, target_user_id: int, payload: SetRoleRequest) -> None:
         self._enforce_admin(actor_user_id)
@@ -1648,28 +1409,6 @@ class RealtimeChatHub:
         self._enforce_admin(actor_user_id)
         return self.rbac.list_user_skills(org_id=org_id, user_id=target_user_id)
 
-    def list_team_skills(self, *, actor_user_id: int, org_id: str, team_id: str) -> list[str]:
-        self._enforce_admin(actor_user_id)
-        return self.rbac.list_team_skills(org_id=org_id, team_id=team_id)
-
-    def grant_team_skill(self, *, actor_user_id: int, team_id: str, payload: TeamSkillAssignmentRequest) -> None:
-        self._enforce_admin(actor_user_id)
-        self.rbac.assign_team_skill(
-            org_id=payload.org_id,
-            team_id=team_id,
-            actor_user_id=actor_user_id,
-            tool_name=payload.tool_name,
-        )
-
-    def revoke_team_skill(self, *, actor_user_id: int, team_id: str, payload: TeamSkillAssignmentRequest) -> bool:
-        self._enforce_admin(actor_user_id)
-        return self.rbac.revoke_team_skill(
-            org_id=payload.org_id,
-            team_id=team_id,
-            actor_user_id=actor_user_id,
-            tool_name=payload.tool_name,
-        )
-
     def list_dynamic_skills(self, *, actor_user_id: int) -> list[DynamicSkillSummary]:
         self._enforce_admin(actor_user_id)
         skills: list[DynamicSkillSummary] = []
@@ -1839,21 +1578,20 @@ class RealtimeChatHub:
         if member is None:
             raise HTTPException(status_code=403, detail="User is not a member of the target team")
 
-    def _load_group_history(self, *, org_id: str, team_id: str, limit: int = GROUP_SHORT_MEMORY_LIMIT) -> list[dict[str, str]]:
+    def _load_group_history(self, *, user_id: int, limit: int = GROUP_SHORT_MEMORY_LIMIT) -> list[dict[str, str]]:
         with self.engine.begin() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT sender_type, content
                     FROM group_messages
-                    WHERE org_id = :org_id AND team_id = :team_id
+                    WHERE scope_user_id = :scope_user_id
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
                 ),
                 {
-                    "org_id": org_id,
-                    "team_id": team_id,
+                    "scope_user_id": int(user_id),
                     "limit": max(1, int(limit)),
                 },
             ).mappings().all()
@@ -1870,8 +1608,7 @@ class RealtimeChatHub:
     def _append_group_message(
         self,
         *,
-        org_id: str,
-        team_id: str,
+        user_id: int,
         sender_user_id: int | None,
         sender_type: str,
         content: str,
@@ -1880,13 +1617,12 @@ class RealtimeChatHub:
             conn.execute(
                 text(
                     """
-                    INSERT INTO group_messages (org_id, team_id, sender_user_id, sender_type, content, created_at)
-                    VALUES (:org_id, :team_id, :sender_user_id, :sender_type, :content, :created_at)
+                    INSERT INTO group_messages (scope_user_id, sender_user_id, sender_type, content, created_at)
+                    VALUES (:scope_user_id, :sender_user_id, :sender_type, :content, :created_at)
                     """
                 ),
                 {
-                    "org_id": org_id,
-                    "team_id": team_id,
+                    "scope_user_id": int(user_id),
                     "sender_user_id": int(sender_user_id) if sender_user_id is not None else None,
                     "sender_type": sender_type,
                     "content": content,
@@ -1894,21 +1630,20 @@ class RealtimeChatHub:
                 },
             )
 
-    def _read_group_messages(self, *, org_id: str, team_id: str, limit: int = 30) -> list[ChatMessage]:
+    def _read_group_messages(self, *, user_id: int, limit: int = 30) -> list[ChatMessage]:
         with self.engine.begin() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT sender_type, sender_user_id, content, created_at::text AS created_at
                     FROM group_messages
-                    WHERE org_id = :org_id AND team_id = :team_id
+                    WHERE scope_user_id = :scope_user_id
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
                 ),
                 {
-                    "org_id": org_id,
-                    "team_id": team_id,
+                    "scope_user_id": int(user_id),
                     "limit": max(1, int(limit)),
                 },
             ).mappings().all()
@@ -1922,25 +1657,23 @@ class RealtimeChatHub:
             for row in reversed(rows)
         ]
 
-    def _recall_shared_memory(self, *, org_id: str, team_id: str, user_id: int, query: str) -> str:
+    def _recall_shared_memory(self, *, user_id: int, query: str) -> str:
         if self.long_term is None:
             return ""
 
         combined: list[str] = []
         try:
             shared = self.long_term.recall(
-                org_id=org_id,
-                team_id=team_id,
+                org_id=USER_SCOPE_ORG_ID,
                 user_id=0,
-                chat_id=_team_chat_id(org_id, team_id),
+                chat_id=_scope_chat_id(user_id),
                 query_text=query,
                 limit=3,
             )
             personal = self.long_term.recall(
-                org_id=org_id,
-                team_id=team_id,
+                org_id=USER_SCOPE_ORG_ID,
                 user_id=user_id,
-                chat_id=_team_chat_id(org_id, team_id),
+                chat_id=_scope_chat_id(user_id),
                 query_text=query,
                 limit=3,
             )
@@ -1960,9 +1693,8 @@ class RealtimeChatHub:
         return "\n".join(lines)
 
     def send_group_chat(self, *, user_id: int, payload: ChatRequest) -> ChatResponse:
-        org_id = payload.org_id.strip()
-        team_id = payload.team_id.strip()
-        self._assert_membership(org_id=org_id, team_id=team_id, user_id=user_id)
+        org_id = USER_SCOPE_ORG_ID
+        team_id = _user_scope_id(user_id)
 
         role = self.rbac.get_role(org_id=org_id, user_id=user_id, fallback_role="member")
         if self.settings.enable_dynamic_tools:
@@ -1975,20 +1707,16 @@ class RealtimeChatHub:
             user_id=user_id,
             role=role,
             all_dynamic_tools=all_dynamic,
-            team_id=team_id,
         )
 
         user_profile = self._user_profile_text(user_id=user_id)
-        team_roster_profile = self._team_members_context(org_id=org_id, team_id=team_id)
         try:
-            history = self._load_group_history(org_id=org_id, team_id=team_id)
+            history = self._load_group_history(user_id=user_id)
         except Exception:
             history = []
-        memory_context = self._recall_shared_memory(org_id=org_id, team_id=team_id, user_id=user_id, query=payload.message)
+        memory_context = self._recall_shared_memory(user_id=user_id, query=payload.message)
         if user_profile:
             history = [{"role": "system", "content": user_profile}, *history]
-        if team_roster_profile:
-            history = [{"role": "system", "content": team_roster_profile}, *history]
         if memory_context:
             history = [{"role": "system", "content": memory_context}, *history]
 
@@ -1996,7 +1724,7 @@ class RealtimeChatHub:
             answer_result = self.agent.run(
                 payload.message,
                 history,
-                _team_chat_id(org_id, team_id),
+                _scope_chat_id(user_id),
                 org_id,
                 team_id,
                 user_id,
@@ -2012,15 +1740,13 @@ class RealtimeChatHub:
 
         try:
             self._append_group_message(
-                org_id=org_id,
-                team_id=team_id,
+                user_id=user_id,
                 sender_user_id=user_id,
                 sender_type="user",
                 content=payload.message,
             )
             self._append_group_message(
-                org_id=org_id,
-                team_id=team_id,
+                user_id=user_id,
                 sender_user_id=None,
                 sender_type="assistant",
                 content=answer,
@@ -2032,18 +1758,16 @@ class RealtimeChatHub:
             try:
                 self.long_term.remember(
                     org_id=org_id,
-                    team_id=team_id,
                     user_id=user_id,
-                    chat_id=_team_chat_id(org_id, team_id),
+                    chat_id=_scope_chat_id(user_id),
                     user_text=payload.message,
                     assistant_text=answer,
                     source="api-chat",
                 )
                 self.long_term.remember(
                     org_id=org_id,
-                    team_id=team_id,
                     user_id=0,
-                    chat_id=_team_chat_id(org_id, team_id),
+                    chat_id=_scope_chat_id(user_id),
                     user_text=payload.message,
                     assistant_text=answer,
                     source="api-group",
@@ -2052,7 +1776,7 @@ class RealtimeChatHub:
                 pass
 
         try:
-            messages = self._read_group_messages(org_id=org_id, team_id=team_id)
+            messages = self._read_group_messages(user_id=user_id)
         except Exception:
             now_iso = datetime.now(UTC).isoformat()
             messages = [
@@ -2098,365 +1822,20 @@ class RealtimeChatHub:
             f"- About: {bio or 'Not provided'}"
         )
 
-    def _team_members_context(self, *, org_id: str, team_id: str) -> str:
-        with self.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT u.full_name, u.title, u.profile_bio
-                    FROM team_members tm
-                    JOIN auth_users u ON u.user_id = tm.user_id
-                    WHERE tm.org_id = :org_id AND tm.team_id = :team_id
-                    ORDER BY u.full_name ASC, u.user_id ASC
-                    LIMIT 30
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                },
-            ).mappings().all()
-
-        if not rows:
-            return ""
-
-        lines = ["Current team roster context:"]
-        for idx, row in enumerate(rows, start=1):
-            full_name = str(row.get("full_name") or "Unknown").strip() or "Unknown"
-            title = str(row.get("title") or "").strip() or "Unknown"
-            bio = str(row.get("profile_bio") or "").strip() or "Not provided"
-            lines.append(f"{idx}. {full_name} | {title} | {bio}")
-        return "\n".join(lines)
-
-
-class RagIndexJobManager:
-    def __init__(self, service: ApiService) -> None:
-        self.service = service
-        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._task: asyncio.Task[Any] | None = None
-
-    async def startup(self) -> None:
-        self._mark_interrupted_jobs()
-        self._prune_finished_jobs(retain=10)
-        if self._task is None:
-            self._task = asyncio.create_task(self._worker_loop(), name="rag-index-worker")
-
-    async def shutdown(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-
-    def _mark_interrupted_jobs(self) -> None:
-        now = datetime.now(UTC)
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    UPDATE rag_index_jobs
-                    SET status = 'failed',
-                        finished_at = :now,
-                        error_text = COALESCE(error_text, 'Job interrupted by API restart')
-                    WHERE status IN ('queued', 'running')
-                    """
-                ),
-                {"now": now},
-            )
-
-    async def enqueue(
-        self,
-        *,
-        org_id: str,
-        team_id: str,
-        user_id: int,
-        scope: str,
-        file_name: str,
-        raw_bytes: bytes,
-    ) -> dict[str, Any]:
-        now = datetime.now(UTC)
-        job_id = secrets.token_urlsafe(12)
-
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO rag_index_jobs (
-                        job_id,
-                        org_id,
-                        team_id,
-                        user_id,
-                        scope,
-                        file_name,
-                        status,
-                        created_at
-                    )
-                    VALUES (
-                        :job_id,
-                        :org_id,
-                        :team_id,
-                        :user_id,
-                        :scope,
-                        :file_name,
-                        'queued',
-                        :created_at
-                    )
-                    """
-                ),
-                {
-                    "job_id": job_id,
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "user_id": int(user_id),
-                    "scope": scope,
-                    "file_name": file_name,
-                    "created_at": now,
-                },
-            )
-
-        await self._queue.put(
-            {
-                "job_id": job_id,
-                "org_id": org_id,
-                "team_id": team_id,
-                "user_id": int(user_id),
-                "scope": scope,
-                "file_name": file_name,
-                "raw_bytes": raw_bytes,
-            }
-        )
-        return {
-            "job_id": job_id,
-            "org_id": org_id,
-            "team_id": team_id,
-            "user_id": int(user_id),
-            "scope": scope,
-            "file_name": file_name,
-            "status": "queued",
-            "created_at": now.isoformat(),
-            "started_at": None,
-            "finished_at": None,
-            "collection_name": None,
-            "documents_count": None,
-            "chunks_count": None,
-            "error": None,
-        }
-
-    async def list_jobs(self, *, org_id: str, team_id: str, actor_user_id: int, limit: int = 100) -> list[dict[str, Any]]:
-        with self.service.engine.begin() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        job_id,
-                        org_id,
-                        team_id,
-                        user_id,
-                        scope,
-                        file_name,
-                        status,
-                        created_at,
-                        started_at,
-                        finished_at,
-                        collection_name,
-                        documents_count,
-                        chunks_count,
-                        error_text AS error
-                    FROM rag_index_jobs
-                    WHERE org_id = :org_id
-                      AND team_id = :team_id
-                      AND (scope <> 'private' OR user_id = :actor_user_id)
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {
-                    "org_id": org_id,
-                    "team_id": team_id,
-                    "actor_user_id": int(actor_user_id),
-                    "limit": max(1, min(int(limit), 200)),
-                },
-            ).mappings().all()
-
-        jobs: list[dict[str, Any]] = []
-        for row in rows:
-            jobs.append(
-                {
-                    "job_id": str(row.get("job_id") or ""),
-                    "org_id": str(row.get("org_id") or ""),
-                    "team_id": str(row.get("team_id") or ""),
-                    "user_id": int(row.get("user_id") or 0),
-                    "scope": str(row.get("scope") or "team"),
-                    "file_name": str(row.get("file_name") or ""),
-                    "status": str(row.get("status") or "unknown"),
-                    "created_at": str(row.get("created_at") or ""),
-                    "started_at": str(row.get("started_at") or "") or None,
-                    "finished_at": str(row.get("finished_at") or "") or None,
-                    "collection_name": str(row.get("collection_name") or "") or None,
-                    "documents_count": int(row["documents_count"]) if row.get("documents_count") is not None else None,
-                    "chunks_count": int(row["chunks_count"]) if row.get("chunks_count") is not None else None,
-                    "error": str(row.get("error") or "") or None,
-                }
-            )
-        return jobs
-
-    def _prune_finished_jobs(self, *, retain: int) -> None:
-        keep_count = max(1, int(retain))
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    DELETE FROM rag_index_jobs
-                    WHERE id IN (
-                        SELECT id
-                        FROM (
-                            SELECT
-                                id,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY
-                                        org_id,
-                                        team_id,
-                                        CASE WHEN scope = 'private' THEN user_id ELSE 0 END
-                                    ORDER BY created_at DESC, id DESC
-                                ) AS rn
-                            FROM rag_index_jobs
-                            WHERE status IN ('succeeded', 'failed')
-                        ) ranked
-                        WHERE rn > :keep_count
-                    )
-                    """
-                ),
-                {"keep_count": keep_count},
-            )
-
-    async def _worker_loop(self) -> None:
-        while True:
-            item = await self._queue.get()
-            job_id = str(item.get("job_id") or "")
-            try:
-                self._mark_running(job_id)
-                result = await asyncio.to_thread(self._run_index_job, item)
-                self._mark_succeeded(job_id, result)
-            except Exception as exc:
-                self._mark_failed(job_id, str(exc))
-            finally:
-                self._queue.task_done()
-
-    def _run_index_job(self, item: dict[str, Any]) -> dict[str, Any]:
-        raw_bytes = bytes(item.get("raw_bytes") or b"")
-        result_raw = document_rag(
-            action="index",
-            file_name=str(item.get("file_name") or ""),
-            file_content_base64=_to_base64_ascii(raw_bytes),
-            chunk_size=int(self.service.settings.rag_chunk_size),
-            overlap=int(self.service.settings.rag_overlap),
-            collection_name=self.service.settings.rag_collection_name,
-            drop_old=bool(self.service.settings.rag_drop_old),
-            embedding_model=self.service.settings.rag_embedding_model,
-            scope=str(item.get("scope") or "team"),
-            org_id=str(item.get("org_id") or ""),
-            team_id=str(item.get("team_id") or ""),
-            user_id=int(item.get("user_id") or 0),
-            milvus_host=self.service.settings.rag_milvus_host,
-            milvus_port=int(self.service.settings.rag_milvus_port),
-        )
-        try:
-            payload = json.loads(str(result_raw))
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
-        return {"result": str(result_raw)}
-
-    def _mark_running(self, job_id: str) -> None:
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    UPDATE rag_index_jobs
-                    SET status = 'running',
-                        started_at = :started_at,
-                        error_text = NULL
-                    WHERE job_id = :job_id
-                    """
-                ),
-                {
-                    "job_id": job_id,
-                    "started_at": datetime.now(UTC),
-                },
-            )
-
-    def _mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
-        def _safe_int(value: Any) -> int | None:
-            if value is None:
-                return None
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    UPDATE rag_index_jobs
-                    SET status = 'succeeded',
-                        finished_at = :finished_at,
-                        collection_name = :collection_name,
-                        documents_count = :documents_count,
-                        chunks_count = :chunks_count,
-                        error_text = NULL
-                    WHERE job_id = :job_id
-                    """
-                ),
-                {
-                    "job_id": job_id,
-                    "finished_at": datetime.now(UTC),
-                    "collection_name": str(result.get("collection_name") or "") or None,
-                    "documents_count": _safe_int(result.get("documents_count")),
-                    "chunks_count": _safe_int(result.get("chunks_count")),
-                },
-            )
-            self._prune_finished_jobs(retain=10)
-
-    def _mark_failed(self, job_id: str, error_text: str) -> None:
-        with self.service.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    UPDATE rag_index_jobs
-                    SET status = 'failed',
-                        finished_at = :finished_at,
-                        error_text = :error_text
-                    WHERE job_id = :job_id
-                    """
-                ),
-                {
-                    "job_id": job_id,
-                    "finished_at": datetime.now(UTC),
-                    "error_text": str(error_text or "unknown error")[:4000],
-                },
-            )
-            self._prune_finished_jobs(retain=10)
-
-
 settings = load_settings()
 service = ApiService(settings)
 app = FastAPI(title=APP_NAME)
 chat_hub = RealtimeChatHub(settings)
-rag_jobs = RagIndexJobManager(service)
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
     await chat_hub.startup()
-    await rag_jobs.startup()
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     await chat_hub.shutdown()
-    await rag_jobs.shutdown()
 
 
 def _extract_bearer_token(authorization: str) -> str:
@@ -2474,17 +1853,22 @@ def get_current_user(authorization: Annotated[str, Header(alias="Authorization")
     return service.get_user_from_token(token)
 
 
+def _legacy_scope_removed() -> NoReturn:
+    raise HTTPException(
+        status_code=410,
+        detail="Organization/team functionality was removed. Use user_id-only endpoints.",
+    )
+
+
 def _build_chat_snapshot_payload(
     *,
-    org_id: str,
-    team_id: str,
+    user_id: int,
     messages: Sequence[ChatMessage],
     client_message_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": "chat.snapshot",
-        "org_id": org_id,
-        "team_id": team_id,
+        "user_id": int(user_id),
         "messages": [message.model_dump() for message in messages],
     }
     if client_message_id:
@@ -2527,56 +1911,14 @@ def change_my_password(payload: PasswordChangeRequest, user: CurrentUser) -> dic
     return {"status": "ok"}
 
 
-@app.get("/api/v1/users/me/teams")
-def list_my_teams(
-    user: CurrentUser,
-    org_id: str | None = None,
-) -> list[TeamSummary]:
-    return service.list_user_teams(user_id=int(user["user_id"]), org_id=org_id)
-
-
 @app.post("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def create_org(payload: CreateOrgRequest, user: CurrentUser) -> dict[str, str]:
-    service.create_org(actor_user_id=int(user["user_id"]), payload=payload)
-    return {"status": "ok"}
+    _legacy_scope_removed()
 
 
 @app.get("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def list_organizations(user: CurrentUser) -> list[OrganizationSummary]:
-    return service.list_organizations(actor_user_id=int(user["user_id"]))
-
-
-@app.post("/api/v1/admin/teams", responses={403: {"description": "Admin access required"}})
-def create_team(payload: CreateTeamRequest, user: CurrentUser) -> dict[str, str]:
-    service.create_team(actor_user_id=int(user["user_id"]), payload=payload)
-    return {"status": "ok"}
-
-
-@app.get("/api/v1/admin/organizations/{org_id}/teams", responses={403: {"description": "Admin access required"}})
-def list_org_teams(org_id: str, user: CurrentUser) -> list[TeamSummary]:
-    return service.list_org_teams(actor_user_id=int(user["user_id"]), org_id=org_id)
-
-
-@app.post("/api/v1/admin/teams/members", responses={403: {"description": "Admin access required"}})
-def add_to_team(payload: AddTeamMemberRequest, user: CurrentUser) -> dict[str, str]:
-    service.add_to_team(actor_user_id=int(user["user_id"]), payload=payload)
-    return {"status": "ok"}
-
-
-@app.get("/api/v1/admin/teams/{team_id}/members", responses={403: {"description": "Admin access required"}})
-def list_team_members(team_id: str, org_id: str, user: CurrentUser) -> list[TeamMemberSummary]:
-    return service.list_team_members(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
-
-
-@app.delete("/api/v1/admin/teams/{team_id}/members/{target_user_id}", responses={403: {"description": "Admin access required"}})
-def remove_from_team(team_id: str, target_user_id: int, org_id: str, user: CurrentUser) -> dict[str, Any]:
-    removed = service.remove_from_team(
-        actor_user_id=int(user["user_id"]),
-        org_id=org_id,
-        team_id=team_id,
-        target_user_id=target_user_id,
-    )
-    return {"status": "ok", "removed": removed}
+    _legacy_scope_removed()
 
 
 @app.get("/api/v1/admin/users", responses={403: {"description": "Admin access required"}})
@@ -2585,7 +1927,7 @@ def list_org_users(
     user: CurrentUser,
     team_id: str | None = None,
 ) -> list[AdminUserSummary]:
-    return service.list_org_users(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
+    _legacy_scope_removed()
 
 
 @app.get("/api/v1/admin/users/all", responses={403: {"description": "Admin access required"}})
@@ -2595,50 +1937,32 @@ def list_all_users(user: CurrentUser) -> list[GlobalAdminUserSummary]:
 
 @app.post("/api/v1/admin/users", responses={403: {"description": "Admin access required"}, 409: {"description": "Email already registered"}})
 def create_user_by_admin(payload: AdminCreateUserRequest, user: CurrentUser) -> dict[str, Any]:
-    return service.create_user_by_admin(actor_user_id=int(user["user_id"]), payload=payload)
+    _legacy_scope_removed()
 
 
 @app.patch("/api/v1/admin/users/{target_user_id}", responses={403: {"description": "Admin access required"}})
 def update_user_by_admin(target_user_id: int, payload: AdminUpdateUserRequest, user: CurrentUser) -> dict[str, str]:
-    service.update_user_by_admin(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
-    return {"status": "ok"}
+    _legacy_scope_removed()
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/otp", responses={403: {"description": "Admin access required"}})
 def reset_user_otp(target_user_id: int, payload: ResetPasswordRequest, user: CurrentUser) -> dict[str, Any]:
-    return service.reset_user_password_one_time(
-        actor_user_id=int(user["user_id"]),
-        org_id=payload.org_id,
-        target_user_id=target_user_id,
-        ttl_minutes=payload.ttl_minutes,
-    )
+    _legacy_scope_removed()
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/force-password-change", responses={403: {"description": "Admin access required"}})
 def force_user_password_change(target_user_id: int, payload: ForcePasswordChangeRequest, user: CurrentUser) -> dict[str, Any]:
-    return service.force_user_password_change(
-        actor_user_id=int(user["user_id"]),
-        org_id=payload.org_id,
-        target_user_id=target_user_id,
-    )
+    _legacy_scope_removed()
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/organizations/add", responses={403: {"description": "Admin access required"}})
 def bind_user_to_org(target_user_id: int, payload: MembershipUpsertRequest, user: CurrentUser) -> dict[str, Any]:
-    return service.bind_user_to_org(
-        actor_user_id=int(user["user_id"]),
-        target_user_id=target_user_id,
-        payload=payload,
-    )
+    _legacy_scope_removed()
 
 
 @app.delete("/api/v1/admin/users/{target_user_id}/organizations/{org_id}", responses={403: {"description": "Admin access required"}})
 def unbind_user_from_org(target_user_id: int, org_id: str, user: CurrentUser) -> dict[str, Any]:
-    return service.unbind_user_from_org(
-        actor_user_id=int(user["user_id"]),
-        target_user_id=target_user_id,
-        org_id=org_id,
-    )
+    _legacy_scope_removed()
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/role", responses={403: {"description": "Admin access required"}})
@@ -2647,8 +1971,7 @@ def set_role(
     payload: SetRoleRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    service.set_role(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
-    return {"status": "ok"}
+    _legacy_scope_removed()
 
 
 @app.post(
@@ -2660,8 +1983,7 @@ def grant_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    service.grant_skill(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
-    return {"status": "ok"}
+    _legacy_scope_removed()
 
 
 @app.post(
@@ -2673,8 +1995,7 @@ def revoke_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    removed = service.revoke_skill(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
-    return {"status": "ok", "removed": removed}
+    _legacy_scope_removed()
 
 
 @app.get("/api/v1/admin/users/{target_user_id}/skills", responses={403: {"description": "Admin access required"}})
@@ -2683,44 +2004,7 @@ def list_user_skills(
     org_id: str,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    skills = service.list_user_skills(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, org_id=org_id)
-    return {"skills": skills}
-
-
-@app.get("/api/v1/admin/teams/{team_id}/skills", responses={403: {"description": "Admin access required"}})
-def list_team_skills(
-    team_id: str,
-    org_id: str,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    skills = service.list_team_skills(actor_user_id=int(user["user_id"]), org_id=org_id, team_id=team_id)
-    return {"skills": skills}
-
-
-@app.post(
-    "/api/v1/admin/teams/{team_id}/skills/grant",
-    responses={403: {"description": "Admin access required"}},
-)
-def grant_team_skill(
-    team_id: str,
-    payload: TeamSkillAssignmentRequest,
-    user: CurrentUser,
-) -> dict[str, str]:
-    service.grant_team_skill(actor_user_id=int(user["user_id"]), team_id=team_id, payload=payload)
-    return {"status": "ok"}
-
-
-@app.post(
-    "/api/v1/admin/teams/{team_id}/skills/revoke",
-    responses={403: {"description": "Admin access required"}},
-)
-def revoke_team_skill(
-    team_id: str,
-    payload: TeamSkillAssignmentRequest,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    removed = service.revoke_team_skill(actor_user_id=int(user["user_id"]), team_id=team_id, payload=payload)
-    return {"status": "ok", "removed": removed}
+    _legacy_scope_removed()
 
 
 @app.get("/api/v1/admin/skills", responses={403: {"description": "Admin access required"}})
@@ -2864,137 +2148,21 @@ def delete_dynamic_skill(skill_name: str, user: CurrentUser) -> DynamicSkillDele
     return DynamicSkillDeleteResponse(status="ok", deleted=deleted)
 
 
-@app.post("/api/v1/chat/send", responses={403: {"description": "User is not a member of the target team"}})
+@app.post("/api/v1/chat/send")
 async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
-    response = service.send_group_chat(user_id=int(user["user_id"]), payload=payload)
+    current_user_id = int(user["user_id"])
+    response = service.send_group_chat(user_id=current_user_id, payload=payload)
     snapshot_payload = _build_chat_snapshot_payload(
-        org_id=payload.org_id,
-        team_id=payload.team_id,
+        user_id=current_user_id,
         messages=response.messages,
     )
     await chat_hub.publish_snapshot(snapshot_payload)
     return response
 
 
-@app.post("/api/v1/rag/index-file", responses={403: {"description": "User is not a member of the target team"}})
-async def rag_index_file(
-    user: CurrentUser,
-    org_id: str = Form(...),
-    team_id: str = Form(...),
-    file: UploadFile = File(...),
-    scope: str = Form(default="team"),
-) -> dict[str, Any]:
-    actor_user_id = int(user["user_id"])
-    normalized_org_id = str(org_id or "").strip()
-    normalized_team_id = str(team_id or "").strip()
-    if not normalized_org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
-    if not normalized_team_id:
-        raise HTTPException(status_code=400, detail="team_id is required")
-
-    service._assert_membership(org_id=normalized_org_id, team_id=normalized_team_id, user_id=actor_user_id)
-
-    try:
-        filename = _validate_rag_upload_filename(str(file.filename or ""))
-        raw_bytes = await file.read()
-        if not raw_bytes:
-            raise ValueError("Uploaded file is empty")
-        if len(raw_bytes) > _RAG_UPLOAD_MAX_BYTES:
-            max_mb = _RAG_UPLOAD_MAX_BYTES // (1024 * 1024)
-            raise ValueError(f"Uploaded file exceeds {max_mb} MB")
-        normalized_scope = str(scope or "team").strip() or "team"
-        job = await rag_jobs.enqueue(
-            org_id=normalized_org_id,
-            team_id=normalized_team_id,
-            user_id=actor_user_id,
-            scope=normalized_scope,
-            file_name=filename,
-            raw_bytes=raw_bytes,
-        )
-        return {
-            "status": "queued",
-            "job": job,
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"RAG indexing enqueue failed: {exc}") from exc
-
-
-@app.get("/api/v1/rag/index-jobs", responses={403: {"description": "User is not a member of the target team"}})
-async def rag_index_jobs(
-    org_id: str,
-    team_id: str,
-    user: CurrentUser,
-    limit: int = 100,
-) -> RagIndexJobListResponse:
-    actor_user_id = int(user["user_id"])
-    normalized_org_id = str(org_id or "").strip()
-    normalized_team_id = str(team_id or "").strip()
-    if not normalized_org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
-    if not normalized_team_id:
-        raise HTTPException(status_code=400, detail="team_id is required")
-
-    service._assert_membership(org_id=normalized_org_id, team_id=normalized_team_id, user_id=actor_user_id)
-
-    jobs = await rag_jobs.list_jobs(
-        org_id=normalized_org_id,
-        team_id=normalized_team_id,
-        actor_user_id=actor_user_id,
-        limit=max(1, min(int(limit), 200)),
-    )
-    return RagIndexJobListResponse(
-        jobs=[RagIndexJobSummary(**item) for item in jobs],
-    )
-
-
-@app.post("/api/v1/rag/query", responses={403: {"description": "User is not a member of the target team"}})
-def rag_query(payload: RagQueryRequest, user: CurrentUser) -> dict[str, Any]:
-    actor_user_id = int(user["user_id"])
-    org_id = payload.org_id.strip()
-    team_id = payload.team_id.strip()
-
-    service._assert_membership(org_id=org_id, team_id=team_id, user_id=actor_user_id)
-
-    try:
-        result_raw = document_rag(
-            action="query",
-            query=payload.query,
-            collection_name=service.settings.rag_collection_name,
-            embedding_model=service.settings.rag_embedding_model,
-            scope=payload.scope,
-            org_id=org_id,
-            team_id=team_id,
-            user_id=actor_user_id,
-            milvus_host=service.settings.rag_milvus_host,
-            milvus_port=int(service.settings.rag_milvus_port),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"RAG query failed: {exc}") from exc
-
-    try:
-        parsed = json.loads(result_raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
-    return {"status": "ok", "result": str(result_raw)}
-
-
-@app.get("/api/v1/chat/messages", responses={403: {"description": "User is not a member of the target team"}})
-def chat_messages(
-    org_id: str,
-    team_id: str,
-    user: CurrentUser,
-) -> list[ChatMessage]:
-    service._assert_membership(org_id=org_id, team_id=team_id, user_id=int(user["user_id"]))
-    return service._read_group_messages(org_id=org_id, team_id=team_id)
+@app.get("/api/v1/chat/messages")
+def chat_messages(user: CurrentUser) -> list[ChatMessage]:
+    return service._read_group_messages(user_id=int(user["user_id"]))
 
 
 @app.websocket("/api/v1/chat/ws")
@@ -3020,27 +2188,11 @@ async def chat_websocket(websocket: WebSocket) -> None:
             action = str(incoming.get("action") or "").strip().lower()
 
             if action == "subscribe":
-                org_id = str(incoming.get("org_id") or "").strip()
-                team_id = str(incoming.get("team_id") or "").strip()
-                if not org_id or not team_id:
-                    await websocket.send_json({"type": "error", "detail": "org_id and team_id are required"})
-                    continue
-
-                try:
-                    service._assert_membership(
-                        org_id=org_id,
-                        team_id=team_id,
-                        user_id=int(current_user["user_id"]),
-                    )
-                except HTTPException:
-                    await websocket.send_json({"type": "error", "detail": "forbidden"})
-                    continue
-
-                await chat_hub.register_team(websocket, org_id, team_id)
+                current_user_id = int(current_user["user_id"])
+                await chat_hub.register_scope(websocket, current_user_id)
                 snapshot = _build_chat_snapshot_payload(
-                    org_id=org_id,
-                    team_id=team_id,
-                    messages=service._read_group_messages(org_id=org_id, team_id=team_id),
+                    user_id=current_user_id,
+                    messages=service._read_group_messages(user_id=current_user_id),
                 )
                 await websocket.send_json(snapshot)
                 continue
@@ -3052,12 +2204,12 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     await websocket.send_json({"type": "error", "detail": str(exc)})
                     continue
 
+                current_user_id = int(current_user["user_id"])
+
                 try:
                     response = service.send_group_chat(
-                        user_id=int(current_user["user_id"]),
+                        user_id=current_user_id,
                         payload=ChatRequest(
-                            org_id=request.org_id,
-                            team_id=request.team_id,
                             message=request.message,
                         ),
                     )
@@ -3066,8 +2218,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                     continue
 
                 snapshot = _build_chat_snapshot_payload(
-                    org_id=request.org_id,
-                    team_id=request.team_id,
+                    user_id=current_user_id,
                     messages=response.messages,
                     client_message_id=request.client_message_id,
                 )

@@ -34,7 +34,6 @@ _reminders_table = Table(
     _metadata,
     Column("id", String(36), primary_key=True),
     Column("org_id", Text, nullable=False, server_default="default-org", index=True),
-    Column("team_id", Text, nullable=False, server_default="chat", index=True),
     Column("user_id", BigInteger, nullable=False, server_default="0", index=True),
     Column("chat_id", BigInteger, nullable=False, index=True),
     Column("title", Text, nullable=False),
@@ -62,7 +61,6 @@ _reminders_table = Table(
 class ReminderRecord:
     id: str
     org_id: str
-    team_id: str
     user_id: int
     chat_id: int
     title: str
@@ -84,7 +82,6 @@ class ReminderRecord:
         return {
             "id": self.id,
             "org_id": self.org_id,
-            "team_id": self.team_id,
             "user_id": self.user_id,
             "chat_id": self.chat_id,
             "title": self.title,
@@ -107,7 +104,6 @@ class ReminderRecord:
 @dataclass(slots=True)
 class ReminderOwnerContext:
     org_id: str
-    team_id: str
     user_id: int
 
 
@@ -167,7 +163,6 @@ class ReminderStore:
         values = {
             "id": reminder_id,
             "org_id": owner.org_id.strip() or "default-org",
-            "team_id": owner.team_id.strip() or "chat",
             "user_id": int(owner.user_id),
             "chat_id": int(chat_id),
             "title": title.strip() or "Reminder",
@@ -199,7 +194,6 @@ class ReminderStore:
         self,
         *,
         org_id: str | None = None,
-        team_id: str | None = None,
         user_id: int | None = None,
         chat_id: int | None = None,
         active_only: bool = True,
@@ -207,8 +201,6 @@ class ReminderStore:
         stmt = select(_reminders_table)
         if org_id is not None:
             stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
-        if team_id is not None:
-            stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
         if user_id is not None:
             stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
         if chat_id is not None:
@@ -227,15 +219,12 @@ class ReminderStore:
         reminder_id: str,
         *,
         org_id: str | None = None,
-        team_id: str | None = None,
         user_id: int | None = None,
         chat_id: int | None = None,
     ) -> bool:
         stmt = delete(_reminders_table).where(_reminders_table.c.id == reminder_id)
         if org_id is not None:
             stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
-        if team_id is not None:
-            stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
         if user_id is not None:
             stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
         if chat_id is not None:
@@ -250,7 +239,6 @@ class ReminderStore:
         reminder_id: str,
         *,
         org_id: str | None = None,
-        team_id: str | None = None,
         user_id: int | None = None,
         chat_id: int | None = None,
     ) -> bool:
@@ -267,8 +255,6 @@ class ReminderStore:
         )
         if org_id is not None:
             stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
-        if team_id is not None:
-            stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
         if user_id is not None:
             stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
         if chat_id is not None:
@@ -334,7 +320,6 @@ class ReminderStore:
         reminder_id: str,
         *,
         org_id: str | None = None,
-        team_id: str | None = None,
         user_id: int | None = None,
         chat_id: int | None = None,
     ) -> bool:
@@ -343,8 +328,6 @@ class ReminderStore:
             stmt = select(_reminders_table).where(_reminders_table.c.id == reminder_id)
             if org_id is not None:
                 stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
-            if team_id is not None:
-                stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
             if user_id is not None:
                 stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
             if chat_id is not None:
@@ -389,7 +372,6 @@ class ReminderStore:
         error_text: str,
         retry_delay_seconds: int = 30,
         org_id: str | None = None,
-        team_id: str | None = None,
         user_id: int | None = None,
         chat_id: int | None = None,
     ) -> bool:
@@ -399,8 +381,6 @@ class ReminderStore:
             stmt = select(_reminders_table).where(_reminders_table.c.id == reminder_id)
             if org_id is not None:
                 stmt = stmt.where(_reminders_table.c.org_id == str(org_id))
-            if team_id is not None:
-                stmt = stmt.where(_reminders_table.c.team_id == str(team_id))
             if user_id is not None:
                 stmt = stmt.where(_reminders_table.c.user_id == int(user_id))
             if chat_id is not None:
@@ -613,7 +593,6 @@ class ReminderStore:
         return ReminderRecord(
             id=str(raw.get("id", "")),
             org_id=str(raw.get("org_id", "default-org")),
-            team_id=str(raw.get("team_id", "chat")),
             user_id=int(raw.get("user_id", 0)),
             chat_id=int(raw.get("chat_id", 0)),
             title=str(raw.get("title", "Reminder")),
