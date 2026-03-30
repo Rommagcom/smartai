@@ -447,6 +447,18 @@ function App() {
 
     if (!response.ok) {
       const errorMessage = parseApiError(payload) || rawText.trim() || `Request failed (HTTP ${response.status})`;
+
+      const isAuthExpired =
+        withAuth &&
+        (response.status === 401 || /token\s+expired|expired\s+token/i.test(errorMessage));
+      if (isAuthExpired) {
+        closeChatSocket();
+        clearPendingSendTimeout();
+        writeStoredToken("");
+        setToken("");
+        setStatus("Session expired. Please sign in again.");
+      }
+
       throw new Error(errorMessage);
     }
     return payload || {};
@@ -1400,7 +1412,7 @@ function App() {
       return;
     }
     void refreshAdminAccess();
-    void loadMyTeams();
+    void loadMyTeams().catch(() => null);
   }, [isAuthenticated, token]);
 
   useEffect(() => {
