@@ -222,6 +222,30 @@ All endpoints below require admin user.
 - `POST /api/v1/rag/index-file`: upload one file and index it through built-in `document_rag`.
 - `POST /api/v1/rag/query`: query already indexed RAG collection directly.
 
+Request examples:
+
+```http
+POST /api/v1/rag/index-file
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+
+org_id=acme
+team_id=finance
+scope=team
+file=@policy.pdf
+```
+
+```http
+POST /api/v1/rag/query
+Authorization: Bearer <token>
+{
+   "org_id": "acme",
+   "team_id": "finance",
+   "query": "Summarize key reimbursement rules",
+   "scope": "team"
+}
+```
+
 RAG runtime defaults are read from `.env`:
 - `RAG_COLLECTION_NAME`
 - `RAG_DROP_OLD`

@@ -375,11 +375,12 @@ class OllamaLangGraphAgent:
                 arguments.setdefault("user_id", state_user_id)
 
         if tool_name == "document_rag":
-            arguments.setdefault("org_id", str(state.get("org_id") or "default-org"))
-            arguments.setdefault("team_id", str(state.get("team_id") or "chat"))
+            # Never trust model-provided tenant identifiers for built-in data tools.
+            arguments["org_id"] = str(state.get("org_id") or "default-org")
+            arguments["team_id"] = str(state.get("team_id") or "chat")
             state_user_id = state.get("user_id")
             if isinstance(state_user_id, int):
-                arguments.setdefault("user_id", state_user_id)
+                arguments["user_id"] = state_user_id
 
         return arguments
 

@@ -2,6 +2,10 @@
 
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
+const DEFAULT_RAG_QUERY_FORM = {
+  query: "",
+  scope: "team",
+};
 const DEFAULT_CREATE_ORG_FORM = { org_id: "", name: "" };
 const DEFAULT_CREATE_TEAM_FORM = { team_id: "", name: "" };
 const DEFAULT_CREATE_USER_FORM = { email: "", full_name: "", title: "", profile_bio: "", role: "member", password: "" };
@@ -283,6 +287,11 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [messageDraft, setMessageDraft] = useState("");
   const [pendingMessage, setPendingMessage] = useState(null);
+  const [ragUploadScope, setRagUploadScope] = useState("team");
+  const [ragUploadFile, setRagUploadFile] = useState(null);
+  const [ragQueryForm, setRagQueryForm] = useState(DEFAULT_RAG_QUERY_FORM);
+  const [ragBusy, setRagBusy] = useState(false);
+  const [ragResult, setRagResult] = useState(null);
 
   const [adminSection, setAdminSection] = useState("organizations");
   const [organizations, setOrganizations] = useState([]);
@@ -326,6 +335,7 @@ function App() {
   const wsRetryTimerRef = useRef(null);
   const pendingSendTimeoutRef = useRef(null);
   const pendingMessageRef = useRef(null);
+  const ragFileInputRef = useRef(null);
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
@@ -402,7 +412,11 @@ function App() {
   }, [availableSkills, skillsSearch]);
 
   async function request(path, options = {}, withAuth = true) {
-    const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+    const isMultipart = options.body instanceof FormData;
+    const headers = options.headers ? { ...options.headers } : {};
+    if (!isMultipart && !("Content-Type" in headers)) {
+      headers["Content-Type"] = "application/json";
+    }
     if (withAuth && token) {
       headers.Authorization = `Bearer ${token}`;
     }
@@ -1069,6 +1083,77 @@ function App() {
     }
   }
 
+  async function indexRagDocument() {
+    if (!activeTeam) {
+      setStatus("Select team in sidebar first.");
+      return;
+    }
+    if (!ragUploadFile) {
+      setStatus("Choose a .txt, .md or .pdf file for RAG indexing.");
+      return;
+    }
+
+    setRagBusy(true);
+    setStatus("Indexing document into RAG...");
+    try {
+      const formData = new FormData();
+      formData.append("org_id", activeTeam.org_id);
+      formData.append("team_id", activeTeam.team_id);
+      formData.append("scope", ragUploadScope);
+      formData.append("file", ragUploadFile);
+
+      const payload = await request("/rag/index-file", {
+        method: "POST",
+        body: formData,
+      });
+
+      setRagResult(payload);
+      setRagUploadFile(null);
+      if (ragFileInputRef.current) {
+        ragFileInputRef.current.value = "";
+      }
+      const chunksCount = Number(payload?.chunks_count || 0);
+      setStatus(`RAG index updated (${chunksCount} chunks).`);
+    } catch (error) {
+      setStatus(`RAG indexing failed: ${error.message}`);
+    } finally {
+      setRagBusy(false);
+    }
+  }
+
+  async function queryRagDocuments() {
+    const text = String(ragQueryForm.query || "").trim();
+    if (!activeTeam) {
+      setStatus("Select team in sidebar first.");
+      return;
+    }
+    if (!text) {
+      setStatus("Type a question for RAG query.");
+      return;
+    }
+
+    setRagBusy(true);
+    setStatus("Running RAG query...");
+    try {
+      const payload = await request("/rag/query", {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: activeTeam.org_id,
+          team_id: activeTeam.team_id,
+          query: text,
+          scope: ragQueryForm.scope,
+        }),
+      });
+
+      setRagResult(payload);
+      setStatus("RAG answer received.");
+    } catch (error) {
+      setStatus(`RAG query failed: ${error.message}`);
+    } finally {
+      setRagBusy(false);
+    }
+  }
+
   async function loadTeamSkills() {
     if (!selectedOrgId || !selectedTeamId) {
       throw new Error("Select organization and team first");
@@ -1190,6 +1275,12 @@ function App() {
     setUserDirectory([]);
     setStatus("Signed out.");
     setWsStatus("offline");
+    setRagUploadFile(null);
+    setRagQueryForm(DEFAULT_RAG_QUERY_FORM);
+    setRagResult(null);
+    if (ragFileInputRef.current) {
+      ragFileInputRef.current.value = "";
+    }
   }
 
   useEffect(() => {
@@ -1505,6 +1596,89 @@ function App() {
                       </div>
                     </div>
                   </div>
+
+                  <section className="rag-panel card">
+                    <div className="rag-head">
+                      <h3>Document RAG</h3>
+                      <span className="pane-topbar-text">Index + Query</span>
+                    </div>
+
+                    <div className="rag-grid">
+                      <label>
+                        Scope for indexing
+                        <select value={ragUploadScope} onChange={(event) => setRagUploadScope(event.target.value)}>
+                          <option value="team">team</option>
+                          <option value="private">private</option>
+                        </select>
+                      </label>
+                      <label>
+                        File (.txt, .md, .pdf)
+                        <input
+                          ref={ragFileInputRef}
+                          type="file"
+                          accept=".txt,.md,.pdf"
+                          onChange={(event) => setRagUploadFile(event.target.files?.[0] || null)}
+                        />
+                      </label>
+                    </div>
+                    <div className="rag-actions">
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={ragBusy || !activeTeam || !ragUploadFile}
+                        onClick={() => void indexRagDocument()}
+                      >
+                        {ragBusy ? "Processing..." : "Index Document"}
+                      </button>
+                    </div>
+
+                    <div className="rag-grid rag-query-grid">
+                      <label className="rag-query-box">
+                        Ask indexed documents
+                        <textarea
+                          rows={3}
+                          value={ragQueryForm.query}
+                          onChange={(event) => setRagQueryForm((prev) => ({ ...prev, query: event.target.value }))}
+                          placeholder="What does the uploaded document say about ...?"
+                        />
+                      </label>
+                      <label>
+                        Query scope
+                        <select
+                          value={ragQueryForm.scope}
+                          onChange={(event) => setRagQueryForm((prev) => ({ ...prev, scope: event.target.value }))}
+                        >
+                          <option value="team">team</option>
+                          <option value="private">private</option>
+                        </select>
+                      </label>
+                    </div>
+                    <p className="rag-hint">
+                      Tip: ask specific questions and include key terms from your document, for example: "What are invoice approval limits in this policy?"
+                    </p>
+                    <div className="rag-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={ragBusy || !activeTeam || !String(ragQueryForm.query || "").trim()}
+                        onClick={() => void queryRagDocuments()}
+                      >
+                        {ragBusy ? "Processing..." : "Query RAG"}
+                      </button>
+                    </div>
+
+                    {ragResult ? (
+                      <div className="rag-result">
+                        {ragResult.answer ? (
+                          <div className="rag-answer">
+                            <h4>Answer</h4>
+                            <p>{String(ragResult.answer || "")}</p>
+                          </div>
+                        ) : null}
+                        <pre>{JSON.stringify(ragResult, null, 2)}</pre>
+                      </div>
+                    ) : null}
+                  </section>
                 </>
               ) : (
                 <div className="admin-window">

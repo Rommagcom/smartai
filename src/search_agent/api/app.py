@@ -371,9 +371,6 @@ class RagQueryRequest(BaseModel):
     team_id: str = Field(min_length=1, max_length=128)
     query: str = Field(min_length=1, max_length=8000)
     scope: str = Field(default="team", min_length=1, max_length=32)
-    search_type: str = Field(default="mmr", min_length=1, max_length=64)
-    top_k: int = Field(default=5, ge=1, le=50)
-    return_source_documents: bool = True
 
 
 class WsSendMessageRequest(BaseModel):
@@ -2594,9 +2591,6 @@ def rag_query(payload: RagQueryRequest, user: CurrentUser) -> dict[str, Any]:
             org_id=org_id,
             team_id=team_id,
             user_id=actor_user_id,
-            search_type=payload.search_type,
-            top_k=int(payload.top_k),
-            return_source_documents=bool(payload.return_source_documents),
             milvus_host=service.settings.rag_milvus_host,
             milvus_port=int(service.settings.rag_milvus_port),
         )
