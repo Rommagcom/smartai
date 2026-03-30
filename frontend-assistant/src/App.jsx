@@ -412,6 +412,12 @@ function App() {
   }, [availableSkills, skillsSearch]);
 
   async function request(path, options = {}, withAuth = true) {
+    const timeoutMs = Number(options.timeoutMs || 20000);
+    const fetchOptions = { ...options };
+    if ("timeoutMs" in fetchOptions) {
+      delete fetchOptions.timeoutMs;
+    }
+
     const isMultipart = options.body instanceof FormData;
     const headers = options.headers ? { ...options.headers } : {};
     if (!isMultipart && !("Content-Type" in headers)) {
@@ -422,11 +428,11 @@ function App() {
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const timeoutId = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
 
     let response;
     try {
-      response = await fetch(`${apiBase}${path}`, { ...options, headers, signal: controller.signal });
+      response = await fetch(`${apiBase}${path}`, { ...fetchOptions, headers, signal: controller.signal });
     } catch (error) {
       clearTimeout(timeoutId);
       if (error instanceof DOMException && error.name === "AbortError") {
@@ -1117,6 +1123,7 @@ function App() {
       const payload = await request("/rag/index-file", {
         method: "POST",
         body: formData,
+        timeoutMs: 180000,
       });
 
       setRagResult(payload);
@@ -1155,6 +1162,7 @@ function App() {
           query: text,
           scope: ragQueryForm.scope,
         }),
+        timeoutMs: 60000,
       });
 
       setRagResult(payload);
