@@ -1618,7 +1618,7 @@ function App() {
               </div>
 
               {activeScreen === "chat" ? (
-                <>
+                <div className="chat-window">
                   <header className="chat-header">
                     <div>
                       <h1>Gemini-style Team Chat</h1>
@@ -1788,7 +1788,7 @@ function App() {
                       )}
                     </div>
                   </section>
-                </>
+                </div>
               ) : (
                 <div className="admin-window">
                   <header className="chat-header">

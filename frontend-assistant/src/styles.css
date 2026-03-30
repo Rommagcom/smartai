@@ -340,6 +340,15 @@ button:disabled {
   font-size: clamp(1.3rem, 2.6vw, 1.9rem);
 }
 
+.chat-window {
+  display: grid;
+  grid-template-rows: auto minmax(220px, 1fr) auto auto;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .messages-wrap {
   min-height: 0;
   height: 100%;
@@ -688,6 +697,7 @@ input[type="checkbox"] {
 
 .rag-jobs {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -706,8 +716,10 @@ input[type="checkbox"] {
 .rag-jobs-list {
   display: grid;
   gap: 8px;
-  max-height: 260px;
+  min-height: 220px;
+  max-height: 420px;
   overflow: auto;
+  padding-right: 2px;
 }
 
 .rag-job-item {
