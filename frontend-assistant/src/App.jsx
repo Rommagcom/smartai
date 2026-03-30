@@ -1156,7 +1156,7 @@ function App() {
       const query = new URLSearchParams({
         org_id: activeTeam.org_id,
         team_id: activeTeam.team_id,
-        limit: "100",
+        limit: "10",
       }).toString();
       const payload = await request(`/rag/index-jobs?${query}`, { timeoutMs: 20000 });
       setRagJobs(Array.isArray(payload?.jobs) ? payload.jobs : []);

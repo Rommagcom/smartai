@@ -524,6 +524,29 @@ class ApiService:
             return fallback.__get__(self, type(self))
         raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
+    def get_user_from_token(self, token: str) -> dict[str, Any]:
+        token_hash = _hash_token(token)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT u.user_id, u.email, u.full_name, u.title, u.profile_bio, u.telegram_id, t.expires_at
+                    FROM auth_tokens t
+                    JOIN auth_users u ON u.user_id = t.user_id
+                    WHERE t.token_hash = :token_hash
+                    LIMIT 1
+                    """
+                ),
+                {"token_hash": token_hash},
+            ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        expires_at = row.get("expires_at")
+        if isinstance(expires_at, datetime):
+            if expires_at.astimezone(UTC) <= datetime.now(UTC):
+                raise HTTPException(status_code=401, detail="Token expired")
+        return dict(row)
+
 
 class RealtimeChatHub:
     def __init__(self, settings: Settings) -> None:
@@ -627,166 +650,6 @@ class RealtimeChatHub:
             await pubsub.unsubscribe(self._broadcast_channel)
             await pubsub.close()
 
-
-class RagIndexJobManager:
-    def __init__(self, service: ApiService) -> None:
-        self.service = service
-        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._task: asyncio.Task[Any] | None = None
-        self._lock = asyncio.Lock()
-        self._jobs: dict[str, dict[str, Any]] = {}
-
-    async def startup(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._worker_loop(), name="rag-index-worker")
-
-    async def shutdown(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-
-    async def enqueue(
-        self,
-        *,
-        org_id: str,
-        team_id: str,
-        user_id: int,
-        scope: str,
-        file_name: str,
-        raw_bytes: bytes,
-    ) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
-        job_id = secrets.token_urlsafe(12)
-        job = {
-            "job_id": job_id,
-            "org_id": org_id,
-            "team_id": team_id,
-            "user_id": int(user_id),
-            "scope": scope,
-            "file_name": file_name,
-            "status": "queued",
-            "created_at": now,
-            "started_at": None,
-            "finished_at": None,
-            "collection_name": None,
-            "documents_count": None,
-            "chunks_count": None,
-            "error": None,
-        }
-        async with self._lock:
-            self._jobs[job_id] = job
-
-        await self._queue.put(
-            {
-                "job_id": job_id,
-                "org_id": org_id,
-                "team_id": team_id,
-                "user_id": int(user_id),
-                "scope": scope,
-                "file_name": file_name,
-                "raw_bytes": raw_bytes,
-            }
-        )
-        return dict(job)
-
-    async def list_jobs(self, *, org_id: str, team_id: str, actor_user_id: int, limit: int = 100) -> list[dict[str, Any]]:
-        async with self._lock:
-            values = list(self._jobs.values())
-
-        filtered: list[dict[str, Any]] = []
-        for job in values:
-            if str(job.get("org_id") or "") != org_id:
-                continue
-            if str(job.get("team_id") or "") != team_id:
-                continue
-            scope = str(job.get("scope") or "team")
-            if scope == "private" and int(job.get("user_id") or 0) != int(actor_user_id):
-                continue
-            filtered.append(job)
-
-        filtered.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        return [dict(item) for item in filtered[: max(1, int(limit))]]
-
-    async def _worker_loop(self) -> None:
-        while True:
-            item = await self._queue.get()
-            job_id = str(item.get("job_id") or "")
-            try:
-                await self._mark_running(job_id)
-                result = await asyncio.to_thread(self._run_index_job, item)
-                await self._mark_succeeded(job_id, result)
-            except Exception as exc:
-                await self._mark_failed(job_id, str(exc))
-            finally:
-                self._queue.task_done()
-
-    def _run_index_job(self, item: dict[str, Any]) -> dict[str, Any]:
-        raw_bytes = bytes(item.get("raw_bytes") or b"")
-        result_raw = document_rag(
-            action="index",
-            file_name=str(item.get("file_name") or ""),
-            file_content_base64=_to_base64_ascii(raw_bytes),
-            chunk_size=int(self.service.settings.rag_chunk_size),
-            overlap=int(self.service.settings.rag_overlap),
-            collection_name=self.service.settings.rag_collection_name,
-            drop_old=bool(self.service.settings.rag_drop_old),
-            embedding_model=self.service.settings.rag_embedding_model,
-            scope=str(item.get("scope") or "team"),
-            org_id=str(item.get("org_id") or ""),
-            team_id=str(item.get("team_id") or ""),
-            user_id=int(item.get("user_id") or 0),
-            milvus_host=self.service.settings.rag_milvus_host,
-            milvus_port=int(self.service.settings.rag_milvus_port),
-        )
-        try:
-            payload = json.loads(str(result_raw))
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
-        return {"result": str(result_raw)}
-
-    async def _mark_running(self, job_id: str) -> None:
-        async with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job["status"] = "running"
-            job["started_at"] = datetime.now(UTC).isoformat()
-            job["error"] = None
-
-    async def _mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
-        def _safe_int(value: Any) -> int | None:
-            if value is None:
-                return None
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        async with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job["status"] = "succeeded"
-            job["finished_at"] = datetime.now(UTC).isoformat()
-            job["collection_name"] = str(result.get("collection_name") or "") or None
-            docs_count = result.get("documents_count")
-            chunks_count = result.get("chunks_count")
-            job["documents_count"] = _safe_int(docs_count)
-            job["chunks_count"] = _safe_int(chunks_count)
-            job["error"] = None
-
-    async def _mark_failed(self, job_id: str, error_text: str) -> None:
-        async with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job["status"] = "failed"
-            job["finished_at"] = datetime.now(UTC).isoformat()
-            job["error"] = str(error_text or "unknown error")[:4000]
 
     def _supports_auth_otp_fields(self) -> bool:
         try:
@@ -2264,6 +2127,317 @@ class RagIndexJobManager:
             bio = str(row.get("profile_bio") or "").strip() or "Not provided"
             lines.append(f"{idx}. {full_name} | {title} | {bio}")
         return "\n".join(lines)
+
+
+class RagIndexJobManager:
+    def __init__(self, service: ApiService) -> None:
+        self.service = service
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._task: asyncio.Task[Any] | None = None
+
+    async def startup(self) -> None:
+        self._mark_interrupted_jobs()
+        self._prune_finished_jobs(retain=10)
+        if self._task is None:
+            self._task = asyncio.create_task(self._worker_loop(), name="rag-index-worker")
+
+    async def shutdown(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            self._task = None
+
+    def _mark_interrupted_jobs(self) -> None:
+        now = datetime.now(UTC)
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE rag_index_jobs
+                    SET status = 'failed',
+                        finished_at = :now,
+                        error_text = COALESCE(error_text, 'Job interrupted by API restart')
+                    WHERE status IN ('queued', 'running')
+                    """
+                ),
+                {"now": now},
+            )
+
+    async def enqueue(
+        self,
+        *,
+        org_id: str,
+        team_id: str,
+        user_id: int,
+        scope: str,
+        file_name: str,
+        raw_bytes: bytes,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        job_id = secrets.token_urlsafe(12)
+
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO rag_index_jobs (
+                        job_id,
+                        org_id,
+                        team_id,
+                        user_id,
+                        scope,
+                        file_name,
+                        status,
+                        created_at
+                    )
+                    VALUES (
+                        :job_id,
+                        :org_id,
+                        :team_id,
+                        :user_id,
+                        :scope,
+                        :file_name,
+                        'queued',
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "user_id": int(user_id),
+                    "scope": scope,
+                    "file_name": file_name,
+                    "created_at": now,
+                },
+            )
+
+        await self._queue.put(
+            {
+                "job_id": job_id,
+                "org_id": org_id,
+                "team_id": team_id,
+                "user_id": int(user_id),
+                "scope": scope,
+                "file_name": file_name,
+                "raw_bytes": raw_bytes,
+            }
+        )
+        return {
+            "job_id": job_id,
+            "org_id": org_id,
+            "team_id": team_id,
+            "user_id": int(user_id),
+            "scope": scope,
+            "file_name": file_name,
+            "status": "queued",
+            "created_at": now.isoformat(),
+            "started_at": None,
+            "finished_at": None,
+            "collection_name": None,
+            "documents_count": None,
+            "chunks_count": None,
+            "error": None,
+        }
+
+    async def list_jobs(self, *, org_id: str, team_id: str, actor_user_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        with self.service.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        job_id,
+                        org_id,
+                        team_id,
+                        user_id,
+                        scope,
+                        file_name,
+                        status,
+                        created_at,
+                        started_at,
+                        finished_at,
+                        collection_name,
+                        documents_count,
+                        chunks_count,
+                        error_text AS error
+                    FROM rag_index_jobs
+                    WHERE org_id = :org_id
+                      AND team_id = :team_id
+                      AND (scope <> 'private' OR user_id = :actor_user_id)
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "team_id": team_id,
+                    "actor_user_id": int(actor_user_id),
+                    "limit": max(1, min(int(limit), 200)),
+                },
+            ).mappings().all()
+
+        jobs: list[dict[str, Any]] = []
+        for row in rows:
+            jobs.append(
+                {
+                    "job_id": str(row.get("job_id") or ""),
+                    "org_id": str(row.get("org_id") or ""),
+                    "team_id": str(row.get("team_id") or ""),
+                    "user_id": int(row.get("user_id") or 0),
+                    "scope": str(row.get("scope") or "team"),
+                    "file_name": str(row.get("file_name") or ""),
+                    "status": str(row.get("status") or "unknown"),
+                    "created_at": str(row.get("created_at") or ""),
+                    "started_at": str(row.get("started_at") or "") or None,
+                    "finished_at": str(row.get("finished_at") or "") or None,
+                    "collection_name": str(row.get("collection_name") or "") or None,
+                    "documents_count": int(row["documents_count"]) if row.get("documents_count") is not None else None,
+                    "chunks_count": int(row["chunks_count"]) if row.get("chunks_count") is not None else None,
+                    "error": str(row.get("error") or "") or None,
+                }
+            )
+        return jobs
+
+    def _prune_finished_jobs(self, *, retain: int) -> None:
+        keep_count = max(1, int(retain))
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM rag_index_jobs
+                    WHERE id IN (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY
+                                        org_id,
+                                        team_id,
+                                        CASE WHEN scope = 'private' THEN user_id ELSE 0 END
+                                    ORDER BY created_at DESC, id DESC
+                                ) AS rn
+                            FROM rag_index_jobs
+                            WHERE status IN ('succeeded', 'failed')
+                        ) ranked
+                        WHERE rn > :keep_count
+                    )
+                    """
+                ),
+                {"keep_count": keep_count},
+            )
+
+    async def _worker_loop(self) -> None:
+        while True:
+            item = await self._queue.get()
+            job_id = str(item.get("job_id") or "")
+            try:
+                self._mark_running(job_id)
+                result = await asyncio.to_thread(self._run_index_job, item)
+                self._mark_succeeded(job_id, result)
+            except Exception as exc:
+                self._mark_failed(job_id, str(exc))
+            finally:
+                self._queue.task_done()
+
+    def _run_index_job(self, item: dict[str, Any]) -> dict[str, Any]:
+        raw_bytes = bytes(item.get("raw_bytes") or b"")
+        result_raw = document_rag(
+            action="index",
+            file_name=str(item.get("file_name") or ""),
+            file_content_base64=_to_base64_ascii(raw_bytes),
+            chunk_size=int(self.service.settings.rag_chunk_size),
+            overlap=int(self.service.settings.rag_overlap),
+            collection_name=self.service.settings.rag_collection_name,
+            drop_old=bool(self.service.settings.rag_drop_old),
+            embedding_model=self.service.settings.rag_embedding_model,
+            scope=str(item.get("scope") or "team"),
+            org_id=str(item.get("org_id") or ""),
+            team_id=str(item.get("team_id") or ""),
+            user_id=int(item.get("user_id") or 0),
+            milvus_host=self.service.settings.rag_milvus_host,
+            milvus_port=int(self.service.settings.rag_milvus_port),
+        )
+        try:
+            payload = json.loads(str(result_raw))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {"result": str(result_raw)}
+
+    def _mark_running(self, job_id: str) -> None:
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE rag_index_jobs
+                    SET status = 'running',
+                        started_at = :started_at,
+                        error_text = NULL
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "started_at": datetime.now(UTC),
+                },
+            )
+
+    def _mark_succeeded(self, job_id: str, result: dict[str, Any]) -> None:
+        def _safe_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE rag_index_jobs
+                    SET status = 'succeeded',
+                        finished_at = :finished_at,
+                        collection_name = :collection_name,
+                        documents_count = :documents_count,
+                        chunks_count = :chunks_count,
+                        error_text = NULL
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "finished_at": datetime.now(UTC),
+                    "collection_name": str(result.get("collection_name") or "") or None,
+                    "documents_count": _safe_int(result.get("documents_count")),
+                    "chunks_count": _safe_int(result.get("chunks_count")),
+                },
+            )
+            self._prune_finished_jobs(retain=10)
+
+    def _mark_failed(self, job_id: str, error_text: str) -> None:
+        with self.service.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE rag_index_jobs
+                    SET status = 'failed',
+                        finished_at = :finished_at,
+                        error_text = :error_text
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {
+                    "job_id": job_id,
+                    "finished_at": datetime.now(UTC),
+                    "error_text": str(error_text or "unknown error")[:4000],
+                },
+            )
+            self._prune_finished_jobs(retain=10)
 
 
 settings = load_settings()
