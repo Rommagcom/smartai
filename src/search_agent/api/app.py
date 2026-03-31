@@ -1824,18 +1824,19 @@ class RealtimeChatHub:
 
 settings = load_settings()
 service = ApiService(settings)
-app = FastAPI(title=APP_NAME)
 chat_hub = RealtimeChatHub(settings)
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI):
     await chat_hub.startup()
+    try:
+        yield
+    finally:
+        await chat_hub.shutdown()
 
 
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    await chat_hub.shutdown()
+app = FastAPI(title=APP_NAME, lifespan=_lifespan)
 
 
 def _extract_bearer_token(authorization: str) -> str:
