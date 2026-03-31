@@ -74,7 +74,7 @@ body {
   padding: 14px;
   margin: 0;
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 14px;
   overflow: hidden;
 }
@@ -333,6 +333,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 14px 16px;
 }
 
 .chat-header h1 {
@@ -379,6 +380,11 @@ button:disabled {
 .messages-card,
 .status {
   padding: 16px;
+}
+
+.messages-card {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .controls-top {
