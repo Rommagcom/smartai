@@ -35,6 +35,10 @@ def _user_scope_id(user_id: int) -> str:
     return f"user:{normalized}"
 
 
+def _is_group_chat_id(chat_id: int) -> bool:
+    return int(chat_id) < 0
+
+
 def _chunk_message(text: str, max_length: int = 4096) -> list[str]:
     if len(text) <= max_length:
         return [text]
@@ -414,6 +418,8 @@ async def start_bot() -> None:
         if not agent.registry.tools:
             agent.refresh_dynamic_tools()
         all_tools = set(agent.registry.tools.keys())
+        if settings.group_chat_shared_skills and _is_group_chat_id(context.chat_id):
+            return all_tools
         return rbac_store.resolve_allowed_skills(
             org_id=context.org_id,
             user_id=context.user_id,
@@ -608,6 +614,36 @@ async def start_bot() -> None:
             await message.answer("No assigned dynamic skills.")
             return
         await message.answer("Assigned skills:\n" + "\n".join(f"- {name}" for name in skills))
+
+    @dp.message(Command("whoami"))
+    async def on_whoami(message: Message) -> None:
+        user_id = int(message.from_user.id) if message.from_user else 0
+        role: Role = "admin" if user_id in settings.telegram_admin_user_ids else "member"
+        skills: list[str] = []
+
+        if rbac_store is not None:
+            role = await asyncio.to_thread(
+                rbac_store.get_role,
+                org_id=USER_SCOPE_ORG_ID,
+                user_id=user_id,
+                fallback_role=role,
+            )
+            skills = await asyncio.to_thread(
+                rbac_store.list_user_skills,
+                org_id=USER_SCOPE_ORG_ID,
+                user_id=user_id,
+            )
+
+        lines = [
+            f"user_id: {user_id}",
+            f"chat_id: {message.chat.id}",
+            f"role: {role}",
+        ]
+        if rbac_store is None:
+            lines.append("rbac: disabled")
+        else:
+            lines.append("skills: " + (", ".join(skills) if skills else "none"))
+        await message.answer("\n".join(lines))
 
     @dp.message(F.text)
     async def on_text(message: Message) -> None:

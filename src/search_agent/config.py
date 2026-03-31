@@ -33,6 +33,7 @@ class Settings:
     include_token_usage_in_response: bool
     telegram_admin_user_ids: set[int]
     enable_dynamic_tools: bool
+    group_chat_shared_skills: bool
     reminder_poll_interval_seconds: int
     reminder_max_jobs_per_tick: int
     reminder_lease_seconds: int
@@ -96,6 +97,7 @@ def load_settings() -> Settings:
         include_token_usage_in_response=_to_bool(os.getenv("INCLUDE_TOKEN_USAGE_IN_RESPONSE"), default=True),
         telegram_admin_user_ids=admin_ids,
         enable_dynamic_tools=_to_bool(os.getenv("ENABLE_DYNAMIC_TOOLS"), default=True),
+        group_chat_shared_skills=_to_bool(os.getenv("GROUP_CHAT_SHARED_SKILLS"), default=False),
         reminder_poll_interval_seconds=int(os.getenv("REMINDER_POLL_INTERVAL_SECONDS", "10")),
         reminder_max_jobs_per_tick=int(os.getenv("REMINDER_MAX_JOBS_PER_TICK", "10")),
         reminder_lease_seconds=int(os.getenv("REMINDER_LEASE_SECONDS", "120")),

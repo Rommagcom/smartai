@@ -235,6 +235,7 @@ User can check assigned skills:
 
 ```text
 /my_skills
+/whoami
 ```
 
 Audit trail writes actions into `audit_events`.
@@ -244,6 +245,7 @@ Audit trail writes actions into `audit_events`.
 - `OLLAMA_API_KEY=...`: API key for protected Ollama endpoint (preferred)
 - `OLLAMA_AUTH_TOKEN=...`: legacy auth token variable (fallback)
 - `ENABLE_DYNAMIC_TOOLS=true|false`: hard-disable dynamic skill execution
+- `GROUP_CHAT_SHARED_SKILLS=true|false`: when true, all dynamic skills are shared for all members in Telegram group chats
 - `DYNAMIC_TOOLS_ALLOWLIST=*|tool1,tool2`: allow only listed dynamic tool names (`*` means all)
 - `DYNAMIC_SKILL_STRICT_ARGS=true|false`: enforce strict schema argument policy (required/type/enum/extra args)
 - `DYNAMIC_SKILL_MAX_STRING_LENGTH=10000`: max string length for a single tool argument
