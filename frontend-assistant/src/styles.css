@@ -1,4 +1,5 @@
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Nunito+Sans:wght@400;600;700&display=swap");
+@import url("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css");
 
 :root {
   --bg-main: #edf4ff;
@@ -683,6 +684,101 @@ input[type="checkbox"] {
   display: grid;
   gap: 8px;
   margin-top: 8px;
+}
+
+.markdown-content {
+  margin-top: 8px;
+  color: var(--text-strong);
+}
+
+.markdown-content > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  margin: 0.55rem 0 0.35rem;
+  line-height: 1.25;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote {
+  margin: 0.35rem 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 1.2rem;
+}
+
+.markdown-content code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  background: #eef5ff;
+  border: 1px solid #d5e2f5;
+  border-radius: 6px;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.9em;
+}
+
+.markdown-content pre {
+  margin: 0.45rem 0;
+  padding: 0.65rem;
+  border-radius: 10px;
+  background: #0f2440;
+  color: #eff6ff;
+  overflow-x: auto;
+}
+
+.markdown-content pre code {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.markdown-content pre code.hljs {
+  display: block;
+  padding: 0.8rem 0.9rem;
+  border-radius: 8px;
+  background: #0b1b30;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.45rem 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-content th {
+  background: #eaf3ff;
+  font-weight: 700;
+}
+
+.markdown-content tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-content a {
+  color: var(--accent);
 }
 
 .message-content p {

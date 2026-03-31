@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
 
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
@@ -394,7 +397,21 @@ function App() {
                   <span className="sender">{item.sender_type}</span>
                   <span>{new Date(item.created_at).toLocaleString()}</span>
                 </div>
-                <p>{item.content}</p>
+                {item.sender_type === "assistant" ? (
+                  <div className="message-content markdown-content">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeHighlight]}
+                      components={{
+                        a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener" />,
+                      }}
+                    >
+                      {item.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <p>{item.content}</p>
+                )}
               </div>
             ))}
             {isBusy ? <div className="typing">Assistant is thinking...</div> : null}
