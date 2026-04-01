@@ -7,9 +7,10 @@ services:
     container_name: sai-hf-cache-init
     user: root
     restart: "no"
-    command:
-      - sh
+    entrypoint:
+      - /bin/sh
       - -lc
+    command:
       - mkdir -p /home/app/.cache/huggingface ; chown -R app:app /home/app/.cache ; chmod -R u+rwX /home/app/.cache
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
@@ -72,6 +73,9 @@ services:
     container_name: sai-bot
     restart: unless-stopped
     working_dir: /app
+    entrypoint:
+      - /bin/sh
+      - -lc
     env_file:
       - .env
     extra_hosts:
@@ -91,7 +95,8 @@ services:
     gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
-    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
+    command:
+      - alembic upgrade head && python -m search_agent.main
     depends_on:
       hf-cache-init:
         condition: service_completed_successfully
@@ -110,6 +115,9 @@ services:
     container_name: sai-api
     restart: unless-stopped
     working_dir: /app
+    entrypoint:
+      - /bin/sh
+      - -lc
     env_file:
       - .env
     extra_hosts:
@@ -129,7 +137,8 @@ services:
     gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
-    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.api_main"]
+    command:
+      - alembic upgrade head && python -m search_agent.api_main
     ports:
       - "8000:8000"
     healthcheck:

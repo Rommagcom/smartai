@@ -125,6 +125,9 @@ services:
     container_name: sai-bot
     restart: unless-stopped
     working_dir: /app
+    entrypoint:
+      - /bin/sh
+      - -lc
     env_file:
       - .env
     environment:
@@ -142,7 +145,8 @@ services:
     gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
-    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.main"]
+    command:
+      - alembic upgrade head && python -m search_agent.main
     depends_on:
       ollama-pull:
         condition: service_completed_successfully
@@ -163,6 +167,9 @@ services:
     container_name: sai-api
     restart: unless-stopped
     working_dir: /app
+    entrypoint:
+      - /bin/sh
+      - -lc
     env_file:
       - .env
     environment:
@@ -180,7 +187,8 @@ services:
     gpus: all
     volumes:
       - huggingface-cache:/home/app/.cache/huggingface
-    command: ["sh", "-c", "alembic upgrade head && python -m search_agent.api_main"]
+    command:
+      - alembic upgrade head && python -m search_agent.api_main
     ports:
       - "8000:8000"
     healthcheck:
