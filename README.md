@@ -195,9 +195,76 @@ Authorization: Bearer <token>
 ```
 
 ### Admin API
-Organization/team management endpoints are removed.
+Organization-scoped RBAC is enabled for multi-tenant BYOB scenarios.
 
-Available admin endpoints include global user listing and dynamic skill management/conversion.
+Available RBAC endpoints:
+
+- `POST /api/v1/admin/organizations`: create organization; creator becomes org `owner`.
+- `POST /api/v1/admin/users/{target_user_id}/role`: set org role (`admin|manager|member`).
+- `POST /api/v1/admin/users/{target_user_id}/skills/grant`: grant dynamic skill in org scope.
+- `POST /api/v1/admin/users/{target_user_id}/skills/revoke`: revoke dynamic skill in org scope.
+- `GET /api/v1/admin/users/{target_user_id}/skills?org_id=<org_id>`: list user skills in org scope.
+
+BYOB bot and billing endpoints:
+
+- `POST /api/v1/orgs/{org_id}/bots`: register customer Telegram bot token (stored hashed + masked).
+- `GET /api/v1/orgs/{org_id}/bots`: list connected bots for organization.
+- `PATCH /api/v1/orgs/{org_id}/bots/{bot_id}`: activate/deactivate bot connection.
+- `GET /api/v1/orgs/{org_id}/credits/balance`: get current credit balance.
+- `POST /api/v1/orgs/{org_id}/credits/topup`: add credits and write ledger event.
+- `POST /api/v1/orgs/{org_id}/credits/debit`: debit credits atomically (prevents negative balance).
+- `GET /api/v1/orgs/{org_id}/credits/ledger`: view credit ledger history.
+- `GET /api/v1/orgs/{org_id}/credits/policy`: read tariff limits and low-balance threshold.
+- `PUT /api/v1/orgs/{org_id}/credits/policy`: set daily/monthly limits and low-balance threshold.
+- `POST /api/v1/byob/telegram/{org_id}/{bot_id}/webhook`: Telegram webhook endpoint for customer bot updates.
+- `GET /api/v1/orgs/{org_id}/queue/health`: queue health metrics (`pending/retry/failed/sent_last_24h`).
+- `POST /api/v1/admin/byob/queue/process`: trigger immediate queue processing (global admin).
+
+Billing behavior:
+
+- Webhook LLM calls automatically debit credits from org balance.
+- Rate is currently `1 credit` per started `1000` tokens.
+- Debit respects daily/monthly policy limits and writes ledger/audit events.
+- Webhook responses are queued in DB and delivered to Telegram with retry/backoff.
+
+Required BYOB deployment settings:
+
+- `BYOB_PUBLIC_BASE_URL=https://your-public-domain` (used for `setWebhook` URL generation)
+- `TELEGRAM_API_BASE_URL=https://api.telegram.org` (override only for custom gateways)
+- `BYOB_WEBHOOK_RETRY_BASE_SECONDS=5`
+- `BYOB_WEBHOOK_RETRY_MAX_ATTEMPTS=8`
+- `BYOB_WEBHOOK_DELIVERY_BATCH=20`
+- `BYOB_DELIVERY_POLL_INTERVAL_SECONDS=3`
+- `BYOB_TOKEN_CRYPTO_KEY=<strong-random-secret>`
+- `BYOB_VAULT_ADDR=https://vault.company.local`
+- `BYOB_VAULT_TOKEN=<vault-token>`
+- `BYOB_VAULT_MOUNT=secret`
+- `BYOB_VAULT_REQUIRED=true|false`
+- `BYOB_ENFORCE_TELEGRAM_IP=true|false`
+- `BYOB_TELEGRAM_IP_ALLOWLIST=149.154.160.0/20,91.108.4.0/22`
+- `BYOB_TENANT_RATE_LIMIT_PER_MIN=120`
+- `BYOB_USER_RATE_LIMIT_PER_MIN=20`
+
+Token storage notes:
+
+- `token_hash` is used for uniqueness checks.
+- `token_ciphertext` is encrypted with key-derived stream + HMAC integrity.
+- Primary secure storage is Vault (`token_vault_path` reference in DB).
+- If Vault is unavailable and `BYOB_VAULT_REQUIRED=false`, encrypted `token_ciphertext` is used as fallback.
+
+Security controls:
+
+- Tenant isolation: every BYOB webhook request resolves bot strictly by `(org_id, bot_id)`.
+- Unique per-bot `webhook_secret` is required in `X-Telegram-Bot-Api-Secret-Token`.
+- Optional Telegram source IP allowlist validation before processing webhook payload.
+- Dual rate limiting in webhook path:
+   - per tenant (protect credits)
+   - per tenant end-user (protect spam bursts)
+
+Global admin endpoints are still available for platform operators:
+
+- `GET /api/v1/admin/users/all`
+- Dynamic skill management/conversion endpoints under `/api/v1/admin/skills/*`
 
 ### Chat API for all users
 Chat is user-scoped and now uses only the authenticated `user_id` context.

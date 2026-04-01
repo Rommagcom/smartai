@@ -53,6 +53,21 @@ class Settings:
     long_term_memory_archive_batch_size: int
     long_term_memory_maintenance_interval_seconds: int
     rbac_enabled: bool
+    byob_public_base_url: str | None
+    telegram_api_base_url: str
+    byob_webhook_retry_base_seconds: int
+    byob_webhook_retry_max_attempts: int
+    byob_webhook_delivery_batch: int
+    byob_delivery_poll_interval_seconds: int
+    byob_token_crypto_key: str | None
+    byob_vault_addr: str | None
+    byob_vault_token: str | None
+    byob_vault_mount: str
+    byob_vault_required: bool
+    byob_enforce_telegram_ip: bool
+    byob_telegram_ip_allowlist: tuple[str, ...]
+    byob_tenant_rate_limit_per_min: int
+    byob_user_rate_limit_per_min: int
 
 
 
@@ -135,4 +150,23 @@ def load_settings() -> Settings:
             os.getenv("LONG_TERM_MEMORY_MAINTENANCE_INTERVAL_SECONDS", "300")
         ),
         rbac_enabled=_to_bool(os.getenv("RBAC_ENABLED"), default=True),
+        byob_public_base_url=(os.getenv("BYOB_PUBLIC_BASE_URL") or "").strip() or None,
+        telegram_api_base_url=(os.getenv("TELEGRAM_API_BASE_URL") or "https://api.telegram.org").strip(),
+        byob_webhook_retry_base_seconds=int(os.getenv("BYOB_WEBHOOK_RETRY_BASE_SECONDS", "5")),
+        byob_webhook_retry_max_attempts=int(os.getenv("BYOB_WEBHOOK_RETRY_MAX_ATTEMPTS", "8")),
+        byob_webhook_delivery_batch=int(os.getenv("BYOB_WEBHOOK_DELIVERY_BATCH", "20")),
+        byob_delivery_poll_interval_seconds=int(os.getenv("BYOB_DELIVERY_POLL_INTERVAL_SECONDS", "3")),
+        byob_token_crypto_key=(os.getenv("BYOB_TOKEN_CRYPTO_KEY") or "").strip() or None,
+        byob_vault_addr=(os.getenv("BYOB_VAULT_ADDR") or "").strip() or None,
+        byob_vault_token=(os.getenv("BYOB_VAULT_TOKEN") or "").strip() or None,
+        byob_vault_mount=(os.getenv("BYOB_VAULT_MOUNT") or "secret").strip(),
+        byob_vault_required=_to_bool(os.getenv("BYOB_VAULT_REQUIRED"), default=False),
+        byob_enforce_telegram_ip=_to_bool(os.getenv("BYOB_ENFORCE_TELEGRAM_IP"), default=True),
+        byob_telegram_ip_allowlist=tuple(
+            part.strip()
+            for part in (os.getenv("BYOB_TELEGRAM_IP_ALLOWLIST") or "149.154.160.0/20,91.108.4.0/22").split(",")
+            if part.strip()
+        ),
+        byob_tenant_rate_limit_per_min=int(os.getenv("BYOB_TENANT_RATE_LIMIT_PER_MIN", "120")),
+        byob_user_rate_limit_per_min=int(os.getenv("BYOB_USER_RATE_LIMIT_PER_MIN", "20")),
     )

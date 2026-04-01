@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import base64
 import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
 import zlib
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, Sequence
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 from redis import asyncio as redis_async
 from sqlalchemy import create_engine, text
@@ -311,6 +317,84 @@ class GlobalAdminUserSummary(BaseModel):
 class MembershipUpsertRequest(BaseModel):
     org_id: str = Field(min_length=1, max_length=128)
     role: Role = "member"
+
+
+class CreateByobBotRequest(BaseModel):
+    provider: str = Field(default="telegram", min_length=2, max_length=32)
+    bot_name: str = Field(min_length=1, max_length=200)
+    bot_token: str = Field(min_length=10, max_length=512)
+    external_bot_id: str | None = Field(default=None, max_length=128)
+
+
+class UpdateByobBotStatusRequest(BaseModel):
+    is_active: bool
+
+
+class ByobBotSummary(BaseModel):
+    id: int
+    org_id: str
+    provider: str
+    bot_name: str
+    external_bot_id: str | None = None
+    token_hint: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class OrgCreditBalanceResponse(BaseModel):
+    org_id: str
+    balance: int
+
+
+class CreditAdjustmentRequest(BaseModel):
+    amount: int = Field(gt=0, le=1_000_000_000)
+    reason: str = Field(min_length=1, max_length=256)
+    reference_type: str = Field(default="manual", max_length=64)
+    reference_id: str = Field(default="", max_length=128)
+
+
+class CreditLedgerItem(BaseModel):
+    id: int
+    delta: int
+    balance_after: int
+    reason: str
+    actor_user_id: int
+    reference_type: str
+    reference_id: str
+    created_at: str
+
+
+class CreditLedgerResponse(BaseModel):
+    org_id: str
+    items: list[CreditLedgerItem]
+
+
+class UpdateCreditPolicyRequest(BaseModel):
+    daily_limit: int | None = Field(default=None, ge=0, le=1_000_000_000)
+    monthly_limit: int | None = Field(default=None, ge=0, le=10_000_000_000)
+    low_balance_threshold: int = Field(default=0, ge=0, le=1_000_000_000)
+
+
+class CreditPolicyResponse(BaseModel):
+    org_id: str
+    daily_limit: int | None
+    monthly_limit: int | None
+    low_balance_threshold: int
+
+
+class TelegramWebhookUpdate(BaseModel):
+    update_id: int | None = None
+    message: dict[str, Any] | None = None
+
+
+class ByobQueueHealthResponse(BaseModel):
+    org_id: str
+    pending: int
+    retry: int
+    failed: int
+    sent_last_24h: int
+    oldest_due_at: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -1137,19 +1221,1247 @@ class RealtimeChatHub:
             user_id=int(user_id),
             fallback_role="member",
         )
-        return role == "admin"
+        return role in {"owner", "admin"}
 
     def _enforce_admin(self, user_id: int) -> None:
         if not self._is_global_admin(user_id):
             raise HTTPException(status_code=403, detail="Admin access required")
 
+    def _enforce_org_admin(self, *, actor_user_id: int, org_id: str) -> None:
+        if self._is_global_admin(actor_user_id):
+            return
+        role = self.rbac.get_role(
+            org_id=org_id,
+            user_id=int(actor_user_id),
+            fallback_role="member",
+        )
+        if role not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="Organization admin access required")
+
     def create_org(self, *, actor_user_id: int, payload: CreateOrgRequest) -> None:
-        self._enforce_admin(actor_user_id)
+        # Global admins can create organizations centrally. Regular users can self-serve
+        # and become admins of their own organization.
         self.rbac.create_organization(actor_user_id=actor_user_id, org_id=payload.org_id, name=payload.name)
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_memberships (org_id, user_id, created_at)
+                    VALUES (:org_id, :user_id, :created_at)
+                    ON CONFLICT (org_id, user_id) DO NOTHING
+                    """
+                ),
+                {
+                    "org_id": payload.org_id,
+                    "user_id": int(actor_user_id),
+                    "created_at": now,
+                },
+            )
+        self.rbac.upsert_user(org_id=payload.org_id, user_id=int(actor_user_id), role="owner")
+
+    @staticmethod
+    def _normalize_provider(value: str) -> str:
+        provider = (value or "").strip().lower()
+        if provider != "telegram":
+            raise HTTPException(status_code=400, detail="Only telegram provider is currently supported")
+        return provider
+
+    @staticmethod
+    def _derive_keystream(*, key: bytes, nonce: bytes, length: int) -> bytes:
+        output = bytearray()
+        counter = 0
+        while len(output) < length:
+            block = hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+            output.extend(block)
+            counter += 1
+        return bytes(output[:length])
+
+    def _encode_bot_token(self, token: str) -> str:
+        key_text = self.settings.byob_token_crypto_key
+        if not key_text:
+            return base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+
+        key = hashlib.sha256(key_text.encode("utf-8")).digest()
+        plaintext = token.encode("utf-8")
+        nonce = secrets.token_bytes(16)
+        keystream = self._derive_keystream(key=key, nonce=nonce, length=len(plaintext))
+        ciphertext = bytes([a ^ b for a, b in zip(plaintext, keystream)])
+        mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()[:16]
+        return base64.urlsafe_b64encode(nonce + mac + ciphertext).decode("ascii")
+
+    def _decode_bot_token(self, ciphertext: str | None) -> str:
+        if not ciphertext:
+            return ""
+        try:
+            raw = base64.urlsafe_b64decode(ciphertext.encode("ascii"))
+            key_text = self.settings.byob_token_crypto_key
+            if not key_text:
+                return raw.decode("utf-8")
+
+            if len(raw) < 33:
+                return ""
+            nonce = raw[:16]
+            mac = raw[16:32]
+            payload = raw[32:]
+            key = hashlib.sha256(key_text.encode("utf-8")).digest()
+            expected = hmac.new(key, nonce + payload, hashlib.sha256).digest()[:16]
+            if not hmac.compare_digest(mac, expected):
+                return ""
+
+            keystream = self._derive_keystream(key=key, nonce=nonce, length=len(payload))
+            plaintext = bytes([a ^ b for a, b in zip(payload, keystream)])
+            return plaintext.decode("utf-8")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _retry_backoff_seconds(*, base: int, attempt: int) -> int:
+        safe_base = max(1, int(base))
+        safe_attempt = max(0, int(attempt))
+        return safe_base * (2 ** min(safe_attempt, 8))
+
+    def _build_telegram_webhook_url(self, *, org_id: str, bot_id: int) -> str | None:
+        base = (self.settings.byob_public_base_url or "").strip().rstrip("/")
+        if not base:
+            return None
+        return f"{base}/api/v1/byob/telegram/{org_id}/{int(bot_id)}/webhook"
+
+    def _call_telegram_api(self, *, token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        base = (self.settings.telegram_api_base_url or "https://api.telegram.org").strip().rstrip("/")
+        method_name = method.strip().lstrip("/")
+        encoded_payload = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        req = urlrequest.Request(
+            url=f"{base}/bot{token}/{method_name}",
+            data=encoded_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=15) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else str(exc)
+            raise HTTPException(status_code=502, detail=f"Telegram API error: {detail}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Telegram API call failed: {exc}") from exc
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="Telegram API returned invalid JSON") from exc
+        if not bool(parsed.get("ok")):
+            raise HTTPException(status_code=502, detail=f"Telegram API returned non-ok response: {parsed}")
+        return parsed
+
+    def _vault_write_bot_token(self, *, org_id: str, bot_connection_id: int, token: str) -> str | None:
+        vault_addr = (self.settings.byob_vault_addr or "").strip().rstrip("/")
+        vault_token = (self.settings.byob_vault_token or "").strip()
+        if not vault_addr or not vault_token:
+            return None
+
+        logical_path = f"smartai/byob/{org_id}/{int(bot_connection_id)}"
+        mount = (self.settings.byob_vault_mount or "secret").strip().strip("/")
+        encoded_path = urlparse.quote(logical_path, safe="/")
+        url = f"{vault_addr}/v1/{mount}/data/{encoded_path}"
+        payload = {"data": {"bot_token": token}}
+        req = urlrequest.Request(
+            url=url,
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            headers={
+                "X-Vault-Token": vault_token,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=10):
+                pass
+            return f"{mount}/{logical_path}"
+        except Exception:
+            return None
+
+    def _vault_read_bot_token(self, *, vault_ref: str | None) -> str:
+        if not vault_ref:
+            return ""
+        vault_addr = (self.settings.byob_vault_addr or "").strip().rstrip("/")
+        vault_token = (self.settings.byob_vault_token or "").strip()
+        if not vault_addr or not vault_token:
+            return ""
+
+        parts = str(vault_ref).strip().split("/", 1)
+        if len(parts) != 2:
+            return ""
+        mount, logical = parts[0].strip(), parts[1].strip()
+        if not mount or not logical:
+            return ""
+
+        encoded_path = urlparse.quote(logical, safe="/")
+        url = f"{vault_addr}/v1/{mount}/data/{encoded_path}"
+        req = urlrequest.Request(
+            url=url,
+            headers={"X-Vault-Token": vault_token},
+            method="GET",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            token = (((parsed or {}).get("data") or {}).get("data") or {}).get("bot_token")
+            return str(token or "")
+        except Exception:
+            return ""
+
+    def _load_bot_token_for_connection(self, *, org_id: str, bot_connection_id: int) -> str:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT token_vault_path, token_ciphertext
+                    FROM byob_bot_connections
+                    WHERE id = :bot_id AND org_id = :org_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "bot_id": int(bot_connection_id),
+                    "org_id": org_id,
+                },
+            ).mappings().first()
+        if row is None:
+            return ""
+
+        token = self._vault_read_bot_token(vault_ref=str(row.get("token_vault_path") or ""))
+        if token:
+            return token
+        return self._decode_bot_token(str(row.get("token_ciphertext") or ""))
+
+    def _enforce_telegram_ip(self, *, client_ip: str | None) -> None:
+        if not self.settings.byob_enforce_telegram_ip:
+            return
+        raw_ip = (client_ip or "").strip()
+        if not raw_ip:
+            raise HTTPException(status_code=401, detail="Missing client IP")
+        try:
+            parsed_ip = ipaddress.ip_address(raw_ip)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail="Invalid client IP") from exc
+
+        for cidr in self.settings.byob_telegram_ip_allowlist:
+            try:
+                if parsed_ip in ipaddress.ip_network(cidr, strict=False):
+                    return
+            except ValueError:
+                continue
+        raise HTTPException(status_code=401, detail="Client IP is not in Telegram allowlist")
+
+    def _consume_rate_limit(self, *, scope: str, scope_key: str, limit_per_minute: int) -> None:
+        if limit_per_minute <= 0:
+            return
+        now = datetime.now(UTC)
+        window = now.replace(second=0, microsecond=0)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO byob_rate_limit_counters (scope, scope_key, window_start, request_count, updated_at)
+                    VALUES (:scope, :scope_key, :window_start, 1, :updated_at)
+                    ON CONFLICT (scope, scope_key, window_start)
+                    DO UPDATE SET request_count = byob_rate_limit_counters.request_count + 1,
+                                  updated_at = EXCLUDED.updated_at
+                    RETURNING request_count
+                    """
+                ),
+                {
+                    "scope": scope,
+                    "scope_key": scope_key,
+                    "window_start": window,
+                    "updated_at": now,
+                },
+            ).mappings().first()
+
+        used = int((row or {}).get("request_count") or 0)
+        if used > int(limit_per_minute):
+            raise HTTPException(status_code=429, detail=f"Rate limit exceeded for scope {scope}")
+
+    def _set_telegram_webhook(self, *, token: str, org_id: str, bot_id: int, webhook_secret: str) -> None:
+        webhook_url = self._build_telegram_webhook_url(org_id=org_id, bot_id=bot_id)
+        if not webhook_url:
+            return
+        self._call_telegram_api(
+            token=token,
+            method="setWebhook",
+            payload={
+                "url": webhook_url,
+                "secret_token": webhook_secret,
+                "drop_pending_updates": False,
+                "allowed_updates": ["message"],
+            },
+        )
+
+    def _queue_byob_outbound_message(
+        self,
+        *,
+        org_id: str,
+        bot_connection_id: int,
+        chat_id: int,
+        payload: dict[str, Any],
+    ) -> int:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO byob_outbound_queue (
+                        org_id,
+                        bot_connection_id,
+                        chat_id,
+                        payload_json,
+                        status,
+                        attempt_count,
+                        next_retry_at,
+                        last_error,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :org_id,
+                        :bot_connection_id,
+                        :chat_id,
+                        :payload_json,
+                        'pending',
+                        0,
+                        :next_retry_at,
+                        '',
+                        :created_at,
+                        :updated_at
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "bot_connection_id": int(bot_connection_id),
+                    "chat_id": int(chat_id),
+                    "payload_json": json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+                    "next_retry_at": datetime.now(UTC),
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+            ).mappings().first()
+        return int((row or {}).get("id") or 0)
+
+    def _deliver_byob_outbound_queue(self, *, org_id: str, bot_connection_id: int) -> None:
+        with self.engine.begin() as conn:
+            bot_row = conn.execute(
+                text(
+                    """
+                    SELECT token_ciphertext
+                    FROM byob_bot_connections
+                    WHERE id = :bot_id AND org_id = :org_id AND is_active = TRUE
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "bot_id": int(bot_connection_id),
+                    "org_id": org_id,
+                },
+            ).mappings().first()
+
+        token = self._load_bot_token_for_connection(org_id=org_id, bot_connection_id=bot_connection_id)
+        if not token:
+            return
+
+        with self.engine.begin() as conn:
+            queue_rows = conn.execute(
+                text(
+                    """
+                    SELECT id, payload_json, attempt_count
+                    FROM byob_outbound_queue
+                    WHERE org_id = :org_id
+                      AND bot_connection_id = :bot_connection_id
+                      AND status IN ('pending', 'retry')
+                      AND next_retry_at <= :now
+                    ORDER BY created_at ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "bot_connection_id": int(bot_connection_id),
+                    "now": datetime.now(UTC),
+                    "limit": max(1, int(self.settings.byob_webhook_delivery_batch)),
+                },
+            ).mappings().all()
+
+        for row in queue_rows:
+            queue_id = int(row.get("id") or 0)
+            attempts = int(row.get("attempt_count") or 0)
+            raw_payload = str(row.get("payload_json") or "{}")
+            try:
+                payload = json.loads(raw_payload)
+                self._call_telegram_api(token=token, method="sendMessage", payload=payload)
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE byob_outbound_queue
+                            SET status = 'sent',
+                                updated_at = :updated_at,
+                                last_error = ''
+                            WHERE id = :id
+                            """
+                        ),
+                        {
+                            "id": queue_id,
+                            "updated_at": datetime.now(UTC),
+                        },
+                    )
+            except Exception as exc:
+                next_attempt = attempts + 1
+                max_attempts = max(1, int(self.settings.byob_webhook_retry_max_attempts))
+                terminal = next_attempt >= max_attempts
+                next_status = "failed" if terminal else "retry"
+                delay_seconds = self._retry_backoff_seconds(
+                    base=int(self.settings.byob_webhook_retry_base_seconds),
+                    attempt=next_attempt,
+                )
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE byob_outbound_queue
+                            SET status = :status,
+                                attempt_count = :attempt_count,
+                                next_retry_at = :next_retry_at,
+                                last_error = :last_error,
+                                updated_at = :updated_at
+                            WHERE id = :id
+                            """
+                        ),
+                        {
+                            "status": next_status,
+                            "attempt_count": next_attempt,
+                            "next_retry_at": datetime.now(UTC) + timedelta(seconds=delay_seconds),
+                            "last_error": str(exc)[:4000],
+                            "updated_at": datetime.now(UTC),
+                            "id": queue_id,
+                        },
+                    )
+
+    def process_byob_delivery_backlog(self) -> int:
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT org_id, bot_connection_id
+                    FROM byob_outbound_queue
+                    WHERE status IN ('pending', 'retry')
+                      AND next_retry_at <= :now
+                    ORDER BY org_id ASC, bot_connection_id ASC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "now": datetime.now(UTC),
+                    "limit": 200,
+                },
+            ).mappings().all()
+
+        processed = 0
+        for row in rows:
+            org_id = str(row.get("org_id") or "").strip()
+            bot_connection_id = int(row.get("bot_connection_id") or 0)
+            if not org_id or bot_connection_id <= 0:
+                continue
+            self._deliver_byob_outbound_queue(org_id=org_id, bot_connection_id=bot_connection_id)
+            processed += 1
+        return processed
+
+    def get_byob_queue_health(self, *, actor_user_id: int, org_id: str) -> ByobQueueHealthResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                        SUM(CASE WHEN status = 'retry' THEN 1 ELSE 0 END) AS retry,
+                        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                        SUM(CASE WHEN status = 'sent' AND created_at >= (now() - interval '24 hours') THEN 1 ELSE 0 END) AS sent_last_24h,
+                        MIN(CASE WHEN status IN ('pending', 'retry') THEN next_retry_at END)::text AS oldest_due_at
+                    FROM byob_outbound_queue
+                    WHERE org_id = :org_id
+                    """
+                ),
+                {"org_id": normalized_org},
+            ).mappings().first()
+
+        return ByobQueueHealthResponse(
+            org_id=normalized_org,
+            pending=int((row or {}).get("pending") or 0),
+            retry=int((row or {}).get("retry") or 0),
+            failed=int((row or {}).get("failed") or 0),
+            sent_last_24h=int((row or {}).get("sent_last_24h") or 0),
+            oldest_due_at=(row or {}).get("oldest_due_at"),
+        )
+
+    def register_byob_bot(self, *, actor_user_id: int, org_id: str, payload: CreateByobBotRequest) -> ByobBotSummary:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        provider = self._normalize_provider(payload.provider)
+        bot_name = payload.bot_name.strip()
+        token = payload.bot_token.strip()
+        external_bot_id = (payload.external_bot_id or "").strip() or None
+        if not token:
+            raise HTTPException(status_code=400, detail="Bot token is required")
+
+        token_hash = _hash_token(token)
+        token_hint = f"***{token[-6:]}" if len(token) >= 6 else "***"
+        now = datetime.now(UTC)
+
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM byob_bot_connections
+                    WHERE org_id = :org_id AND provider = :provider AND token_hash = :token_hash
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "provider": provider,
+                    "token_hash": token_hash,
+                },
+            ).mappings().first()
+            if existing is not None:
+                raise HTTPException(status_code=409, detail="Bot token is already registered for this organization")
+
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO byob_bot_connections (
+                        org_id,
+                        provider,
+                        bot_name,
+                        external_bot_id,
+                        token_hash,
+                        token_ciphertext,
+                        token_vault_path,
+                        token_hint,
+                        webhook_secret,
+                        is_active,
+                        created_by,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :org_id,
+                        :provider,
+                        :bot_name,
+                        :external_bot_id,
+                        :token_hash,
+                        :token_ciphertext,
+                        :token_vault_path,
+                        :token_hint,
+                        :webhook_secret,
+                        TRUE,
+                        :created_by,
+                        :created_at,
+                        :updated_at
+                    )
+                    RETURNING id, org_id, provider, bot_name, external_bot_id, token_hint, is_active,
+                              created_at::text AS created_at, updated_at::text AS updated_at
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "provider": provider,
+                    "bot_name": bot_name,
+                    "external_bot_id": external_bot_id,
+                    "token_hash": token_hash,
+                    "token_ciphertext": self._encode_bot_token(token),
+                    "token_vault_path": None,
+                    "token_hint": token_hint,
+                    "webhook_secret": secrets.token_urlsafe(24),
+                    "created_by": int(actor_user_id),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ).mappings().first()
+
+        bot_id = int((row or {}).get("id") or 0)
+        vault_ref = self._vault_write_bot_token(org_id=normalized_org, bot_connection_id=bot_id, token=token)
+        if self.settings.byob_vault_required and not vault_ref:
+            raise HTTPException(status_code=500, detail="Vault token storage is required but failed")
+        if vault_ref:
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE byob_bot_connections
+                        SET token_vault_path = :token_vault_path,
+                            updated_at = :updated_at
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "token_vault_path": vault_ref,
+                        "updated_at": datetime.now(UTC),
+                        "id": bot_id,
+                    },
+                )
+
+        try:
+            self._set_telegram_webhook(
+                token=token,
+                org_id=normalized_org,
+                bot_id=bot_id,
+                webhook_secret=str((row or {}).get("webhook_secret") or ""),
+            )
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE byob_bot_connections
+                        SET last_verified_at = :last_verified_at,
+                            updated_at = :updated_at
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "last_verified_at": datetime.now(UTC),
+                        "updated_at": datetime.now(UTC),
+                        "id": int((row or {}).get("id") or 0),
+                    },
+                )
+        except HTTPException:
+            # Preserve created record for manual recovery if Telegram API is temporarily unavailable.
+            pass
+
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="byob.bot.register",
+            target_type="bot_connection",
+            target_id=str(row.get("id") or ""),
+            details={
+                "provider": provider,
+                "bot_name": bot_name,
+                "external_bot_id": external_bot_id or "",
+            },
+        )
+        return ByobBotSummary.model_validate(dict(row))
+
+    def list_byob_bots(self, *, actor_user_id: int, org_id: str, provider: str | None = None) -> list[ByobBotSummary]:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        normalized_provider = self._normalize_provider(provider or "telegram") if provider else None
+        with self.engine.begin() as conn:
+            if normalized_provider:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, org_id, provider, bot_name, external_bot_id, token_hint, is_active,
+                               created_at::text AS created_at, updated_at::text AS updated_at
+                        FROM byob_bot_connections
+                        WHERE org_id = :org_id AND provider = :provider
+                        ORDER BY created_at DESC
+                        """
+                    ),
+                    {
+                        "org_id": normalized_org,
+                        "provider": normalized_provider,
+                    },
+                ).mappings().all()
+            else:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT id, org_id, provider, bot_name, external_bot_id, token_hint, is_active,
+                               created_at::text AS created_at, updated_at::text AS updated_at
+                        FROM byob_bot_connections
+                        WHERE org_id = :org_id
+                        ORDER BY created_at DESC
+                        """
+                    ),
+                    {"org_id": normalized_org},
+                ).mappings().all()
+
+        return [ByobBotSummary.model_validate(dict(row)) for row in rows]
+
+    def update_byob_bot_status(
+        self,
+        *,
+        actor_user_id: int,
+        org_id: str,
+        bot_id: int,
+        payload: UpdateByobBotStatusRequest,
+    ) -> ByobBotSummary:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE byob_bot_connections
+                    SET is_active = :is_active, updated_at = :updated_at
+                    WHERE id = :bot_id AND org_id = :org_id
+                    RETURNING id, org_id, provider, bot_name, external_bot_id, token_hint, is_active,
+                              created_at::text AS created_at, updated_at::text AS updated_at
+                    """
+                ),
+                {
+                    "is_active": bool(payload.is_active),
+                    "updated_at": datetime.now(UTC),
+                    "bot_id": int(bot_id),
+                    "org_id": normalized_org,
+                },
+            ).mappings().first()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail="Bot connection not found")
+
+        if bool(payload.is_active):
+            with self.engine.begin() as conn:
+                token_row = conn.execute(
+                    text(
+                        """
+                        SELECT token_ciphertext, webhook_secret
+                        FROM byob_bot_connections
+                        WHERE id = :bot_id AND org_id = :org_id
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "bot_id": int(bot_id),
+                        "org_id": normalized_org,
+                    },
+                ).mappings().first()
+            token = self._decode_bot_token(str((token_row or {}).get("token_ciphertext") or ""))
+            if token:
+                try:
+                    self._set_telegram_webhook(
+                        token=token,
+                        org_id=normalized_org,
+                        bot_id=int(bot_id),
+                        webhook_secret=str((token_row or {}).get("webhook_secret") or ""),
+                    )
+                except HTTPException:
+                    pass
+
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="byob.bot.set_active",
+            target_type="bot_connection",
+            target_id=str(bot_id),
+            details={"is_active": bool(payload.is_active)},
+        )
+        return ByobBotSummary.model_validate(dict(row))
+
+    def _apply_credit_delta(
+        self,
+        *,
+        actor_user_id: int,
+        org_id: str,
+        delta: int,
+        reason: str,
+        reference_type: str,
+        reference_id: str,
+    ) -> int:
+        if delta == 0:
+            raise HTTPException(status_code=400, detail="Credit adjustment delta must not be zero")
+
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_credit_accounts (org_id, balance, updated_at)
+                    VALUES (:org_id, 0, :updated_at)
+                    ON CONFLICT (org_id) DO NOTHING
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "updated_at": now,
+                },
+            )
+
+            row = conn.execute(
+                text(
+                    """
+                    SELECT balance
+                    FROM org_credit_accounts
+                    WHERE org_id = :org_id
+                    FOR UPDATE
+                    """
+                ),
+                {"org_id": org_id},
+            ).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Organization credit account not found")
+
+            current_balance = int(row.get("balance") or 0)
+            next_balance = current_balance + int(delta)
+            if next_balance < 0:
+                raise HTTPException(status_code=409, detail="Insufficient credits")
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE org_credit_accounts
+                    SET balance = :balance, updated_at = :updated_at
+                    WHERE org_id = :org_id
+                    """
+                ),
+                {
+                    "balance": next_balance,
+                    "updated_at": now,
+                    "org_id": org_id,
+                },
+            )
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_credit_ledger (
+                        org_id,
+                        delta,
+                        balance_after,
+                        reason,
+                        actor_user_id,
+                        reference_type,
+                        reference_id,
+                        created_at
+                    )
+                    VALUES (
+                        :org_id,
+                        :delta,
+                        :balance_after,
+                        :reason,
+                        :actor_user_id,
+                        :reference_type,
+                        :reference_id,
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    "org_id": org_id,
+                    "delta": int(delta),
+                    "balance_after": next_balance,
+                    "reason": reason,
+                    "actor_user_id": int(actor_user_id),
+                    "reference_type": reference_type,
+                    "reference_id": reference_id,
+                    "created_at": now,
+                },
+            )
+
+        return next_balance
+
+    def _get_credit_policy(self, *, org_id: str) -> CreditPolicyResponse:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT daily_limit, monthly_limit, low_balance_threshold
+                    FROM org_credit_policies
+                    WHERE org_id = :org_id
+                    LIMIT 1
+                    """
+                ),
+                {"org_id": org_id},
+            ).mappings().first()
+
+        if row is None:
+            return CreditPolicyResponse(org_id=org_id, daily_limit=None, monthly_limit=None, low_balance_threshold=0)
+
+        return CreditPolicyResponse(
+            org_id=org_id,
+            daily_limit=int(row["daily_limit"]) if row.get("daily_limit") is not None else None,
+            monthly_limit=int(row["monthly_limit"]) if row.get("monthly_limit") is not None else None,
+            low_balance_threshold=int(row.get("low_balance_threshold") or 0),
+        )
+
+    def set_org_credit_policy(
+        self,
+        *,
+        actor_user_id: int,
+        org_id: str,
+        payload: UpdateCreditPolicyRequest,
+    ) -> CreditPolicyResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO org_credit_policies (
+                        org_id,
+                        daily_limit,
+                        monthly_limit,
+                        low_balance_threshold,
+                        updated_at
+                    )
+                    VALUES (
+                        :org_id,
+                        :daily_limit,
+                        :monthly_limit,
+                        :low_balance_threshold,
+                        :updated_at
+                    )
+                    ON CONFLICT (org_id)
+                    DO UPDATE SET
+                        daily_limit = EXCLUDED.daily_limit,
+                        monthly_limit = EXCLUDED.monthly_limit,
+                        low_balance_threshold = EXCLUDED.low_balance_threshold,
+                        updated_at = EXCLUDED.updated_at
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "daily_limit": payload.daily_limit,
+                    "monthly_limit": payload.monthly_limit,
+                    "low_balance_threshold": int(payload.low_balance_threshold),
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="billing.policy.update",
+            target_type="credit_policy",
+            target_id=normalized_org,
+            details={
+                "daily_limit": payload.daily_limit,
+                "monthly_limit": payload.monthly_limit,
+                "low_balance_threshold": int(payload.low_balance_threshold),
+            },
+        )
+        return self._get_credit_policy(org_id=normalized_org)
+
+    def get_org_credit_policy(self, *, actor_user_id: int, org_id: str) -> CreditPolicyResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+        return self._get_credit_policy(org_id=normalized_org)
+
+    def _enforce_credit_limits_before_debit(self, *, org_id: str, amount: int) -> None:
+        if amount <= 0:
+            return
+
+        policy = self._get_credit_policy(org_id=org_id)
+        if policy.daily_limit is None and policy.monthly_limit is None:
+            return
+
+        with self.engine.begin() as conn:
+            day_row = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(-delta), 0) AS spent
+                    FROM org_credit_ledger
+                    WHERE org_id = :org_id
+                      AND delta < 0
+                      AND created_at >= date_trunc('day', now())
+                    """
+                ),
+                {"org_id": org_id},
+            ).mappings().first()
+            month_row = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(-delta), 0) AS spent
+                    FROM org_credit_ledger
+                    WHERE org_id = :org_id
+                      AND delta < 0
+                      AND created_at >= date_trunc('month', now())
+                    """
+                ),
+                {"org_id": org_id},
+            ).mappings().first()
+
+        day_spent = int((day_row or {}).get("spent") or 0)
+        month_spent = int((month_row or {}).get("spent") or 0)
+
+        if policy.daily_limit is not None and (day_spent + amount) > int(policy.daily_limit):
+            raise HTTPException(status_code=409, detail="Daily credit limit exceeded")
+        if policy.monthly_limit is not None and (month_spent + amount) > int(policy.monthly_limit):
+            raise HTTPException(status_code=409, detail="Monthly credit limit exceeded")
+
+    def _debit_org_for_usage(
+        self,
+        *,
+        org_id: str,
+        actor_user_id: int,
+        total_tokens: int,
+        reference_type: str,
+        reference_id: str,
+    ) -> int:
+        usage_tokens = max(0, int(total_tokens))
+        usage_credits = max(1, (usage_tokens + 999) // 1000)
+        self._enforce_credit_limits_before_debit(org_id=org_id, amount=usage_credits)
+        balance = self._apply_credit_delta(
+            actor_user_id=actor_user_id,
+            org_id=org_id,
+            delta=-usage_credits,
+            reason=f"LLM usage ({usage_tokens} tokens)",
+            reference_type=reference_type,
+            reference_id=reference_id,
+        )
+
+        policy = self._get_credit_policy(org_id=org_id)
+        if balance <= int(policy.low_balance_threshold):
+            self.rbac.audit(
+                org_id=org_id,
+                team_id="",
+                actor_user_id=actor_user_id,
+                action="billing.low_balance",
+                target_type="credit_account",
+                target_id=org_id,
+                details={
+                    "balance": balance,
+                    "threshold": int(policy.low_balance_threshold),
+                },
+            )
+        return balance
+
+    def process_telegram_webhook(
+        self,
+        *,
+        org_id: str,
+        bot_id: int,
+        webhook_secret: str,
+        client_ip: str | None,
+        update: TelegramWebhookUpdate,
+    ) -> dict[str, Any]:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_telegram_ip(client_ip=client_ip)
+
+        with self.engine.begin() as conn:
+            bot_row = conn.execute(
+                text(
+                    """
+                    SELECT id, org_id, bot_name, is_active, webhook_secret
+                    FROM byob_bot_connections
+                    WHERE id = :bot_id AND org_id = :org_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "bot_id": int(bot_id),
+                    "org_id": normalized_org,
+                },
+            ).mappings().first()
+
+        if bot_row is None:
+            raise HTTPException(status_code=404, detail="Bot connection not found")
+        if not bool(bot_row.get("is_active")):
+            raise HTTPException(status_code=409, detail="Bot connection is inactive")
+
+        expected_secret = str(bot_row.get("webhook_secret") or "")
+        if not expected_secret or not secrets.compare_digest(expected_secret, webhook_secret or ""):
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+        message = update.message or {}
+        chat_obj = message.get("chat") if isinstance(message, dict) else None
+        from_obj = message.get("from") if isinstance(message, dict) else None
+        text_message = str(message.get("text") or "").strip() if isinstance(message, dict) else ""
+
+        if not isinstance(chat_obj, dict) or not isinstance(from_obj, dict) or not text_message:
+            return {"ok": True}
+
+        chat_id = int(chat_obj.get("id") or 0)
+        user_id = int(from_obj.get("id") or 0)
+        if chat_id == 0 or user_id <= 0:
+            return {"ok": True}
+
+        self._consume_rate_limit(
+            scope="tenant",
+            scope_key=normalized_org,
+            limit_per_minute=int(self.settings.byob_tenant_rate_limit_per_min),
+        )
+        self._consume_rate_limit(
+            scope="tenant_user",
+            scope_key=f"{normalized_org}:{int(user_id)}",
+            limit_per_minute=int(self.settings.byob_user_rate_limit_per_min),
+        )
+
+        role = self.rbac.get_role(org_id=normalized_org, user_id=user_id, fallback_role="member")
+        if self.settings.enable_dynamic_tools:
+            self.agent.refresh_dynamic_tools()
+            all_dynamic = set(self.agent.registry.tools.keys())
+        else:
+            all_dynamic = set()
+        allowed_dynamic = self.rbac.resolve_allowed_skills(
+            org_id=normalized_org,
+            user_id=user_id,
+            role=role,
+            all_dynamic_tools=all_dynamic,
+        )
+
+        try:
+            answer_result = self.agent.run(
+                text_message,
+                [],
+                chat_id,
+                normalized_org,
+                f"bot:{int(bot_id)}",
+                user_id,
+                role,
+                allowed_dynamic,
+            )
+            answer = answer_result.answer or "I could not generate a response."
+            _ = self._debit_org_for_usage(
+                org_id=normalized_org,
+                actor_user_id=user_id,
+                total_tokens=int(answer_result.token_usage.total_tokens),
+                reference_type="telegram_webhook",
+                reference_id=str(update.update_id or chat_id),
+            )
+        except HTTPException as exc:
+            if exc.status_code in {409}:
+                answer = "Credit policy limit reached. Please contact bot owner."
+            else:
+                answer = "Assistant is temporarily unavailable."
+        except Exception:
+            answer = "Assistant is temporarily unavailable."
+
+        queued_id = self._queue_byob_outbound_message(
+            org_id=normalized_org,
+            bot_connection_id=int(bot_id),
+            chat_id=chat_id,
+            payload={
+                "chat_id": chat_id,
+                "text": answer,
+            },
+        )
+        if queued_id > 0:
+            self._deliver_byob_outbound_queue(org_id=normalized_org, bot_connection_id=int(bot_id))
+        return {"ok": True}
+
+    def get_org_credit_balance(self, *, actor_user_id: int, org_id: str) -> OrgCreditBalanceResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT balance FROM org_credit_accounts WHERE org_id = :org_id LIMIT 1"),
+                {"org_id": normalized_org},
+            ).mappings().first()
+
+        return OrgCreditBalanceResponse(org_id=normalized_org, balance=int((row or {}).get("balance") or 0))
+
+    def top_up_org_credits(self, *, actor_user_id: int, org_id: str, payload: CreditAdjustmentRequest) -> OrgCreditBalanceResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        balance = self._apply_credit_delta(
+            actor_user_id=actor_user_id,
+            org_id=normalized_org,
+            delta=int(payload.amount),
+            reason=payload.reason.strip(),
+            reference_type=payload.reference_type.strip(),
+            reference_id=payload.reference_id.strip(),
+        )
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="billing.credit_topup",
+            target_type="credit_account",
+            target_id=normalized_org,
+            details={"amount": int(payload.amount), "balance": int(balance)},
+        )
+        return OrgCreditBalanceResponse(org_id=normalized_org, balance=balance)
+
+    def debit_org_credits(self, *, actor_user_id: int, org_id: str, payload: CreditAdjustmentRequest) -> OrgCreditBalanceResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+        self._enforce_credit_limits_before_debit(org_id=normalized_org, amount=int(payload.amount))
+
+        balance = self._apply_credit_delta(
+            actor_user_id=actor_user_id,
+            org_id=normalized_org,
+            delta=-int(payload.amount),
+            reason=payload.reason.strip(),
+            reference_type=payload.reference_type.strip(),
+            reference_id=payload.reference_id.strip(),
+        )
+        self.rbac.audit(
+            org_id=normalized_org,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="billing.credit_debit",
+            target_type="credit_account",
+            target_id=normalized_org,
+            details={"amount": int(payload.amount), "balance": int(balance)},
+        )
+        return OrgCreditBalanceResponse(org_id=normalized_org, balance=balance)
+
+    def list_org_credit_ledger(self, *, actor_user_id: int, org_id: str, limit: int = 50) -> CreditLedgerResponse:
+        normalized_org = org_id.strip()
+        if not normalized_org:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT id, delta, balance_after, reason, actor_user_id, reference_type, reference_id, created_at::text AS created_at
+                    FROM org_credit_ledger
+                    WHERE org_id = :org_id
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "org_id": normalized_org,
+                    "limit": max(1, min(int(limit), 500)),
+                },
+            ).mappings().all()
+
+        return CreditLedgerResponse(
+            org_id=normalized_org,
+            items=[CreditLedgerItem.model_validate(dict(row)) for row in rows],
+        )
 
 
     def set_role(self, *, actor_user_id: int, target_user_id: int, payload: SetRoleRequest) -> None:
-        self._enforce_admin(actor_user_id)
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=payload.org_id)
         self.rbac.set_role(
             org_id=payload.org_id,
             actor_user_id=actor_user_id,
@@ -1158,14 +2470,8 @@ class RealtimeChatHub:
         )
 
     def list_org_users(self, *, actor_user_id: int, org_id: str, team_id: str | None = None) -> list[AdminUserSummary]:
-        self._enforce_admin(actor_user_id)
-        normalized_team_id = (team_id or "").strip()
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=org_id)
         supports_otp = self._supports_auth_otp_fields()
-        team_join = (
-            "LEFT JOIN team_members tm ON tm.org_id = om.org_id AND tm.team_id = :team_id AND tm.user_id = om.user_id"
-            if normalized_team_id
-            else "LEFT JOIN team_members tm ON 1 = 0"
-        )
         force_password_select = "COALESCE(u.force_password_change, FALSE) AS force_password_change" if supports_otp else "FALSE AS force_password_change"
         with self.engine.begin() as conn:
             rows = conn.execute(
@@ -1182,26 +2488,18 @@ class RealtimeChatHub:
                                         + force_password_select
                                         +
                                         """,
-                        CASE
-                            WHEN tm.user_id IS NULL THEN FALSE
-                            ELSE TRUE
-                        END AS in_team
+                                                TRUE AS in_team
                     FROM org_memberships om
                     JOIN auth_users u
                       ON u.user_id = om.user_id
                     LEFT JOIN app_users au
                       ON au.org_id = om.org_id AND au.user_id = om.user_id
-                                        """
-                                        + team_join
-                                        +
-                                        """
                     WHERE om.org_id = :org_id
                     ORDER BY u.user_id ASC
                     """
                 ),
                 {
                     "org_id": org_id,
-                                        "team_id": normalized_team_id,
                 },
             ).mappings().all()
 
@@ -1275,7 +2573,7 @@ class RealtimeChatHub:
         target_user_id: int,
         payload: MembershipUpsertRequest,
     ) -> dict[str, Any]:
-        self._enforce_admin(actor_user_id)
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=payload.org_id)
         org_id = payload.org_id.strip()
         if not org_id:
             raise HTTPException(status_code=400, detail="Organization ID is required")
@@ -1332,24 +2630,12 @@ class RealtimeChatHub:
         return {"status": "ok", "created": existing is None}
 
     def unbind_user_from_org(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> dict[str, Any]:
-        self._enforce_admin(actor_user_id)
         normalized_org = org_id.strip()
         if not normalized_org:
             raise HTTPException(status_code=400, detail="Organization ID is required")
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=normalized_org)
 
         with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    DELETE FROM team_members
-                    WHERE org_id = :org_id AND user_id = :user_id
-                    """
-                ),
-                {
-                    "org_id": normalized_org,
-                    "user_id": int(target_user_id),
-                },
-            )
             conn.execute(
                 text(
                     """
@@ -1388,7 +2674,7 @@ class RealtimeChatHub:
         return {"status": "ok", "removed": removed}
 
     def grant_skill(self, *, actor_user_id: int, target_user_id: int, payload: SkillAssignmentRequest) -> None:
-        self._enforce_admin(actor_user_id)
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=payload.org_id)
         self.rbac.assign_skill(
             org_id=payload.org_id,
             actor_user_id=actor_user_id,
@@ -1397,7 +2683,7 @@ class RealtimeChatHub:
         )
 
     def revoke_skill(self, *, actor_user_id: int, target_user_id: int, payload: SkillAssignmentRequest) -> bool:
-        self._enforce_admin(actor_user_id)
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=payload.org_id)
         return self.rbac.revoke_skill(
             org_id=payload.org_id,
             actor_user_id=actor_user_id,
@@ -1406,7 +2692,7 @@ class RealtimeChatHub:
         )
 
     def list_user_skills(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> list[str]:
-        self._enforce_admin(actor_user_id)
+        self._enforce_org_admin(actor_user_id=actor_user_id, org_id=org_id)
         return self.rbac.list_user_skills(org_id=org_id, user_id=target_user_id)
 
     def list_dynamic_skills(self, *, actor_user_id: int) -> list[DynamicSkillSummary]:
@@ -1827,12 +3113,28 @@ service = ApiService(settings)
 chat_hub = RealtimeChatHub(settings)
 
 
+async def _run_byob_delivery_worker() -> None:
+    interval = max(1, int(settings.byob_delivery_poll_interval_seconds))
+    while True:
+        try:
+            await asyncio.to_thread(service.process_byob_delivery_backlog)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(_: FastAPI):
     await chat_hub.startup()
+    delivery_worker = asyncio.create_task(_run_byob_delivery_worker(), name="byob-delivery-worker")
     try:
         yield
     finally:
+        delivery_worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await delivery_worker
         await chat_hub.shutdown()
 
 
@@ -1914,7 +3216,8 @@ def change_my_password(payload: PasswordChangeRequest, user: CurrentUser) -> dic
 
 @app.post("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def create_org(payload: CreateOrgRequest, user: CurrentUser) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.create_org(actor_user_id=int(user["user_id"]), payload=payload)
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
@@ -1972,7 +3275,8 @@ def set_role(
     payload: SetRoleRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.set_role(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok"}
 
 
 @app.post(
@@ -1984,7 +3288,8 @@ def grant_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.grant_skill(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok"}
 
 
 @app.post(
@@ -1996,7 +3301,8 @@ def revoke_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    _legacy_scope_removed()
+    removed = service.revoke_skill(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok", "removed": removed}
 
 
 @app.get("/api/v1/admin/users/{target_user_id}/skills", responses={403: {"description": "Admin access required"}})
@@ -2005,7 +3311,100 @@ def list_user_skills(
     org_id: str,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    _legacy_scope_removed()
+    skills = service.list_user_skills(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        org_id=org_id,
+    )
+    return {"skills": skills}
+
+
+@app.post("/api/v1/orgs/{org_id}/bots", responses={403: {"description": "Admin access required"}})
+def register_byob_bot(org_id: str, payload: CreateByobBotRequest, user: CurrentUser) -> ByobBotSummary:
+    return service.register_byob_bot(actor_user_id=int(user["user_id"]), org_id=org_id, payload=payload)
+
+
+@app.get("/api/v1/orgs/{org_id}/bots", responses={403: {"description": "Admin access required"}})
+def list_byob_bots(org_id: str, user: CurrentUser, provider: str | None = None) -> list[ByobBotSummary]:
+    return service.list_byob_bots(actor_user_id=int(user["user_id"]), org_id=org_id, provider=provider)
+
+
+@app.patch("/api/v1/orgs/{org_id}/bots/{bot_id}", responses={403: {"description": "Admin access required"}})
+def update_byob_bot_status(
+    org_id: str,
+    bot_id: int,
+    payload: UpdateByobBotStatusRequest,
+    user: CurrentUser,
+) -> ByobBotSummary:
+    return service.update_byob_bot_status(
+        actor_user_id=int(user["user_id"]),
+        org_id=org_id,
+        bot_id=bot_id,
+        payload=payload,
+    )
+
+
+@app.get("/api/v1/orgs/{org_id}/credits/balance", responses={403: {"description": "Admin access required"}})
+def get_org_credit_balance(org_id: str, user: CurrentUser) -> OrgCreditBalanceResponse:
+    return service.get_org_credit_balance(actor_user_id=int(user["user_id"]), org_id=org_id)
+
+
+@app.post("/api/v1/orgs/{org_id}/credits/topup", responses={403: {"description": "Admin access required"}})
+def top_up_org_credits(org_id: str, payload: CreditAdjustmentRequest, user: CurrentUser) -> OrgCreditBalanceResponse:
+    return service.top_up_org_credits(actor_user_id=int(user["user_id"]), org_id=org_id, payload=payload)
+
+
+@app.post("/api/v1/orgs/{org_id}/credits/debit", responses={403: {"description": "Admin access required"}})
+def debit_org_credits(org_id: str, payload: CreditAdjustmentRequest, user: CurrentUser) -> OrgCreditBalanceResponse:
+    return service.debit_org_credits(actor_user_id=int(user["user_id"]), org_id=org_id, payload=payload)
+
+
+@app.get("/api/v1/orgs/{org_id}/credits/ledger", responses={403: {"description": "Admin access required"}})
+def list_org_credit_ledger(org_id: str, user: CurrentUser, limit: int = 50) -> CreditLedgerResponse:
+    return service.list_org_credit_ledger(actor_user_id=int(user["user_id"]), org_id=org_id, limit=limit)
+
+
+@app.get("/api/v1/orgs/{org_id}/credits/policy", responses={403: {"description": "Admin access required"}})
+def get_org_credit_policy(org_id: str, user: CurrentUser) -> CreditPolicyResponse:
+    return service.get_org_credit_policy(actor_user_id=int(user["user_id"]), org_id=org_id)
+
+
+@app.put("/api/v1/orgs/{org_id}/credits/policy", responses={403: {"description": "Admin access required"}})
+def set_org_credit_policy(org_id: str, payload: UpdateCreditPolicyRequest, user: CurrentUser) -> CreditPolicyResponse:
+    return service.set_org_credit_policy(actor_user_id=int(user["user_id"]), org_id=org_id, payload=payload)
+
+
+@app.post("/api/v1/byob/telegram/{org_id}/{bot_id}/webhook")
+def byob_telegram_webhook(
+    org_id: str,
+    bot_id: int,
+    request: Request,
+    payload: TelegramWebhookUpdate,
+    telegram_secret: Annotated[str | None, Header(alias="X-Telegram-Bot-Api-Secret-Token")] = None,
+) -> dict[str, Any]:
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    client_ip = forwarded_for.split(",", 1)[0].strip() if forwarded_for else None
+    if not client_ip:
+        client_ip = request.client.host if request.client is not None else None
+    return service.process_telegram_webhook(
+        org_id=org_id,
+        bot_id=bot_id,
+        webhook_secret=str(telegram_secret or ""),
+        client_ip=client_ip,
+        update=payload,
+    )
+
+
+@app.get("/api/v1/orgs/{org_id}/queue/health", responses={403: {"description": "Admin access required"}})
+def byob_queue_health(org_id: str, user: CurrentUser) -> ByobQueueHealthResponse:
+    return service.get_byob_queue_health(actor_user_id=int(user["user_id"]), org_id=org_id)
+
+
+@app.post("/api/v1/admin/byob/queue/process", responses={403: {"description": "Admin access required"}})
+def process_byob_queue_now(user: CurrentUser) -> dict[str, int]:
+    service._enforce_admin(int(user["user_id"]))
+    processed = service.process_byob_delivery_backlog()
+    return {"processed": int(processed)}
 
 
 @app.get("/api/v1/admin/skills", responses={403: {"description": "Admin access required"}})

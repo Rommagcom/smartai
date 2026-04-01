@@ -8,7 +8,7 @@ from typing import Literal
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-Role = Literal["admin", "manager", "member"]
+Role = Literal["owner", "admin", "manager", "member"]
 ORG_ID_EMPTY_TEXT = "org_id must not be empty"
 
 
@@ -106,7 +106,7 @@ class RbacStore:
         if row is None:
             return fallback_role
         role = str(row.get("role") or fallback_role).strip().lower()
-        if role in {"admin", "manager", "member"}:
+        if role in {"owner", "admin", "manager", "member"}:
             return role  # type: ignore[return-value]
         return fallback_role
 
@@ -204,7 +204,7 @@ class RbacStore:
         role: Role,
         all_dynamic_tools: set[str],
     ) -> set[str]:
-        if role == "admin":
+        if role in {"owner", "admin"}:
             return set(all_dynamic_tools)
 
         assigned = set(self.list_user_skills(org_id=org_id, user_id=user_id))

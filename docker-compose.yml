@@ -97,6 +97,26 @@ services:
       timeout: 5s
       retries: 8
 
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: sai-vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    command: server -dev
+    ports:
+      - "8200:8200"
+    volumes:
+      - vault-data:/vault/file
+    healthcheck:
+      test: ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:8200 vault status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   bot:
     build:
       context: .
@@ -110,6 +130,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
+      BYOB_VAULT_ADDR: http://vault:8200
+      BYOB_VAULT_TOKEN: root
+      BYOB_VAULT_MOUNT: secret
       HF_HOME: /home/app/.cache/huggingface
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -129,6 +152,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      vault:
+        condition: service_healthy
 
   api:
     build:
@@ -143,6 +168,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
+      BYOB_VAULT_ADDR: http://vault:8200
+      BYOB_VAULT_TOKEN: root
+      BYOB_VAULT_MOUNT: secret
       HF_HOME: /home/app/.cache/huggingface
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -170,6 +198,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      vault:
+        condition: service_healthy
 
   frontend:
     build:
@@ -188,3 +218,4 @@ volumes:
   ollama-data:
   postgres-data:
   huggingface-cache:
+  vault-data:

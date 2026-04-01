@@ -20,6 +20,8 @@ api_app = importlib.import_module("search_agent.api.app")
 class _FakeApiService:
     def __init__(self) -> None:
         self._next_user_id = 1
+        self._next_bot_id = 1
+        self._next_ledger_id = 1
         self.users: dict[int, dict[str, Any]] = {}
         self.users_by_email: dict[str, int] = {}
         self.tokens: dict[str, int] = {}
@@ -28,6 +30,10 @@ class _FakeApiService:
         self.skills: dict[tuple[str, int], set[str]] = {}
         self.messages: dict[int, list[dict[str, Any]]] = {}
         self.dynamic_skills: dict[str, dict[str, str]] = {}
+        self.byob_bots: dict[str, list[dict[str, Any]]] = {}
+        self.org_credits: dict[str, int] = {}
+        self.org_ledger: dict[str, list[dict[str, Any]]] = {}
+        self.org_credit_policies: dict[str, dict[str, Any]] = {}
 
     def register_user(self, payload: Any) -> int:
         email = payload.email.strip().lower()
@@ -101,6 +107,132 @@ class _FakeApiService:
     def list_user_skills(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> list[str]:
         self._ensure_admin(actor_user_id)
         return sorted(self.skills.get((org_id, int(target_user_id)), set()))
+
+    def register_byob_bot(self, *, actor_user_id: int, org_id: str, payload: Any) -> Any:
+        self._ensure_admin(actor_user_id)
+        now = datetime.now(UTC).isoformat()
+        record = {
+            "id": self._next_bot_id,
+            "org_id": org_id,
+            "provider": payload.provider,
+            "bot_name": payload.bot_name,
+            "external_bot_id": payload.external_bot_id,
+            "token_hint": "***token",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._next_bot_id += 1
+        self.byob_bots.setdefault(org_id, []).append(record)
+        return api_app.ByobBotSummary(**record)
+
+    def list_byob_bots(self, *, actor_user_id: int, org_id: str, provider: str | None = None) -> list[Any]:
+        self._ensure_admin(actor_user_id)
+        items = self.byob_bots.get(org_id, [])
+        if provider:
+            items = [item for item in items if item["provider"] == provider]
+        return [api_app.ByobBotSummary(**item) for item in items]
+
+    def update_byob_bot_status(self, *, actor_user_id: int, org_id: str, bot_id: int, payload: Any) -> Any:
+        self._ensure_admin(actor_user_id)
+        for item in self.byob_bots.get(org_id, []):
+            if int(item["id"]) == int(bot_id):
+                item["is_active"] = bool(payload.is_active)
+                item["updated_at"] = datetime.now(UTC).isoformat()
+                return api_app.ByobBotSummary(**item)
+        raise HTTPException(status_code=404, detail="Bot connection not found")
+
+    def get_org_credit_balance(self, *, actor_user_id: int, org_id: str) -> Any:
+        self._ensure_admin(actor_user_id)
+        return api_app.OrgCreditBalanceResponse(org_id=org_id, balance=int(self.org_credits.get(org_id, 0)))
+
+    def _apply_credits(self, *, org_id: str, delta: int, actor_user_id: int, payload: Any) -> Any:
+        balance = int(self.org_credits.get(org_id, 0)) + int(delta)
+        if balance < 0:
+            raise HTTPException(status_code=409, detail="Insufficient credits")
+        self.org_credits[org_id] = balance
+        self.org_ledger.setdefault(org_id, []).append(
+            {
+                "id": self._next_ledger_id,
+                "delta": int(delta),
+                "balance_after": balance,
+                "reason": payload.reason,
+                "actor_user_id": int(actor_user_id),
+                "reference_type": payload.reference_type,
+                "reference_id": payload.reference_id,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        self._next_ledger_id += 1
+        return api_app.OrgCreditBalanceResponse(org_id=org_id, balance=balance)
+
+    def top_up_org_credits(self, *, actor_user_id: int, org_id: str, payload: Any) -> Any:
+        self._ensure_admin(actor_user_id)
+        return self._apply_credits(org_id=org_id, delta=int(payload.amount), actor_user_id=actor_user_id, payload=payload)
+
+    def debit_org_credits(self, *, actor_user_id: int, org_id: str, payload: Any) -> Any:
+        self._ensure_admin(actor_user_id)
+        policy = self.org_credit_policies.get(org_id, {})
+        daily_limit = policy.get("daily_limit")
+        monthly_limit = policy.get("monthly_limit")
+        spent = sum(-int(item["delta"]) for item in self.org_ledger.get(org_id, []) if int(item["delta"]) < 0)
+        next_spent = spent + int(payload.amount)
+        if daily_limit is not None and next_spent > int(daily_limit):
+            raise HTTPException(status_code=409, detail="Daily credit limit exceeded")
+        if monthly_limit is not None and next_spent > int(monthly_limit):
+            raise HTTPException(status_code=409, detail="Monthly credit limit exceeded")
+        return self._apply_credits(org_id=org_id, delta=-int(payload.amount), actor_user_id=actor_user_id, payload=payload)
+
+    def list_org_credit_ledger(self, *, actor_user_id: int, org_id: str, limit: int = 50) -> Any:
+        self._ensure_admin(actor_user_id)
+        items = self.org_ledger.get(org_id, [])
+        modeled = [api_app.CreditLedgerItem(**item) for item in items[-max(1, int(limit)) :]][::-1]
+        return api_app.CreditLedgerResponse(org_id=org_id, items=modeled)
+
+    def get_org_credit_policy(self, *, actor_user_id: int, org_id: str) -> Any:
+        self._ensure_admin(actor_user_id)
+        policy = self.org_credit_policies.get(org_id, {})
+        return api_app.CreditPolicyResponse(
+            org_id=org_id,
+            daily_limit=policy.get("daily_limit"),
+            monthly_limit=policy.get("monthly_limit"),
+            low_balance_threshold=int(policy.get("low_balance_threshold") or 0),
+        )
+
+    def set_org_credit_policy(self, *, actor_user_id: int, org_id: str, payload: Any) -> Any:
+        self._ensure_admin(actor_user_id)
+        self.org_credit_policies[org_id] = {
+            "daily_limit": payload.daily_limit,
+            "monthly_limit": payload.monthly_limit,
+            "low_balance_threshold": int(payload.low_balance_threshold),
+        }
+        return self.get_org_credit_policy(actor_user_id=actor_user_id, org_id=org_id)
+
+    def process_telegram_webhook(
+        self,
+        *,
+        org_id: str,
+        bot_id: int,
+        webhook_secret: str,
+        client_ip: str | None,
+        update: Any,
+    ) -> dict[str, Any]:
+        _ = (org_id, bot_id, webhook_secret, client_ip, update)
+        return {"method": "sendMessage", "chat_id": 1, "text": "ACK"}
+
+    def get_byob_queue_health(self, *, actor_user_id: int, org_id: str) -> Any:
+        self._ensure_admin(actor_user_id)
+        return api_app.ByobQueueHealthResponse(
+            org_id=org_id,
+            pending=0,
+            retry=0,
+            failed=0,
+            sent_last_24h=0,
+            oldest_due_at=None,
+        )
+
+    def process_byob_delivery_backlog(self) -> int:
+        return 0
 
     def list_dynamic_skills(self, *, actor_user_id: int) -> list[Any]:
         self._ensure_admin(actor_user_id)
@@ -289,8 +421,7 @@ def test_admin_endpoint_forbidden_for_non_admin(client: tuple[TestClient, _FakeA
         json={"org_id": "beta", "name": "Beta Org"},
         headers=_auth_headers(token),
     )
-    assert create_org_response.status_code == 410
-    assert "removed" in create_org_response.text
+    assert create_org_response.status_code == 403
 
 
 def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _FakeApiService]) -> None:
@@ -321,7 +452,7 @@ def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _
         json={"org_id": "acme", "name": "Acme Corp"},
         headers=_auth_headers(admin_token),
     )
-    assert create_org.status_code == 410
+    assert create_org.status_code == 200
 
     member_login = test_client.post(
         "/api/v1/auth/login",
@@ -347,6 +478,172 @@ def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _
     assert len(payload) == 2
     assert payload[0]["sender_type"] == "user"
     assert payload[1]["sender_type"] == "assistant"
+
+
+def test_admin_can_set_role_and_manage_skills(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    member_register = test_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "member3@acme.test",
+            "password": "MemberPass123",
+            "full_name": "Member Three",
+            "title": "Analyst",
+            "profile_bio": "Operations",
+        },
+    )
+    assert member_register.status_code == 200
+    member_id = int(member_register.json()["user_id"])
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["access_token"]
+
+    set_role_response = test_client.post(
+        f"/api/v1/admin/users/{member_id}/role",
+        json={"org_id": "acme", "role": "member"},
+        headers=_auth_headers(admin_token),
+    )
+    assert set_role_response.status_code == 200
+
+    grant_response = test_client.post(
+        f"/api/v1/admin/users/{member_id}/skills/grant",
+        json={"org_id": "acme", "tool_name": "seo_specialist"},
+        headers=_auth_headers(admin_token),
+    )
+    assert grant_response.status_code == 200
+
+    list_response = test_client.get(
+        f"/api/v1/admin/users/{member_id}/skills",
+        params={"org_id": "acme"},
+        headers=_auth_headers(admin_token),
+    )
+    assert list_response.status_code == 200
+    assert "seo_specialist" in list_response.json()["skills"]
+
+    revoke_response = test_client.post(
+        f"/api/v1/admin/users/{member_id}/skills/revoke",
+        json={"org_id": "acme", "tool_name": "seo_specialist"},
+        headers=_auth_headers(admin_token),
+    )
+    assert revoke_response.status_code == 200
+    assert revoke_response.json()["removed"] is True
+
+
+def test_admin_can_manage_byob_bot_and_credits(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["access_token"]
+
+    create_org = test_client.post(
+        "/api/v1/admin/organizations",
+        json={"org_id": "acme", "name": "Acme Corp"},
+        headers=_auth_headers(admin_token),
+    )
+    assert create_org.status_code == 200
+
+    register_bot = test_client.post(
+        "/api/v1/orgs/acme/bots",
+        json={
+            "provider": "telegram",
+            "bot_name": "Acme Sales Bot",
+            "bot_token": "123456:abcdef-token-value",
+            "external_bot_id": "987654321",
+        },
+        headers=_auth_headers(admin_token),
+    )
+    assert register_bot.status_code == 200
+    bot_id = int(register_bot.json()["id"])
+
+    deactivate_bot = test_client.patch(
+        f"/api/v1/orgs/acme/bots/{bot_id}",
+        json={"is_active": False},
+        headers=_auth_headers(admin_token),
+    )
+    assert deactivate_bot.status_code == 200
+    assert deactivate_bot.json()["is_active"] is False
+
+    topup = test_client.post(
+        "/api/v1/orgs/acme/credits/topup",
+        json={"amount": 1000, "reason": "Initial package", "reference_type": "invoice", "reference_id": "INV-1"},
+        headers=_auth_headers(admin_token),
+    )
+    assert topup.status_code == 200
+    assert topup.json()["balance"] == 1000
+
+    debit = test_client.post(
+        "/api/v1/orgs/acme/credits/debit",
+        json={"amount": 250, "reason": "LLM usage", "reference_type": "usage", "reference_id": "req-1"},
+        headers=_auth_headers(admin_token),
+    )
+    assert debit.status_code == 200
+    assert debit.json()["balance"] == 750
+
+    ledger = test_client.get(
+        "/api/v1/orgs/acme/credits/ledger",
+        headers=_auth_headers(admin_token),
+    )
+    assert ledger.status_code == 200
+    assert len(ledger.json()["items"]) == 2
+
+
+def test_credit_policy_blocks_debit_when_limit_exceeded(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    admin_token = admin_login.json()["access_token"]
+
+    test_client.post(
+        "/api/v1/admin/organizations",
+        json={"org_id": "acme", "name": "Acme Corp"},
+        headers=_auth_headers(admin_token),
+    )
+
+    set_policy = test_client.put(
+        "/api/v1/orgs/acme/credits/policy",
+        json={"daily_limit": 100, "monthly_limit": 1000, "low_balance_threshold": 10},
+        headers=_auth_headers(admin_token),
+    )
+    assert set_policy.status_code == 200
+    assert set_policy.json()["daily_limit"] == 100
+
+    topup = test_client.post(
+        "/api/v1/orgs/acme/credits/topup",
+        json={"amount": 500, "reason": "Fund", "reference_type": "invoice", "reference_id": "INV-2"},
+        headers=_auth_headers(admin_token),
+    )
+    assert topup.status_code == 200
+
+    debit_too_much = test_client.post(
+        "/api/v1/orgs/acme/credits/debit",
+        json={"amount": 150, "reason": "Usage", "reference_type": "usage", "reference_id": "REQ-2"},
+        headers=_auth_headers(admin_token),
+    )
+    assert debit_too_much.status_code == 409
+
+
+def test_byob_telegram_webhook_endpoint(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    response = test_client.post(
+        "/api/v1/byob/telegram/acme/1/webhook",
+        json={"update_id": 1, "message": {"chat": {"id": 1}, "from": {"id": 2}, "text": "hello"}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
+    )
+    assert response.status_code == 200
+    assert response.json().get("method") == "sendMessage"
 
 
 def test_chat_send_is_available_for_new_user_scope(client: tuple[TestClient, _FakeApiService]) -> None:
