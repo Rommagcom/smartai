@@ -428,7 +428,7 @@ class OllamaLangGraphAgent:
             return None
 
         payload_type = str(parsed.get("type") or "").strip().lower()
-        if payload_type not in {"file", "image"}:
+        if payload_type not in {"file", "image", "video"}:
             return None
 
         has_base64 = isinstance(parsed.get("base64"), str) and bool(parsed.get("base64"))

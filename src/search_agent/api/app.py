@@ -211,7 +211,7 @@ def _extract_file_payload_from_tool_messages(messages: list[dict[str, Any]] | No
             continue
 
         payload_type = str(payload.get("type") or "").strip().lower()
-        if payload_type not in {"image", "file"}:
+        if payload_type not in {"image", "file", "video"}:
             continue
 
         base64_data = payload.get("base64")

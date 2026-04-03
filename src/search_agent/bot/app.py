@@ -87,7 +87,7 @@ def _normalize_file_payload(payload: dict[str, Any] | None) -> dict[str, Any] | 
         return None
 
     payload_type = str(payload.get("type") or "").strip().lower()
-    if payload_type not in {"file", "image"}:
+    if payload_type not in {"file", "image", "video"}:
         return None
 
     base64_data = payload.get("base64")
@@ -102,9 +102,19 @@ def _normalize_file_payload(payload: dict[str, Any] | None) -> dict[str, Any] | 
         return None
 
     if not isinstance(filename, str) or not filename:
-        filename = "image.png" if payload_type == "image" else "document.pdf"
+        if payload_type == "image":
+            filename = "image.png"
+        elif payload_type == "video":
+            filename = "video.mp4"
+        else:
+            filename = "document.bin"
     if not isinstance(mime_type, str) or not mime_type:
-        mime_type = "image/png" if payload_type == "image" else "application/octet-stream"
+        if payload_type == "image":
+            mime_type = "image/png"
+        elif payload_type == "video":
+            mime_type = "video/mp4"
+        else:
+            mime_type = "application/octet-stream"
 
     return {
         "type": payload_type,
@@ -177,6 +187,8 @@ async def _send_answer_to_chat(
     payload_type = str(file_payload.get("type") or "file").lower()
     if payload_type == "image":
         await bot.send_photo(chat_id=chat_id, photo=input_file, caption=caption)
+    elif payload_type == "video":
+        await bot.send_video(chat_id=chat_id, video=input_file, caption=caption)
     else:
         await bot.send_document(chat_id=chat_id, document=input_file, caption=caption)
     return
