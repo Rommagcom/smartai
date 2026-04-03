@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import os, json, re, gc, sys
+import json
+import re
+import gc
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,8 +11,6 @@ import torch
 from torch.cuda.amp import autocast
 from diffusers import WanPipeline
 from diffusers.utils import export_to_video
-from tqdm.auto import tqdm
-
 # ---------------------------- CONFIG ----------------------------
 _DEFAULT_IMAGE = "smartai_success.png"
 _DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
@@ -108,27 +108,18 @@ def generate_frames_in_chunks(
 ):
     """Generate `total_frames` frames by repeatedly calling the pipeline."""
     frames = []
-    latent = None  # keep continuity between chunks
 
     for start in range(0, total_frames, chunk_size):
         cur_len = min(chunk_size, total_frames - start)
-        generation_kwargs.update(
+        run_kwargs = dict(generation_kwargs)
+        run_kwargs.update(
             {
                 "prompt": prompt,
                 "num_frames": cur_len,
-                "latent": latent,          # continue from previous latent
             }
         )
-        result = _run_pipeline(pipe, generation_kwargs)
+        result = _run_pipeline(pipe, run_kwargs)
         frames.extend(result.frames[0])   # list of tensors (num_frames, H, W, 3)
-
-        # Preserve the *last* latent for the next iteration (if the pipeline returns it)
-        if hasattr(result, "latents"):
-            latent = result.latents[-1]
-        else:
-            # Fallback: many pipelines do not expose `latents`. In that case we
-            # simply start fresh for the next chunk (still works, just a tiny seam).
-            latent = None
 
     return frames
 
