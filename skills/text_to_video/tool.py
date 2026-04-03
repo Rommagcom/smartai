@@ -152,6 +152,8 @@ def text_to_video(
     if not prompt:
         raise ValueError("prompt is required")
 
+    model_id = str(model_id or _DEFAULT_MODEL_ID).strip() or _DEFAULT_MODEL_ID
+
     width = _validated_dimension(width, "width")
     height = _validated_dimension(height, "height")
     if num_frames <= 0 or num_inference_steps <= 0 or fps <= 0:

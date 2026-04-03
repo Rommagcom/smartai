@@ -14,10 +14,6 @@
       "filename": {
         "type": "string",
         "description": "Optional output filename (mp4 extension added automatically)"
-      },
-      "model_id": {
-        "type": "string",
-        "description": "Optional Hugging Face Diffusers model id override"
       }
     },
     "required": [
@@ -26,8 +22,8 @@
   },
   "package_files_sha256": {
     "skill.md": "41de3e527122a539f8858bee732d0e7dbff29e8d7df772ece52966f5f4ed1c6c",
-    "tool.py": "d8c1659a3cbd8d346ac8af97a4ea9848ce9180a8e5c8cebc7abcc87858bde8d5"
+    "tool.py": "0d8669df8c55fb53b05c0091dab19d57336eaec1b267429f8ba78dd4c1eb3774"
   },
   "package_signature_algorithm": "hmac-sha256",
-  "package_signature": "853634a80f7a6cce7bbb01191c1afb993b8b067c695ee65a64dea85ebdd57d88"
+  "package_signature": "8432a9db0050c4651da9522cc852c47c8608886e4106e8471a45009cb3f246e7"
 }
