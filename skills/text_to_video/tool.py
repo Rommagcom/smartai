@@ -64,7 +64,11 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
 
     # ------- MEMORY‑SAVE SETTINGS -------
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        pipe.vae.enable_tiling(tile_size=256)
+        try:
+            pipe.vae.enable_tiling(tile_size=256)
+        except TypeError:
+            # Backward-compatible path for diffusers builds without tile_size arg.
+            pipe.vae.enable_tiling()
 
     if hasattr(pipe, "enable_attention_slicing"):
         pipe.enable_attention_slicing(slice_size=2)
