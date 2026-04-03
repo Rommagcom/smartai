@@ -54,13 +54,43 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
     if cache_key in _PIPELINE_CACHE:
         return _PIPELINE_CACHE[cache_key]
 
-    pipe = WanPipeline.from_pretrained(
-        model_id,
-        torch_dtype=torch_dtype,
-        device_map="balanced",          # ← split layers across GPUs
-        low_cpu_mem_usage=True,
-        enable_model_parallelism=True,
-    )
+    # Some diffusers versions don't support all kwargs; try the richest config first,
+    # then gracefully degrade to compatible variants.
+    candidates = [
+        {
+            "torch_dtype": torch_dtype,
+            "device_map": "balanced",
+            "low_cpu_mem_usage": True,
+            "enable_model_parallelism": True,
+        },
+        {
+            "torch_dtype": torch_dtype,
+            "device_map": "balanced",
+            "low_cpu_mem_usage": True,
+        },
+        {
+            "torch_dtype": torch_dtype,
+            "low_cpu_mem_usage": True,
+        },
+        {
+            "torch_dtype": torch_dtype,
+        },
+    ]
+
+    last_exc: Exception | None = None
+    pipe: WanPipeline | None = None
+    for kwargs in candidates:
+        try:
+            pipe = WanPipeline.from_pretrained(model_id, **kwargs)
+            break
+        except TypeError as exc:
+            last_exc = exc
+            continue
+
+    if pipe is None:
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Failed to initialize WanPipeline")
 
     # ------- MEMORY‑SAVE SETTINGS -------
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
@@ -71,7 +101,10 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
             pipe.vae.enable_tiling()
 
     if hasattr(pipe, "enable_attention_slicing"):
-        pipe.enable_attention_slicing(slice_size=2)
+        try:
+            pipe.enable_attention_slicing(slice_size=2)
+        except TypeError:
+            pipe.enable_attention_slicing()
 
     try:
         pipe.enable_xformers_memory_efficient_attention()
@@ -95,7 +128,10 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
 def _run_pipeline(pipe, generation_kwargs):
     """Run a single diffusion call inside autocast + inference_mode."""
     with torch.inference_mode():
-        with autocast("cuda", dtype=torch.float16):
+        if torch.cuda.is_available():
+            with autocast("cuda", dtype=torch.float16):
+                result = pipe(**generation_kwargs)
+        else:
             result = pipe(**generation_kwargs)
     return result
 
