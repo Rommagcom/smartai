@@ -1,35 +1,34 @@
-import os, json, re, gc
+from __future__ import annotations
+
+import os, json, re, gc, sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import torch
+from torch.cuda.amp import autocast
 from diffusers import WanPipeline
 from diffusers.utils import export_to_video
-from tqdm.auto import tqdm   # прогресс‑бар
+from tqdm.auto import tqdm
 
-# --------------------------------------------------------------
-# 1️⃣  Параметры по‑умолчанию (можно переопределять через env‑vars)
-# --------------------------------------------------------------
+# ---------------------------- CONFIG ----------------------------
 _DEFAULT_IMAGE = "smartai_success.png"
 _DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
 _DEFAULT_WIDTH = 1280
 _DEFAULT_HEIGHT = 720
-_DEFAULT_NUM_FRAMES = 101
-_DEFAULT_NUM_INFERENCE_STEPS = 50
+_DEFAULT_NUM_FRAMES = 75
+_DEFAULT_NUM_INFERENCE_STEPS = 30   # <- lowered
 _DEFAULT_GUIDANCE_SCALE = 6.0
 _DEFAULT_FPS = 25
-_DEFAULT_DTYPE = "bfloat16"
+_DEFAULT_DTYPE = "float16"          # <- FP16 (lighter than bfloat16)
 _DEFAULT_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, static, text, watermark, shaky motion"
 )
 
-# --------------------------------------------------------------
-# 2️⃣  Утилиты
-# --------------------------------------------------------------
 _DTYPE_MAP = {"float16": "float16", "bfloat16": "bfloat16", "float32": "float32"}
 _PIPELINE_CACHE: dict[tuple[str, str, int], WanPipeline] = {}
 
+# ---------------------------- HELPERS ----------------------------
 def _safe_filename(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name.strip())
     return cleaned or "video.mp4"
@@ -47,8 +46,10 @@ def _validated_dimension(value: int, field_name: str) -> int:
         raise ValueError(f"{field_name} must be a multiple of 16")
     return int(value)
 
+# ---------------------------- PIPELINE LOADER ----------------------------
 def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
     torch_dtype = _resolve_dtype(torch, dtype)
+
     cache_key = (model_id, str(torch_dtype), torch.cuda.device_count())
     if cache_key in _PIPELINE_CACHE:
         return _PIPELINE_CACHE[cache_key]
@@ -56,28 +57,78 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
     pipe = WanPipeline.from_pretrained(
         model_id,
         torch_dtype=torch_dtype,
-        device_map="balanced",          # <-- автоматическое распределение
+        device_map="balanced",          # ← split layers across GPUs
         low_cpu_mem_usage=True,
-        enable_model_parallelism=True,  # <-- активирует модель‑параллелизм
+        enable_model_parallelism=True,
     )
 
-    # VAE‑tiling экономит VRAM
+    # ------- MEMORY‑SAVE SETTINGS -------
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        pipe.vae.enable_tiling()
+        pipe.vae.enable_tiling(tile_size=256)
 
-    # Попытка ускорить JIT‑компиляцию (не критично, но полезно)
+    if hasattr(pipe, "enable_attention_slicing"):
+        pipe.enable_attention_slicing(slice_size=2)
+
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+    except Exception:
+        pass  # xformers optional
+
+    if hasattr(pipe.unet, "enable_gradient_checkpointing"):
+        pipe.unet.enable_gradient_checkpointing()
+
+    # Optional JIT compile (speed, not memory)
     try:
         pipe.unet = torch.compile(pipe.unet, mode="max-autotune")
         pipe.vae  = torch.compile(pipe.vae,  mode="max-autotune")
     except Exception as exc:
-        print("⚠️ torch.compile не удалось:", exc)
+        print("⚠️ torch.compile not available:", exc)
 
     _PIPELINE_CACHE[cache_key] = pipe
     return pipe
 
-# --------------------------------------------------------------
-# 3️⃣  Основная функция генерации
-# --------------------------------------------------------------
+# ---------------------------- CHUNKED GENERATION ----------------------------
+def _run_pipeline(pipe, generation_kwargs):
+    """Run a single diffusion call inside autocast + inference_mode."""
+    with torch.inference_mode():
+        with autocast("cuda", dtype=torch.float16):
+            result = pipe(**generation_kwargs)
+    return result
+
+def generate_frames_in_chunks(
+    pipe,
+    prompt: str,
+    total_frames: int,
+    chunk_size: int = 25,
+    **generation_kwargs,
+):
+    """Generate `total_frames` frames by repeatedly calling the pipeline."""
+    frames = []
+    latent = None  # keep continuity between chunks
+
+    for start in range(0, total_frames, chunk_size):
+        cur_len = min(chunk_size, total_frames - start)
+        generation_kwargs.update(
+            {
+                "prompt": prompt,
+                "num_frames": cur_len,
+                "latent": latent,          # continue from previous latent
+            }
+        )
+        result = _run_pipeline(pipe, generation_kwargs)
+        frames.extend(result.frames[0])   # list of tensors (num_frames, H, W, 3)
+
+        # Preserve the *last* latent for the next iteration (if the pipeline returns it)
+        if hasattr(result, "latents"):
+            latent = result.latents[-1]
+        else:
+            # Fallback: many pipelines do not expose `latents`. In that case we
+            # simply start fresh for the next chunk (still works, just a tiny seam).
+            latent = None
+
+    return frames
+
+# ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
     prompt: str,
     filename: str | None = None,
@@ -92,7 +143,7 @@ def text_to_video(
     negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
     model_id: str = _DEFAULT_MODEL_ID,
 ) -> str:
-    # ----------------------- 1️⃣ Проверка входов -----------------------
+    # ----------------- VALIDATE INPUTS -----------------
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("prompt is required")
@@ -102,31 +153,30 @@ def text_to_video(
     if num_frames <= 0 or num_inference_steps <= 0 or fps <= 0:
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
-    # ----------------------- 2️⃣ Загрузка пайплайна --------------------
+    # ----------------- LOAD PIPELINE -----------------
     pipeline = _load_pipeline(model_id=model_id, dtype=dtype)
 
-    # ----------------------- 3️⃣ Генерация ---------------------------
+    # ----------------- GENERATE -----------------
     generation_kwargs = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
-        "num_frames": num_frames,
         "num_inference_steps": num_inference_steps,
         "guidance_scale": guidance_scale,
         "height": height,
         "width": width,
+        # `latent` will be added inside the chunked helper
     }
 
-    # Прогресс‑бар для инференса
-    with torch.inference_mode():
-        # Если вы хотите видеть прогресс в самом diffusers, используйте:
-        #   pipeline.set_progress_bar_config(disable=False)
-        # но ниже мы просто оборачиваем весь вызов в tqdm.
-        for _ in tqdm(range(1), desc="Generating video", unit="step"):
-            result = pipeline(**generation_kwargs)
+    # Use chunked generation to keep per‑GPU RAM low
+    frames = generate_frames_in_chunks(
+        pipeline,
+        prompt,
+        total_frames=num_frames,
+        chunk_size=25,          # 25‑frame windows (≈ 1 s at 25 fps)
+        **generation_kwargs,
+    )
 
-    frames = result.frames[0]   # shape: (num_frames, H, W, 3)
-
-    # ----------------------- 4️⃣ Сохранение --------------------------
+    # ----------------- SAVE VIDEO -----------------
     out_dir = Path("generated_videos")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,12 +191,12 @@ def text_to_video(
     out_path = out_dir / final_name
     export_to_video(frames, str(out_path), fps=int(fps))
 
-    # ----------------------- 5️⃣ Очистка VRAM -----------------------
-    del pipeline, result, frames
+    # ----------------- CLEAN‑UP -----------------
+    del pipeline, frames
     torch.cuda.empty_cache()
     gc.collect()
 
-    # ----------------------- 6️⃣ Возврат метаданных -----------------
+    # ----------------- RETURN METADATA -----------------
     payload = {
         "type": "video",
         "mode": "text_to_video",
