@@ -99,6 +99,40 @@ def _select_cuda_device(torch_module: Any) -> str:
 
     return f"cuda:{preferred_index}"
 
+
+def _device_candidates(torch_module: Any, preferred_device: str) -> list[str]:
+    if not torch_module.cuda.is_available():
+        return ["cpu"]
+
+    count = int(torch_module.cuda.device_count())
+    if count <= 0:
+        return ["cpu"]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(device: str) -> None:
+        if device not in seen:
+            candidates.append(device)
+            seen.add(device)
+
+    _add(preferred_device)
+
+    # Try other GPUs from most free memory to least.
+    free_list: list[tuple[int, int]] = []
+    try:
+        for idx in range(count):
+            free_bytes, _ = torch_module.cuda.mem_get_info(idx)
+            free_list.append((idx, int(free_bytes)))
+        free_list.sort(key=lambda item: item[1], reverse=True)
+    except Exception:
+        free_list = [(idx, 0) for idx in range(count)]
+
+    for idx, _ in free_list:
+        _add(f"cuda:{idx}")
+
+    return candidates
+
 def _validated_dimension(value: int, field_name: str) -> int:
     if value <= 0:
         raise ValueError(f"{field_name} must be > 0")
@@ -106,11 +140,31 @@ def _validated_dimension(value: int, field_name: str) -> int:
         raise ValueError(f"{field_name} must be a multiple of 16")
     return int(value)
 
+
+def _is_retriable_generation_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "out of memory" in text
+        or "expected all tensors to be on the same device" in text
+        or "different from other tensors on cpu" in text
+    )
+
+
+def _clear_pipeline_cache(torch_module: Any) -> None:
+    _PIPELINE_CACHE.clear()
+    if torch_module.cuda.is_available():
+        try:
+            torch_module.cuda.empty_cache()
+        except Exception:
+            pass
+    gc.collect()
+
 # ---------------------------- PIPELINE LOADER ----------------------------
 def _load_pipeline(*, model_id: str) -> WanPipeline:
     torch_module = _get_torch_module()
     preferred_dtype = _resolve_torch_dtype()
     target_device = _select_cuda_device(torch_module)
+    candidate_devices = _device_candidates(torch_module, target_device)
 
     hf_token = str(
         os.getenv("HUGGINGFACE_HUB_TOKEN")
@@ -125,39 +179,55 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
     last_exc: Exception | None = None
     pipe: WanPipeline | None = None
     selected_model_id = model_id
+    selected_device = target_device
 
     for current_model_id in model_ids:
-        cache_key = (current_model_id, str(preferred_dtype), target_device)
-        if cache_key in _PIPELINE_CACHE:
-            return _PIPELINE_CACHE[cache_key]
+        for current_device in candidate_devices:
+            cache_key = (current_model_id, str(preferred_dtype), current_device)
+            if cache_key in _PIPELINE_CACHE:
+                return _PIPELINE_CACHE[cache_key]
 
-        try:
-            vae = None
-            if AutoencoderKLWan is not None:
-                vae_kwargs: dict[str, Any] = {
-                    "subfolder": "vae",
-                    "torch_dtype": torch_module.float32,
+            try:
+                vae = None
+                if AutoencoderKLWan is not None:
+                    vae_kwargs: dict[str, Any] = {
+                        "subfolder": "vae",
+                        "torch_dtype": torch_module.float32,
+                    }
+                    if hf_token:
+                        vae_kwargs["token"] = hf_token
+                    vae = AutoencoderKLWan.from_pretrained(current_model_id, **vae_kwargs)
+
+                pipe_kwargs: dict[str, Any] = {
+                    "torch_dtype": preferred_dtype,
                 }
+                if vae is not None:
+                    pipe_kwargs["vae"] = vae
                 if hf_token:
-                    vae_kwargs["token"] = hf_token
-                vae = AutoencoderKLWan.from_pretrained(current_model_id, **vae_kwargs)
+                    pipe_kwargs["token"] = hf_token
 
-            pipe_kwargs: dict[str, Any] = {
-                "torch_dtype": preferred_dtype,
-            }
-            if vae is not None:
-                pipe_kwargs["vae"] = vae
-            if hf_token:
-                pipe_kwargs["token"] = hf_token
+                pipe = WanPipeline.from_pretrained(current_model_id, **pipe_kwargs)
 
-            pipe = WanPipeline.from_pretrained(current_model_id, **pipe_kwargs)
-            selected_model_id = current_model_id
-            break
-        except Exception as exc:
-            last_exc = exc
-            continue
-        if pipe is not None:
-            break
+                if current_device.startswith("cuda:"):
+                    try:
+                        torch_module.cuda.set_device(int(current_device.split(":", 1)[1]))
+                    except Exception:
+                        pass
+                    pipe = pipe.to(current_device)
+                    setattr(pipe, "_sai_device", current_device)
+
+                _stabilize_scheduler(pipe)
+
+                selected_model_id = current_model_id
+                selected_device = current_device
+                final_cache_key = (selected_model_id, str(preferred_dtype), selected_device)
+                _PIPELINE_CACHE[final_cache_key] = pipe
+                return pipe
+            except Exception as exc:
+                last_exc = exc
+                # Free partial allocations before trying next device/model.
+                _clear_pipeline_cache(torch_module)
+                continue
 
     if pipe is None:
         msg = "Failed to initialize WanVideoPipeline"
@@ -167,33 +237,7 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
             raise RuntimeError(f"{msg}. Last error: {last_exc}") from last_exc
         raise RuntimeError(msg)
 
-    # ------- MEMORY‑SAVE SETTINGS -------
-    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        try:
-            pipe.vae.enable_tiling(tile_size=256)
-        except TypeError:
-            # Backward-compatible path for diffusers builds without tile_size arg.
-            pipe.vae.enable_tiling()
-
-    try:
-        pipe.enable_xformers_memory_efficient_attention()
-    except Exception:
-        pass  # xformers optional
-
-    # Run entire pipeline on selected single device to avoid cross-device scheduler issues.
-    if target_device.startswith("cuda:"):
-        try:
-            torch_module.cuda.set_device(int(target_device.split(":", 1)[1]))
-        except Exception:
-            pass
-        pipe = pipe.to(target_device)
-        setattr(pipe, "_sai_device", target_device)
-
-    _stabilize_scheduler(pipe)
-
-    final_cache_key = (selected_model_id, str(preferred_dtype), target_device)
-    _PIPELINE_CACHE[final_cache_key] = pipe
-    return pipe
+    raise RuntimeError("Failed to initialize WanVideoPipeline after all device/model attempts")
 
 
 def _stabilize_scheduler(pipe: WanPipeline) -> None:
@@ -280,6 +324,29 @@ def text_to_video(
     if num_frames <= 0 or num_inference_steps <= 0 or fps <= 0:
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
+    fallback_model = _MODEL_ID_FALLBACKS[0]
+    attempts: list[dict[str, Any]] = [
+        {
+            "model_id": model_id,
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+        }
+    ]
+    if model_id != fallback_model:
+        attempts.append(
+            {
+                "model_id": fallback_model,
+                "width": min(width, 640),
+                "height": min(height, 352),
+                "num_frames": min(num_frames, 49),
+                "num_inference_steps": min(num_inference_steps, 28),
+                "guidance_scale": min(guidance_scale, 4.5),
+            }
+        )
+
     def _generate_with_pipeline(active_pipeline: WanPipeline):
         if torch_module.cuda.is_available():
             active_device = str(getattr(active_pipeline, "_sai_device", "cuda:0"))
@@ -300,11 +367,58 @@ def text_to_video(
                 guidance_scale=guidance_scale,
             ).frames[0]
 
-    # ----------------- LOAD PIPELINE -----------------
-    pipeline = _load_pipeline(model_id=model_id)
+    # ----------------- LOAD PIPELINE + GENERATE -----------------
+    pipeline: WanPipeline | None = None
+    frames: Any | None = None
+    used_model_id = model_id
+    used_width = width
+    used_height = height
+    used_num_frames = num_frames
+    used_num_inference_steps = num_inference_steps
+    used_guidance_scale = guidance_scale
+    last_exc: Exception | None = None
 
-    # ----------------- GENERATE -----------------
-    frames = _generate_with_pipeline(pipeline)
+    for attempt in attempts:
+        attempt_model_id = str(attempt["model_id"])
+        attempt_width = int(attempt["width"])
+        attempt_height = int(attempt["height"])
+        attempt_num_frames = int(attempt["num_frames"])
+        attempt_steps = int(attempt["num_inference_steps"])
+        attempt_guidance = float(attempt["guidance_scale"])
+
+        try:
+            pipeline = _load_pipeline(model_id=attempt_model_id)
+            with torch_module.inference_mode():
+                frames = pipeline(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=attempt_width,
+                    height=attempt_height,
+                    num_frames=attempt_num_frames,
+                    num_inference_steps=attempt_steps,
+                    guidance_scale=attempt_guidance,
+                ).frames[0]
+
+            used_model_id = attempt_model_id
+            used_width = attempt_width
+            used_height = attempt_height
+            used_num_frames = attempt_num_frames
+            used_num_inference_steps = attempt_steps
+            used_guidance_scale = attempt_guidance
+            break
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retriable_generation_error(exc):
+                raise
+            _clear_pipeline_cache(torch_module)
+            pipeline = None
+            frames = None
+            continue
+
+    if frames is None:
+        if last_exc is not None:
+            raise RuntimeError(f"Text-to-video failed after fallback attempts: {last_exc}") from last_exc
+        raise RuntimeError("Text-to-video failed after fallback attempts")
 
     # ----------------- SAVE VIDEO -----------------
     out_dir = Path("generated_videos")
@@ -337,12 +451,12 @@ def text_to_video(
         "path": str(out_path),
         "size_bytes": len(video_bytes),
         "base64": base64.b64encode(video_bytes).decode("ascii"),
-        "model_id": model_id,
-        "width": width,
-        "height": height,
-        "num_frames": num_frames,
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
+        "model_id": used_model_id,
+        "width": used_width,
+        "height": used_height,
+        "num_frames": used_num_frames,
+        "num_inference_steps": used_num_inference_steps,
+        "guidance_scale": used_guidance_scale,
         "fps": fps,
         "dtype": str(_resolve_torch_dtype()),
         "prompt": prompt,
