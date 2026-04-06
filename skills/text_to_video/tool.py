@@ -4,11 +4,10 @@ import json
 import re
 import gc
 import os
+import importlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import torch
 
 try:
     from diffusers import WanVideoPipeline
@@ -41,10 +40,21 @@ def _safe_filename(name: str) -> str:
 
 def _resolve_torch_dtype() -> Any:
     """Prefer FP8 on supported GPUs, fallback to FP16 for compatibility."""
-    fp8 = getattr(torch, "float8_e4m3fn", None)
-    if fp8 is not None and torch.cuda.is_available():
+    torch_module = _get_torch_module()
+    fp8 = getattr(torch_module, "float8_e4m3fn", None)
+    if fp8 is not None and torch_module.cuda.is_available():
         return fp8
-    return torch.float16
+    return torch_module.float16
+
+
+def _get_torch_module() -> Any:
+    try:
+        return importlib.import_module("torch")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Torch is not installed in runtime environment. "
+            "Install torch/torchvision/torchaudio in the bot container and rebuild image."
+        ) from exc
 
 def _validated_dimension(value: int, field_name: str) -> int:
     if value <= 0:
@@ -55,10 +65,11 @@ def _validated_dimension(value: int, field_name: str) -> int:
 
 # ---------------------------- PIPELINE LOADER ----------------------------
 def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
+    torch_module = _get_torch_module()
     preferred_dtype = _resolve_torch_dtype()
     dtype_candidates = [preferred_dtype]
-    if preferred_dtype is not torch.float16:
-        dtype_candidates.append(torch.float16)
+    if preferred_dtype is not torch_module.float16:
+        dtype_candidates.append(torch_module.float16)
 
     hf_token = str(
         os.getenv("HUGGINGFACE_HUB_TOKEN")
@@ -72,7 +83,7 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     pipe: WanVideoPipeline | None = None
     selected_dtype: Any | None = None
     for torch_dtype in dtype_candidates:
-        cache_key = (model_id, str(torch_dtype), torch.cuda.device_count())
+        cache_key = (model_id, str(torch_dtype), torch_module.cuda.device_count())
         if cache_key in _PIPELINE_CACHE:
             return _PIPELINE_CACHE[cache_key]
 
@@ -140,7 +151,7 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     except Exception:
         pass  # xformers optional
 
-    final_cache_key = (model_id, str(selected_dtype), torch.cuda.device_count())
+    final_cache_key = (model_id, str(selected_dtype), torch_module.cuda.device_count())
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
 
@@ -159,6 +170,8 @@ def text_to_video(
     negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
     model_id: str = _DEFAULT_MODEL_ID,
 ) -> str:
+    torch_module = _get_torch_module()
+
     # ----------------- VALIDATE INPUTS -----------------
     prompt = (prompt or "").strip()
     if not prompt:
@@ -175,7 +188,7 @@ def text_to_video(
     pipeline = _load_pipeline(model_id=model_id)
 
     # ----------------- GENERATE -----------------
-    with torch.inference_mode():
+    with torch_module.inference_mode():
         frames = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -203,7 +216,8 @@ def text_to_video(
 
     # ----------------- CLEAN‑UP -----------------
     del pipeline, frames
-    torch.cuda.empty_cache()
+    if torch_module.cuda.is_available():
+        torch_module.cuda.empty_cache()
     gc.collect()
 
     # ----------------- RETURN METADATA -----------------
