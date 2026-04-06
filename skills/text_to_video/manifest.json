@@ -22,8 +22,8 @@
   },
   "package_files_sha256": {
     "skill.md": "41de3e527122a539f8858bee732d0e7dbff29e8d7df772ece52966f5f4ed1c6c",
-    "tool.py": "951c284c005fff254ddf346e387980926f4044c133aa9d1a25fc43baaaea8a4c"
+    "tool.py": "533cb36038ff4f8158baf6cf2035068f589168afca5df78ee182ab0c4c9debf0"
   },
   "package_signature_algorithm": "hmac-sha256",
-  "package_signature": "37783cd248b7bc86345acb99d9506355fc252087f2e9f43b6d3135b84d52c738"
+  "package_signature": "7731b7090f064357306d4e8d43ddd0fcbde19d3dc806801b24b6bf1bb11d88fc"
 }

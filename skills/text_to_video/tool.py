@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import gc
@@ -145,9 +146,67 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
         torch_module.cuda.set_device(0)
         pipe = pipe.to("cuda:0")
 
+    _stabilize_scheduler(pipe)
+
     final_cache_key = (selected_model_id, str(preferred_dtype))
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
+
+
+def _stabilize_scheduler(pipe: WanPipeline) -> None:
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None:
+        return
+
+    cls_name = type(scheduler).__name__.lower()
+    if "unipc" not in cls_name:
+        return
+
+    # Avoid multistep internal cat path that often mixes CPU/CUDA tensors.
+    try:
+        pipe.scheduler = type(scheduler).from_config(
+            scheduler.config,
+            solver_order=1,
+            lower_order_final=True,
+        )
+    except TypeError:
+        try:
+            pipe.scheduler = type(scheduler).from_config(scheduler.config, solver_order=1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _sync_scheduler_to_device(pipe: WanPipeline, *, torch_module: Any, device: str, num_inference_steps: int) -> None:
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None:
+        return
+
+    if hasattr(scheduler, "set_timesteps"):
+        try:
+            scheduler.set_timesteps(num_inference_steps, device=torch_module.device(device))
+        except TypeError:
+            try:
+                scheduler.set_timesteps(num_inference_steps)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    if hasattr(scheduler, "model_outputs"):
+        try:
+            scheduler.model_outputs = []
+        except Exception:
+            pass
+
+    for attr in ("timesteps", "sigmas"):
+        value = getattr(scheduler, attr, None)
+        if hasattr(value, "to"):
+            try:
+                setattr(scheduler, attr, value.to(device))
+            except Exception:
+                pass
 
 # ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
@@ -179,6 +238,13 @@ def text_to_video(
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
     def _generate_with_pipeline(active_pipeline: WanPipeline):
+        if torch_module.cuda.is_available():
+            _sync_scheduler_to_device(
+                active_pipeline,
+                torch_module=torch_module,
+                device="cuda:0",
+                num_inference_steps=int(num_inference_steps),
+            )
         with torch_module.inference_mode():
             return active_pipeline(
                 prompt=prompt,
@@ -210,6 +276,7 @@ def text_to_video(
 
     out_path = out_dir / final_name
     export_to_video(frames, str(out_path), fps=int(fps))
+    video_bytes = out_path.read_bytes()
 
     # ----------------- CLEAN‑UP -----------------
     del pipeline, frames
@@ -224,7 +291,8 @@ def text_to_video(
         "mime_type": "video/mp4",
         "filename": final_name,
         "path": str(out_path),
-        "size_bytes": out_path.stat().st_size,
+        "size_bytes": len(video_bytes),
+        "base64": base64.b64encode(video_bytes).decode("ascii"),
         "model_id": model_id,
         "width": width,
         "height": height,
