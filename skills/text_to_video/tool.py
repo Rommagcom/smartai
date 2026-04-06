@@ -20,19 +20,19 @@ from diffusers.utils import export_to_video
 
 
 # ---------------------------- CONFIG ----------------------------
-_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+_DEFAULT_MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 _MODEL_ID_FALLBACKS = [
     "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
 ]
-_DEFAULT_WIDTH = 832
-_DEFAULT_HEIGHT = 480
-_DEFAULT_NUM_FRAMES = 81
+_DEFAULT_WIDTH = 1280
+_DEFAULT_HEIGHT = 704
+_DEFAULT_NUM_FRAMES = 121
 _DEFAULT_NUM_INFERENCE_STEPS = 40
 _DEFAULT_GUIDANCE_SCALE = 5.0
-_DEFAULT_FPS = 25
+_DEFAULT_FPS = 24
 _DEFAULT_NEGATIVE_PROMPT = (
-    "blurry, low quality, distorted, static, text, watermark, shaky motion"
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 )
 
 _PIPELINE_CACHE: dict[tuple[str, str, str], WanPipeline] = {}
