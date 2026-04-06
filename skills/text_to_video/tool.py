@@ -42,10 +42,11 @@ def _safe_filename(name: str) -> str:
 
 
 def _resolve_torch_dtype() -> Any:
-    """Prefer FP8 on supported GPUs, fallback to FP16 for compatibility."""
+    """Use FP16 by default; FP8 is opt-in because it is less stable across builds."""
     torch_module = _get_torch_module()
+    fp8_enabled = str(os.getenv("WAN_ENABLE_FP8") or "false").strip().lower() in {"1", "true", "yes", "on"}
     fp8 = getattr(torch_module, "float8_e4m3fn", None)
-    if fp8 is not None and torch_module.cuda.is_available():
+    if fp8_enabled and fp8 is not None and torch_module.cuda.is_available():
         return fp8
     return torch_module.float16
 
@@ -114,9 +115,12 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
                 }
                 if device_map_value is not None:
                     base["device_map"] = device_map_value
-                with_mem = dict(base)
-                with_mem["low_cpu_mem_usage"] = True
-                candidates.append(with_mem)
+                # In strict single-device mode avoid low_cpu_mem_usage, because it can
+                # leave parts of scheduler state on CPU in some diffusers builds.
+                if not force_single_device:
+                    with_mem = dict(base)
+                    with_mem["low_cpu_mem_usage"] = True
+                    candidates.append(with_mem)
                 candidates.append(base)
 
             for kwargs in candidates:
@@ -161,7 +165,9 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
         pass  # xformers optional
 
     if force_single_device and torch_module.cuda.is_available():
+        torch_module.cuda.set_device(0)
         pipe = pipe.to("cuda:0")
+        _move_scheduler_state_to_device(pipe, "cuda:0", torch_module)
 
     final_cache_key = (
         selected_model_id,
@@ -171,6 +177,35 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
     )
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
+
+
+def _move_scheduler_state_to_device(pipe: WanVideoPipeline, device: str, torch_module: Any) -> None:
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None:
+        return
+
+    # Move known tensor fields used in scheduler.step to the same device as latents.
+    for attr in ("timesteps", "sigmas", "model_outputs"):
+        value = getattr(scheduler, attr, None)
+        if hasattr(value, "to"):
+            try:
+                setattr(scheduler, attr, value.to(device))
+            except Exception:
+                pass
+        elif isinstance(value, list):
+            moved: list[Any] = []
+            changed = False
+            for item in value:
+                if hasattr(item, "to"):
+                    try:
+                        moved.append(item.to(device))
+                        changed = True
+                        continue
+                    except Exception:
+                        pass
+                moved.append(item)
+            if changed:
+                setattr(scheduler, attr, moved)
 
 # ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
@@ -202,6 +237,10 @@ def text_to_video(
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
     def _generate_with_pipeline(active_pipeline: WanVideoPipeline):
+        if torch_module.cuda.is_available() and getattr(active_pipeline, "device", None) is not None:
+            active_device = str(getattr(active_pipeline, "device"))
+            if active_device.startswith("cuda"):
+                _move_scheduler_state_to_device(active_pipeline, active_device, torch_module)
         with torch_module.inference_mode():
             return active_pipeline(
                 prompt=prompt,
