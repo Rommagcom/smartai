@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from diffusers import WanVideoPipeline
+    from diffusers import AutoencoderKLWan, WanPipeline
 except ImportError:  # Backward compatibility for older diffusers builds.
-    from diffusers import WanPipeline as WanVideoPipeline
+    from diffusers import WanPipeline
+    AutoencoderKLWan = None
 
 from diffusers.utils import export_to_video
 
@@ -23,17 +24,17 @@ _MODEL_ID_FALLBACKS = [
     "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
 ]
-_DEFAULT_WIDTH = 960
-_DEFAULT_HEIGHT = 528
-_DEFAULT_NUM_FRAMES = 73
+_DEFAULT_WIDTH = 832
+_DEFAULT_HEIGHT = 480
+_DEFAULT_NUM_FRAMES = 81
 _DEFAULT_NUM_INFERENCE_STEPS = 40
-_DEFAULT_GUIDANCE_SCALE = 6.0
+_DEFAULT_GUIDANCE_SCALE = 5.0
 _DEFAULT_FPS = 25
 _DEFAULT_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, static, text, watermark, shaky motion"
 )
 
-_PIPELINE_CACHE: dict[tuple[str, str, int], WanVideoPipeline] = {}
+_PIPELINE_CACHE: dict[tuple[str, str], WanPipeline] = {}
 
 # ---------------------------- HELPERS ----------------------------
 def _safe_filename(name: str) -> str:
@@ -42,12 +43,11 @@ def _safe_filename(name: str) -> str:
 
 
 def _resolve_torch_dtype() -> Any:
-    """Use FP16 by default; FP8 is opt-in because it is less stable across builds."""
+    """Use bfloat16 by default as recommended in Wan examples."""
     torch_module = _get_torch_module()
-    fp8_enabled = str(os.getenv("WAN_ENABLE_FP8") or "false").strip().lower() in {"1", "true", "yes", "on"}
-    fp8 = getattr(torch_module, "float8_e4m3fn", None)
-    if fp8_enabled and fp8 is not None and torch_module.cuda.is_available():
-        return fp8
+    bf16 = getattr(torch_module, "bfloat16", None)
+    if bf16 is not None:
+        return bf16
     return torch_module.float16
 
 
@@ -68,12 +68,9 @@ def _validated_dimension(value: int, field_name: str) -> int:
     return int(value)
 
 # ---------------------------- PIPELINE LOADER ----------------------------
-def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVideoPipeline:
+def _load_pipeline(*, model_id: str) -> WanPipeline:
     torch_module = _get_torch_module()
     preferred_dtype = _resolve_torch_dtype()
-    dtype_candidates = [preferred_dtype]
-    if preferred_dtype is not torch_module.float16:
-        dtype_candidates.append(torch_module.float16)
 
     hf_token = str(
         os.getenv("HUGGINGFACE_HUB_TOKEN")
@@ -86,57 +83,39 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
 
     # Try robust combinations across model repos and diffusers/torch versions.
     last_exc: Exception | None = None
-    pipe: WanVideoPipeline | None = None
-    selected_dtype: Any | None = None
+    pipe: WanPipeline | None = None
     selected_model_id = model_id
-    cuda_count = torch_module.cuda.device_count() if torch_module.cuda.is_available() else 1
-    if force_single_device:
-        preferred_device_maps = [None]
-    else:
-        # On multi-GPU hosts, balanced sharding usually gives more stable utilization than auto.
-        preferred_device_maps = ["balanced", "auto"] if cuda_count >= 2 else ["auto", None]
 
     for current_model_id in model_ids:
-        for torch_dtype in dtype_candidates:
-            cache_key = (
-                current_model_id,
-                str(torch_dtype),
-                torch_module.cuda.device_count(),
-                "single" if force_single_device else "sharded",
-            )
-            if cache_key in _PIPELINE_CACHE:
-                return _PIPELINE_CACHE[cache_key]
+        cache_key = (current_model_id, str(preferred_dtype))
+        if cache_key in _PIPELINE_CACHE:
+            return _PIPELINE_CACHE[cache_key]
 
-            candidates: list[dict[str, Any]] = []
-            for device_map_value in preferred_device_maps:
-                base: dict[str, Any] = {
-                    "torch_dtype": torch_dtype,
-                    "token": hf_token,
+        try:
+            vae = None
+            if AutoencoderKLWan is not None:
+                vae_kwargs: dict[str, Any] = {
+                    "subfolder": "vae",
+                    "torch_dtype": torch_module.float32,
                 }
-                if device_map_value is not None:
-                    base["device_map"] = device_map_value
-                # In strict single-device mode avoid low_cpu_mem_usage, because it can
-                # leave parts of scheduler state on CPU in some diffusers builds.
-                if not force_single_device:
-                    with_mem = dict(base)
-                    with_mem["low_cpu_mem_usage"] = True
-                    candidates.append(with_mem)
-                candidates.append(base)
+                if hf_token:
+                    vae_kwargs["token"] = hf_token
+                vae = AutoencoderKLWan.from_pretrained(current_model_id, **vae_kwargs)
 
-            for kwargs in candidates:
-                if not hf_token and "token" in kwargs:
-                    kwargs = dict(kwargs)
-                    kwargs.pop("token", None)
-                try:
-                    pipe = WanVideoPipeline.from_pretrained(current_model_id, **kwargs)
-                    selected_dtype = torch_dtype
-                    selected_model_id = current_model_id
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-            if pipe is not None:
-                break
+            pipe_kwargs: dict[str, Any] = {
+                "torch_dtype": preferred_dtype,
+            }
+            if vae is not None:
+                pipe_kwargs["vae"] = vae
+            if hf_token:
+                pipe_kwargs["token"] = hf_token
+
+            pipe = WanPipeline.from_pretrained(current_model_id, **pipe_kwargs)
+            selected_model_id = current_model_id
+            break
+        except Exception as exc:
+            last_exc = exc
+            continue
         if pipe is not None:
             break
 
@@ -156,84 +135,19 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
             # Backward-compatible path for diffusers builds without tile_size arg.
             pipe.vae.enable_tiling()
 
-    # Do not enable CPU offload here: with some Wan scheduler/device_map combinations
-    # it can produce mixed CPU/CUDA tensors during denoising steps.
-
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except Exception:
         pass  # xformers optional
 
-    if force_single_device and torch_module.cuda.is_available():
+    # Hugging Face reference path: run entire pipeline on one CUDA device.
+    if torch_module.cuda.is_available():
         torch_module.cuda.set_device(0)
         pipe = pipe.to("cuda:0")
-        _move_scheduler_state_to_device(pipe, "cuda:0", torch_module)
 
-    _stabilize_scheduler(pipe)
-
-    final_cache_key = (
-        selected_model_id,
-        str(selected_dtype),
-        torch_module.cuda.device_count(),
-        "single" if force_single_device else "sharded",
-    )
+    final_cache_key = (selected_model_id, str(preferred_dtype))
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
-
-
-def _move_scheduler_state_to_device(pipe: WanVideoPipeline, device: str, torch_module: Any) -> None:
-    scheduler = getattr(pipe, "scheduler", None)
-    if scheduler is None:
-        return
-
-    # Move known tensor fields used in scheduler.step to the same device as latents.
-    for attr in ("timesteps", "sigmas", "model_outputs"):
-        value = getattr(scheduler, attr, None)
-        if hasattr(value, "to"):
-            try:
-                setattr(scheduler, attr, value.to(device))
-            except Exception:
-                pass
-        elif isinstance(value, list):
-            moved: list[Any] = []
-            changed = False
-            for item in value:
-                if hasattr(item, "to"):
-                    try:
-                        moved.append(item.to(device))
-                        changed = True
-                        continue
-                    except Exception:
-                        pass
-                moved.append(item)
-            if changed:
-                setattr(scheduler, attr, moved)
-
-
-def _stabilize_scheduler(pipe: WanVideoPipeline) -> None:
-    scheduler = getattr(pipe, "scheduler", None)
-    if scheduler is None:
-        return
-
-    # UniPC multistep can mix CPU/CUDA cached outputs on some Wan setups.
-    # Forcing solver_order=1 avoids the multistep cat path that triggers mismatch.
-    cls_name = type(scheduler).__name__.lower()
-    if "unipc" not in cls_name:
-        return
-
-    try:
-        pipe.scheduler = type(scheduler).from_config(
-            scheduler.config,
-            solver_order=1,
-            lower_order_final=True,
-        )
-    except TypeError:
-        try:
-            pipe.scheduler = type(scheduler).from_config(scheduler.config, solver_order=1)
-        except Exception:
-            pass
-    except Exception:
-        pass
 
 # ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
@@ -264,17 +178,7 @@ def text_to_video(
     if num_frames <= 0 or num_inference_steps <= 0 or fps <= 0:
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
-    def _generate_with_pipeline(active_pipeline: WanVideoPipeline):
-        scheduler = getattr(active_pipeline, "scheduler", None)
-        if scheduler is not None and hasattr(scheduler, "model_outputs"):
-            try:
-                scheduler.model_outputs = []
-            except Exception:
-                pass
-        if torch_module.cuda.is_available() and getattr(active_pipeline, "device", None) is not None:
-            active_device = str(getattr(active_pipeline, "device"))
-            if active_device.startswith("cuda"):
-                _move_scheduler_state_to_device(active_pipeline, active_device, torch_module)
+    def _generate_with_pipeline(active_pipeline: WanPipeline):
         with torch_module.inference_mode():
             return active_pipeline(
                 prompt=prompt,
@@ -287,25 +191,10 @@ def text_to_video(
             ).frames[0]
 
     # ----------------- LOAD PIPELINE -----------------
-    pipeline = _load_pipeline(model_id=model_id, force_single_device=False)
+    pipeline = _load_pipeline(model_id=model_id)
 
     # ----------------- GENERATE -----------------
-    try:
-        frames = _generate_with_pipeline(pipeline)
-    except RuntimeError as exc:
-        error_text = str(exc)
-        mixed_device_error = (
-            "Expected all tensors to be on the same device" in error_text
-            or "different from other tensors on cpu" in error_text.lower()
-        )
-        if not mixed_device_error:
-            raise
-
-        # Fallback path: force full pipeline on one GPU to avoid scheduler CPU/GPU mixing.
-        if torch_module.cuda.is_available():
-            torch_module.cuda.empty_cache()
-        pipeline = _load_pipeline(model_id=model_id, force_single_device=True)
-        frames = _generate_with_pipeline(pipeline)
+    frames = _generate_with_pipeline(pipeline)
 
     # ----------------- SAVE VIDEO -----------------
     out_dir = Path("generated_videos")
