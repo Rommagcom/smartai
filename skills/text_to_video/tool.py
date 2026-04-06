@@ -67,7 +67,7 @@ def _validated_dimension(value: int, field_name: str) -> int:
     return int(value)
 
 # ---------------------------- PIPELINE LOADER ----------------------------
-def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
+def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVideoPipeline:
     torch_module = _get_torch_module()
     preferred_dtype = _resolve_torch_dtype()
     dtype_candidates = [preferred_dtype]
@@ -88,13 +88,21 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     pipe: WanVideoPipeline | None = None
     selected_dtype: Any | None = None
     selected_model_id = model_id
-    cuda_count = torch_module.cuda.device_count() if torch_module.cuda.is_available() else 0
-    # On multi-GPU hosts, balanced sharding usually gives more stable utilization than auto.
-    preferred_device_maps = ["balanced", "auto"] if cuda_count >= 2 else ["auto", None]
+    cuda_count = torch_module.cuda.device_count() if torch_module.cuda.is_available() else 1
+    if force_single_device:
+        preferred_device_maps = [None]
+    else:
+        # On multi-GPU hosts, balanced sharding usually gives more stable utilization than auto.
+        preferred_device_maps = ["balanced", "auto"] if cuda_count >= 2 else ["auto", None]
 
     for current_model_id in model_ids:
         for torch_dtype in dtype_candidates:
-            cache_key = (current_model_id, str(torch_dtype), torch_module.cuda.device_count())
+            cache_key = (
+                current_model_id,
+                str(torch_dtype),
+                torch_module.cuda.device_count(),
+                "single" if force_single_device else "sharded",
+            )
             if cache_key in _PIPELINE_CACHE:
                 return _PIPELINE_CACHE[cache_key]
 
@@ -106,8 +114,6 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
                 }
                 if device_map_value is not None:
                     base["device_map"] = device_map_value
-                    # Optional kwarg in some builds; harmlessly skipped by fallback on error.
-                    base["enable_model_parallelism"] = True
                 with_mem = dict(base)
                 with_mem["low_cpu_mem_usage"] = True
                 candidates.append(with_mem)
@@ -154,7 +160,15 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     except Exception:
         pass  # xformers optional
 
-    final_cache_key = (selected_model_id, str(selected_dtype), torch_module.cuda.device_count())
+    if force_single_device and torch_module.cuda.is_available():
+        pipe = pipe.to("cuda:0")
+
+    final_cache_key = (
+        selected_model_id,
+        str(selected_dtype),
+        torch_module.cuda.device_count(),
+        "single" if force_single_device else "sharded",
+    )
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
 
@@ -187,20 +201,38 @@ def text_to_video(
     if num_frames <= 0 or num_inference_steps <= 0 or fps <= 0:
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
+    def _generate_with_pipeline(active_pipeline: WanVideoPipeline):
+        with torch_module.inference_mode():
+            return active_pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+            ).frames[0]
+
     # ----------------- LOAD PIPELINE -----------------
-    pipeline = _load_pipeline(model_id=model_id)
+    pipeline = _load_pipeline(model_id=model_id, force_single_device=False)
 
     # ----------------- GENERATE -----------------
-    with torch_module.inference_mode():
-        frames = pipeline(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-        ).frames[0]
+    try:
+        frames = _generate_with_pipeline(pipeline)
+    except RuntimeError as exc:
+        error_text = str(exc)
+        mixed_device_error = (
+            "Expected all tensors to be on the same device" in error_text
+            or "different from other tensors on cpu" in error_text.lower()
+        )
+        if not mixed_device_error:
+            raise
+
+        # Fallback path: force full pipeline on one GPU to avoid scheduler CPU/GPU mixing.
+        if torch_module.cuda.is_available():
+            torch_module.cuda.empty_cache()
+        pipeline = _load_pipeline(model_id=model_id, force_single_device=True)
+        frames = _generate_with_pipeline(pipeline)
 
     # ----------------- SAVE VIDEO -----------------
     out_dir = Path("generated_videos")
