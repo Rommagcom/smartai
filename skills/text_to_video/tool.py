@@ -169,6 +169,8 @@ def _load_pipeline(*, model_id: str, force_single_device: bool = False) -> WanVi
         pipe = pipe.to("cuda:0")
         _move_scheduler_state_to_device(pipe, "cuda:0", torch_module)
 
+    _stabilize_scheduler(pipe)
+
     final_cache_key = (
         selected_model_id,
         str(selected_dtype),
@@ -207,6 +209,32 @@ def _move_scheduler_state_to_device(pipe: WanVideoPipeline, device: str, torch_m
             if changed:
                 setattr(scheduler, attr, moved)
 
+
+def _stabilize_scheduler(pipe: WanVideoPipeline) -> None:
+    scheduler = getattr(pipe, "scheduler", None)
+    if scheduler is None:
+        return
+
+    # UniPC multistep can mix CPU/CUDA cached outputs on some Wan setups.
+    # Forcing solver_order=1 avoids the multistep cat path that triggers mismatch.
+    cls_name = type(scheduler).__name__.lower()
+    if "unipc" not in cls_name:
+        return
+
+    try:
+        pipe.scheduler = type(scheduler).from_config(
+            scheduler.config,
+            solver_order=1,
+            lower_order_final=True,
+        )
+    except TypeError:
+        try:
+            pipe.scheduler = type(scheduler).from_config(scheduler.config, solver_order=1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 # ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
     prompt: str,
@@ -237,6 +265,12 @@ def text_to_video(
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
     def _generate_with_pipeline(active_pipeline: WanVideoPipeline):
+        scheduler = getattr(active_pipeline, "scheduler", None)
+        if scheduler is not None and hasattr(scheduler, "model_outputs"):
+            try:
+                scheduler.model_outputs = []
+            except Exception:
+                pass
         if torch_module.cuda.is_available() and getattr(active_pipeline, "device", None) is not None:
             active_device = str(getattr(active_pipeline, "device"))
             if active_device.startswith("cuda"):
