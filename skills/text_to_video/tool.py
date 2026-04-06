@@ -25,7 +25,7 @@ _MODEL_ID_FALLBACKS = [
 ]
 _DEFAULT_WIDTH = 960
 _DEFAULT_HEIGHT = 528
-_DEFAULT_NUM_FRAMES = 72
+_DEFAULT_NUM_FRAMES = 73
 _DEFAULT_NUM_INFERENCE_STEPS = 40
 _DEFAULT_GUIDANCE_SCALE = 6.0
 _DEFAULT_FPS = 25
@@ -88,34 +88,30 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     pipe: WanVideoPipeline | None = None
     selected_dtype: Any | None = None
     selected_model_id = model_id
+    cuda_count = torch_module.cuda.device_count() if torch_module.cuda.is_available() else 0
+    # On multi-GPU hosts, balanced sharding usually gives more stable utilization than auto.
+    preferred_device_maps = ["balanced", "auto"] if cuda_count >= 2 else ["auto", None]
+
     for current_model_id in model_ids:
         for torch_dtype in dtype_candidates:
             cache_key = (current_model_id, str(torch_dtype), torch_module.cuda.device_count())
             if cache_key in _PIPELINE_CACHE:
                 return _PIPELINE_CACHE[cache_key]
 
-            candidates = [
-                {
+            candidates: list[dict[str, Any]] = []
+            for device_map_value in preferred_device_maps:
+                base: dict[str, Any] = {
                     "torch_dtype": torch_dtype,
                     "token": hf_token,
-                    "device_map": "auto",
-                    "low_cpu_mem_usage": True,
-                },
-                {
-                    "torch_dtype": torch_dtype,
-                    "token": hf_token,
-                    "device_map": "auto",
-                },
-                {
-                    "torch_dtype": torch_dtype,
-                    "token": hf_token,
-                    "low_cpu_mem_usage": True,
-                },
-                {
-                    "torch_dtype": torch_dtype,
-                    "token": hf_token,
-                },
-            ]
+                }
+                if device_map_value is not None:
+                    base["device_map"] = device_map_value
+                    # Optional kwarg in some builds; harmlessly skipped by fallback on error.
+                    base["enable_model_parallelism"] = True
+                with_mem = dict(base)
+                with_mem["low_cpu_mem_usage"] = True
+                candidates.append(with_mem)
+                candidates.append(base)
 
             for kwargs in candidates:
                 if not hf_token and "token" in kwargs:
