@@ -23,12 +23,12 @@ _MODEL_ID_FALLBACKS = [
     "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
 ]
-_DEFAULT_WIDTH = 1280
-_DEFAULT_HEIGHT = 720
-_DEFAULT_NUM_FRAMES = 81
+_DEFAULT_WIDTH = 960
+_DEFAULT_HEIGHT = 528
+_DEFAULT_NUM_FRAMES = 71
 _DEFAULT_NUM_INFERENCE_STEPS = 40
 _DEFAULT_GUIDANCE_SCALE = 6.0
-_DEFAULT_FPS = 16
+_DEFAULT_FPS = 25
 _DEFAULT_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, static, text, watermark, shaky motion"
 )
@@ -150,11 +150,8 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
             # Backward-compatible path for diffusers builds without tile_size arg.
             pipe.vae.enable_tiling()
 
-    if hasattr(pipe, "enable_model_cpu_offload"):
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception:
-            pass
+    # Do not enable CPU offload here: with some Wan scheduler/device_map combinations
+    # it can produce mixed CPU/CUDA tensors during denoising steps.
 
     try:
         pipe.enable_xformers_memory_efficient_attention()
