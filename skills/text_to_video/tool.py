@@ -18,7 +18,6 @@ from diffusers.utils import export_to_video
 
 
 # ---------------------------- CONFIG ----------------------------
-_DEFAULT_IMAGE = "smartai_success.png"
 _DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-720P-Diffusers"
 _DEFAULT_WIDTH = 1280
 _DEFAULT_HEIGHT = 720
@@ -229,7 +228,6 @@ def text_to_video(
         "path": str(out_path),
         "size_bytes": out_path.stat().st_size,
         "model_id": model_id,
-        "source_image": _DEFAULT_IMAGE,
         "width": width,
         "height": height,
         "num_frames": num_frames,
