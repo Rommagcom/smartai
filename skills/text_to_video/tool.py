@@ -18,7 +18,11 @@ from diffusers.utils import export_to_video
 
 
 # ---------------------------- CONFIG ----------------------------
-_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-720P-Diffusers"
+_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+_MODEL_ID_FALLBACKS = [
+    "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers",
+]
 _DEFAULT_WIDTH = 1280
 _DEFAULT_HEIGHT = 720
 _DEFAULT_NUM_FRAMES = 81
@@ -77,49 +81,56 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
         or ""
     ).strip() or None
 
-    # Try robust combinations across diffusers/torch versions.
+    model_ids = [model_id] + [candidate for candidate in _MODEL_ID_FALLBACKS if candidate != model_id]
+
+    # Try robust combinations across model repos and diffusers/torch versions.
     last_exc: Exception | None = None
     pipe: WanVideoPipeline | None = None
     selected_dtype: Any | None = None
-    for torch_dtype in dtype_candidates:
-        cache_key = (model_id, str(torch_dtype), torch_module.cuda.device_count())
-        if cache_key in _PIPELINE_CACHE:
-            return _PIPELINE_CACHE[cache_key]
+    selected_model_id = model_id
+    for current_model_id in model_ids:
+        for torch_dtype in dtype_candidates:
+            cache_key = (current_model_id, str(torch_dtype), torch_module.cuda.device_count())
+            if cache_key in _PIPELINE_CACHE:
+                return _PIPELINE_CACHE[cache_key]
 
-        candidates = [
-            {
-                "torch_dtype": torch_dtype,
-                "token": hf_token,
-                "device_map": "auto",
-                "low_cpu_mem_usage": True,
-            },
-            {
-                "torch_dtype": torch_dtype,
-                "token": hf_token,
-                "device_map": "auto",
-            },
-            {
-                "torch_dtype": torch_dtype,
-                "token": hf_token,
-                "low_cpu_mem_usage": True,
-            },
-            {
-                "torch_dtype": torch_dtype,
-                "token": hf_token,
-            },
-        ]
+            candidates = [
+                {
+                    "torch_dtype": torch_dtype,
+                    "token": hf_token,
+                    "device_map": "auto",
+                    "low_cpu_mem_usage": True,
+                },
+                {
+                    "torch_dtype": torch_dtype,
+                    "token": hf_token,
+                    "device_map": "auto",
+                },
+                {
+                    "torch_dtype": torch_dtype,
+                    "token": hf_token,
+                    "low_cpu_mem_usage": True,
+                },
+                {
+                    "torch_dtype": torch_dtype,
+                    "token": hf_token,
+                },
+            ]
 
-        for kwargs in candidates:
-            if not hf_token and "token" in kwargs:
-                kwargs = dict(kwargs)
-                kwargs.pop("token", None)
-            try:
-                pipe = WanVideoPipeline.from_pretrained(model_id, **kwargs)
-                selected_dtype = torch_dtype
+            for kwargs in candidates:
+                if not hf_token and "token" in kwargs:
+                    kwargs = dict(kwargs)
+                    kwargs.pop("token", None)
+                try:
+                    pipe = WanVideoPipeline.from_pretrained(current_model_id, **kwargs)
+                    selected_dtype = torch_dtype
+                    selected_model_id = current_model_id
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if pipe is not None:
                 break
-            except Exception as exc:
-                last_exc = exc
-                continue
         if pipe is not None:
             break
 
@@ -150,7 +161,7 @@ def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
     except Exception:
         pass  # xformers optional
 
-    final_cache_key = (model_id, str(selected_dtype), torch_module.cuda.device_count())
+    final_cache_key = (selected_model_id, str(selected_dtype), torch_module.cuda.device_count())
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
 
