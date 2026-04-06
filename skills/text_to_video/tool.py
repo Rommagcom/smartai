@@ -35,7 +35,7 @@ _DEFAULT_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, static, text, watermark, shaky motion"
 )
 
-_PIPELINE_CACHE: dict[tuple[str, str], WanPipeline] = {}
+_PIPELINE_CACHE: dict[tuple[str, str, str], WanPipeline] = {}
 
 # ---------------------------- HELPERS ----------------------------
 def _safe_filename(name: str) -> str:
@@ -61,6 +61,44 @@ def _get_torch_module() -> Any:
             "Install torch/torchvision/torchaudio in the bot container and rebuild image."
         ) from exc
 
+
+def _select_cuda_device(torch_module: Any) -> str:
+    if not torch_module.cuda.is_available():
+        return "cpu"
+
+    device_count = int(torch_module.cuda.device_count())
+    if device_count <= 0:
+        return "cpu"
+
+    env_value = str(os.getenv("WAN_CUDA_DEVICE") or "").strip().lower()
+    if env_value.startswith("cuda:"):
+        env_value = env_value.split(":", 1)[1]
+    if env_value.isdigit():
+        env_index = int(env_value)
+        if 0 <= env_index < device_count:
+            return f"cuda:{env_index}"
+
+    # Default preference: second GPU on multi-GPU hosts, else first GPU.
+    preferred_index = 1 if device_count >= 2 else 0
+
+    # If preferred GPU is tight on memory, pick the GPU with max free memory.
+    try:
+        free_list: list[tuple[int, int]] = []
+        for idx in range(device_count):
+            free_bytes, _ = torch_module.cuda.mem_get_info(idx)
+            free_list.append((idx, int(free_bytes)))
+        free_list.sort(key=lambda item: item[1], reverse=True)
+        best_index = free_list[0][0]
+        preferred_free = next((free for idx, free in free_list if idx == preferred_index), 0)
+        best_free = free_list[0][1]
+        # Use best GPU if preferred is heavily occupied.
+        if best_index != preferred_index and best_free > preferred_free * 2:
+            return f"cuda:{best_index}"
+    except Exception:
+        pass
+
+    return f"cuda:{preferred_index}"
+
 def _validated_dimension(value: int, field_name: str) -> int:
     if value <= 0:
         raise ValueError(f"{field_name} must be > 0")
@@ -72,6 +110,7 @@ def _validated_dimension(value: int, field_name: str) -> int:
 def _load_pipeline(*, model_id: str) -> WanPipeline:
     torch_module = _get_torch_module()
     preferred_dtype = _resolve_torch_dtype()
+    target_device = _select_cuda_device(torch_module)
 
     hf_token = str(
         os.getenv("HUGGINGFACE_HUB_TOKEN")
@@ -88,7 +127,7 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
     selected_model_id = model_id
 
     for current_model_id in model_ids:
-        cache_key = (current_model_id, str(preferred_dtype))
+        cache_key = (current_model_id, str(preferred_dtype), target_device)
         if cache_key in _PIPELINE_CACHE:
             return _PIPELINE_CACHE[cache_key]
 
@@ -141,14 +180,18 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
     except Exception:
         pass  # xformers optional
 
-    # Hugging Face reference path: run entire pipeline on one CUDA device.
-    if torch_module.cuda.is_available():
-        torch_module.cuda.set_device(1)
-        pipe = pipe.to("cuda:1")
+    # Run entire pipeline on selected single device to avoid cross-device scheduler issues.
+    if target_device.startswith("cuda:"):
+        try:
+            torch_module.cuda.set_device(int(target_device.split(":", 1)[1]))
+        except Exception:
+            pass
+        pipe = pipe.to(target_device)
+        setattr(pipe, "_sai_device", target_device)
 
     _stabilize_scheduler(pipe)
 
-    final_cache_key = (selected_model_id, str(preferred_dtype))
+    final_cache_key = (selected_model_id, str(preferred_dtype), target_device)
     _PIPELINE_CACHE[final_cache_key] = pipe
     return pipe
 
@@ -239,10 +282,11 @@ def text_to_video(
 
     def _generate_with_pipeline(active_pipeline: WanPipeline):
         if torch_module.cuda.is_available():
+            active_device = str(getattr(active_pipeline, "_sai_device", "cuda:0"))
             _sync_scheduler_to_device(
                 active_pipeline,
                 torch_module=torch_module,
-                device="cuda:1",
+                device=active_device,
                 num_inference_steps=int(num_inference_steps),
             )
         with torch_module.inference_mode():
