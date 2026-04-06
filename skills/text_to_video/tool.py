@@ -3,41 +3,48 @@ from __future__ import annotations
 import json
 import re
 import gc
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch.cuda.amp import autocast
-from diffusers import WanPipeline
+
+try:
+    from diffusers import WanVideoPipeline
+except ImportError:  # Backward compatibility for older diffusers builds.
+    from diffusers import WanPipeline as WanVideoPipeline
+
 from diffusers.utils import export_to_video
+
+
 # ---------------------------- CONFIG ----------------------------
 _DEFAULT_IMAGE = "smartai_success.png"
-_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+_DEFAULT_MODEL_ID = "Wan-AI/Wan2.1-T2V-14B-720P-Diffusers"
 _DEFAULT_WIDTH = 1280
 _DEFAULT_HEIGHT = 720
-_DEFAULT_NUM_FRAMES = 75
-_DEFAULT_NUM_INFERENCE_STEPS = 30   # <- lowered
+_DEFAULT_NUM_FRAMES = 81
+_DEFAULT_NUM_INFERENCE_STEPS = 40
 _DEFAULT_GUIDANCE_SCALE = 6.0
-_DEFAULT_FPS = 25
-_DEFAULT_DTYPE = "float16"          # <- FP16 (lighter than bfloat16)
+_DEFAULT_FPS = 16
 _DEFAULT_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, static, text, watermark, shaky motion"
 )
 
-_DTYPE_MAP = {"float16": "float16", "bfloat16": "bfloat16", "float32": "float32"}
-_PIPELINE_CACHE: dict[tuple[str, str, int], WanPipeline] = {}
+_PIPELINE_CACHE: dict[tuple[str, str, int], WanVideoPipeline] = {}
 
 # ---------------------------- HELPERS ----------------------------
 def _safe_filename(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name.strip())
     return cleaned or "video.mp4"
 
-def _resolve_dtype(torch_mod: Any, dtype: str) -> Any:
-    key = (dtype or "bfloat16").strip().lower()
-    if key not in _DTYPE_MAP:
-        raise ValueError(f"dtype must be one of: {', '.join(_DTYPE_MAP)}")
-    return getattr(torch_mod, _DTYPE_MAP[key])
+
+def _resolve_torch_dtype() -> Any:
+    """Prefer FP8 on supported GPUs, fallback to FP16 for compatibility."""
+    fp8 = getattr(torch, "float8_e4m3fn", None)
+    if fp8 is not None and torch.cuda.is_available():
+        return fp8
+    return torch.float16
 
 def _validated_dimension(value: int, field_name: str) -> int:
     if value <= 0:
@@ -47,41 +54,50 @@ def _validated_dimension(value: int, field_name: str) -> int:
     return int(value)
 
 # ---------------------------- PIPELINE LOADER ----------------------------
-def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
-    torch_dtype = _resolve_dtype(torch, dtype)
+def _load_pipeline(*, model_id: str) -> WanVideoPipeline:
+    torch_dtype = _resolve_torch_dtype()
 
     cache_key = (model_id, str(torch_dtype), torch.cuda.device_count())
     if cache_key in _PIPELINE_CACHE:
         return _PIPELINE_CACHE[cache_key]
 
-    # Some diffusers versions don't support all kwargs; try the richest config first,
-    # then gracefully degrade to compatible variants.
+    hf_token = str(os.getenv("HUGGINGFACE_HUB_TOKEN")
+        or ""
+    ).strip() or None
+
+    # Try the recommended T2V loading options first, then degrade for older versions.
     candidates = [
         {
             "torch_dtype": torch_dtype,
-            "device_map": "balanced",
-            "low_cpu_mem_usage": True,
-            "enable_model_parallelism": True,
-        },
-        {
-            "torch_dtype": torch_dtype,
-            "device_map": "balanced",
+            "token": hf_token,
+            "device_map": "auto",
             "low_cpu_mem_usage": True,
         },
         {
             "torch_dtype": torch_dtype,
+            "token": hf_token,
+            "device_map": "auto",
             "low_cpu_mem_usage": True,
         },
         {
             "torch_dtype": torch_dtype,
+            "token": hf_token,
+            "low_cpu_mem_usage": True,
+        },
+        {
+            "torch_dtype": torch_dtype,
+            "token": hf_token,
         },
     ]
 
     last_exc: Exception | None = None
-    pipe: WanPipeline | None = None
+    pipe: WanVideoPipeline | None = None
     for kwargs in candidates:
+        if not hf_token and "token" in kwargs:
+            kwargs = dict(kwargs)
+            kwargs.pop("token", None)
         try:
-            pipe = WanPipeline.from_pretrained(model_id, **kwargs)
+            pipe = WanVideoPipeline.from_pretrained(model_id, **kwargs)
             break
         except TypeError as exc:
             last_exc = exc
@@ -100,64 +116,19 @@ def _load_pipeline(*, model_id: str, dtype: str) -> WanPipeline:
             # Backward-compatible path for diffusers builds without tile_size arg.
             pipe.vae.enable_tiling()
 
-    if hasattr(pipe, "enable_attention_slicing"):
+    if hasattr(pipe, "enable_model_cpu_offload"):
         try:
-            pipe.enable_attention_slicing(slice_size=2)
-        except TypeError:
-            pipe.enable_attention_slicing()
+            pipe.enable_model_cpu_offload()
+        except Exception:
+            pass
 
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except Exception:
         pass  # xformers optional
 
-    if hasattr(pipe.unet, "enable_gradient_checkpointing"):
-        pipe.unet.enable_gradient_checkpointing()
-
-    # Optional JIT compile (speed, not memory)
-    try:
-        pipe.unet = torch.compile(pipe.unet, mode="max-autotune")
-        pipe.vae  = torch.compile(pipe.vae,  mode="max-autotune")
-    except Exception as exc:
-        print("⚠️ torch.compile not available:", exc)
-
     _PIPELINE_CACHE[cache_key] = pipe
     return pipe
-
-# ---------------------------- CHUNKED GENERATION ----------------------------
-def _run_pipeline(pipe, generation_kwargs):
-    """Run a single diffusion call inside autocast + inference_mode."""
-    with torch.inference_mode():
-        if torch.cuda.is_available():
-            with autocast("cuda", dtype=torch.float16):
-                result = pipe(**generation_kwargs)
-        else:
-            result = pipe(**generation_kwargs)
-    return result
-
-def generate_frames_in_chunks(
-    pipe,
-    prompt: str,
-    total_frames: int,
-    chunk_size: int = 25,
-    **generation_kwargs,
-):
-    """Generate `total_frames` frames by repeatedly calling the pipeline."""
-    frames = []
-
-    for start in range(0, total_frames, chunk_size):
-        cur_len = min(chunk_size, total_frames - start)
-        run_kwargs = dict(generation_kwargs)
-        run_kwargs.update(
-            {
-                "prompt": prompt,
-                "num_frames": cur_len,
-            }
-        )
-        result = _run_pipeline(pipe, run_kwargs)
-        frames.extend(result.frames[0])   # list of tensors (num_frames, H, W, 3)
-
-    return frames
 
 # ---------------------------- MAIN FUNCTION ----------------------------
 def text_to_video(
@@ -170,7 +141,7 @@ def text_to_video(
     num_inference_steps: int = _DEFAULT_NUM_INFERENCE_STEPS,
     guidance_scale: float = _DEFAULT_GUIDANCE_SCALE,
     fps: int = _DEFAULT_FPS,
-    dtype: str = _DEFAULT_DTYPE,
+    dtype: str = "auto",
     negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
     model_id: str = _DEFAULT_MODEL_ID,
 ) -> str:
@@ -187,27 +158,19 @@ def text_to_video(
         raise ValueError("num_frames / num_inference_steps / fps must be > 0")
 
     # ----------------- LOAD PIPELINE -----------------
-    pipeline = _load_pipeline(model_id=model_id, dtype=dtype)
+    pipeline = _load_pipeline(model_id=model_id)
 
     # ----------------- GENERATE -----------------
-    generation_kwargs = {
-        "prompt": prompt,
-        "negative_prompt": negative_prompt,
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
-        "height": height,
-        "width": width,
-        # `latent` will be added inside the chunked helper
-    }
-
-    # Use chunked generation to keep per‑GPU RAM low
-    frames = generate_frames_in_chunks(
-        pipeline,
-        prompt,
-        total_frames=num_frames,
-        chunk_size=25,          # 25‑frame windows (≈ 1 s at 25 fps)
-        **generation_kwargs,
-    )
+    with torch.inference_mode():
+        frames = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+        ).frames[0]
 
     # ----------------- SAVE VIDEO -----------------
     out_dir = Path("generated_videos")
@@ -245,7 +208,7 @@ def text_to_video(
         "num_inference_steps": num_inference_steps,
         "guidance_scale": guidance_scale,
         "fps": fps,
-        "dtype": dtype,
+        "dtype": str(_resolve_torch_dtype()),
         "prompt": prompt,
         "negative_prompt": negative_prompt,
     }
