@@ -143,8 +143,8 @@ def _load_pipeline(*, model_id: str) -> WanPipeline:
 
     # Hugging Face reference path: run entire pipeline on one CUDA device.
     if torch_module.cuda.is_available():
-        torch_module.cuda.set_device(0)
-        pipe = pipe.to("cuda:0")
+        torch_module.cuda.set_device(1)
+        pipe = pipe.to("cuda:1")
 
     _stabilize_scheduler(pipe)
 
@@ -242,7 +242,7 @@ def text_to_video(
             _sync_scheduler_to_device(
                 active_pipeline,
                 torch_module=torch_module,
-                device="cuda:0",
+                device="cuda:1",
                 num_inference_steps=int(num_inference_steps),
             )
         with torch_module.inference_mode():
