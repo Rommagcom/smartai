@@ -97,6 +97,26 @@ function normalizeSessions(items) {
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 }
 
+function groupSessionsByPeriod(items) {
+  const now = Date.now();
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+
+  const thisWeek = [];
+  const older = [];
+  for (const session of items || []) {
+    const ts = new Date(session?.updated_at || 0).getTime();
+    if (Number.isFinite(ts) && now - ts <= weekMs) {
+      thisWeek.push(session);
+    } else {
+      older.push(session);
+    }
+  }
+  return [
+    { title: "This week", items: thisWeek },
+    { title: "Older", items: older },
+  ];
+}
+
 function App() {
   const [mode, setMode] = useState("login");
   const [registerForm, setRegisterForm] = useState(DEFAULT_REGISTER_FORM);
@@ -677,6 +697,7 @@ function App() {
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
   const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted;
+  const sessionGroups = groupSessionsByPeriod(chatSessions);
 
   if (!isAuthenticated) {
     return (
@@ -783,90 +804,93 @@ function App() {
 
             <div className={`chat-history-list density-${chatDensity}`} aria-label="Chat sessions">
               {chatSessions.length === 0 ? <div className="empty">No chats yet.</div> : null}
-              {chatSessions.map((session) => {
-                const canDelete = true;
-                const isEditing = session.chat_id === editingChatId;
-                const isDeleted = Boolean(session.deleted_at);
-                return (
-                  <div key={session.chat_id} className={session.chat_id === activeChatId ? "chat-session chat-session-active" : "chat-session"}>
-                    <button
-                      type="button"
-                      className="chat-session-open"
-                      disabled={isDeleted}
-                      onClick={() => setActiveChatId(session.chat_id)}
-                      onDoubleClick={() => startInlineRename(session.chat_id, session.title)}
-                    >
-                      {isEditing ? (
-                        <input
-                          className="chat-title-input"
-                          value={editingTitle}
-                          autoFocus
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={(event) => setEditingTitle(event.target.value)}
-                          onBlur={() => {
-                            if (!editingTitle.trim()) {
-                              cancelInlineRename();
-                              return;
-                            }
-                            void renameChatSession(session.chat_id, editingTitle);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Escape") {
-                              cancelInlineRename();
-                              return;
-                            }
-                            if (event.key === "Enter") {
-                              event.preventDefault();
-                              void renameChatSession(session.chat_id, editingTitle);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <strong>{session.title}</strong>
-                      )}
-                      <span>{session.preview || "No messages yet"}</span>
-                      <em>
-                        {session.message_count} msgs · {new Date(session.updated_at).toLocaleString()}
-                      </em>
-                    </button>
-                    <div className="chat-session-actions">
-                      <button
-                        className="ghost chat-action"
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => setMenuChatId((prev) => (prev === session.chat_id ? "" : session.chat_id))}
-                      >
-                        ...
-                      </button>
-                      {menuChatId === session.chat_id ? (
-                        <div className="chat-session-menu">
-                          {isDeleted ? (
-                            <>
-                              <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => void restoreChatSession(session.chat_id)}>
-                                Restore
-                              </button>
-                              <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void purgeChatSession(session.chat_id)}>
-                                Purge
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => startInlineRename(session.chat_id, session.title)}>
-                                Rename
-                              </button>
-                              {canDelete ? (
-                                <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void deleteChatSession(session.chat_id)}>
-                                  Move to Trash
-                                </button>
-                              ) : null}
-                            </>
-                          )}
+              {sessionGroups.map((group) =>
+                group.items.length > 0 ? (
+                  <div key={group.title} className="chat-group">
+                    <div className="chat-group-title">{group.title}</div>
+                    {group.items.map((session) => {
+                      const canDelete = true;
+                      const isEditing = session.chat_id === editingChatId;
+                      const isDeleted = Boolean(session.deleted_at);
+                      return (
+                        <div key={session.chat_id} className={session.chat_id === activeChatId ? "chat-session chat-session-active" : "chat-session"}>
+                          <button
+                            type="button"
+                            className="chat-session-open"
+                            disabled={isDeleted}
+                            onClick={() => setActiveChatId(session.chat_id)}
+                            onDoubleClick={() => startInlineRename(session.chat_id, session.title)}
+                          >
+                            {isEditing ? (
+                              <input
+                                className="chat-title-input"
+                                value={editingTitle}
+                                autoFocus
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={(event) => setEditingTitle(event.target.value)}
+                                onBlur={() => {
+                                  if (!editingTitle.trim()) {
+                                    cancelInlineRename();
+                                    return;
+                                  }
+                                  void renameChatSession(session.chat_id, editingTitle);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    cancelInlineRename();
+                                    return;
+                                  }
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void renameChatSession(session.chat_id, editingTitle);
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <strong className="chat-session-title">{session.title}</strong>
+                            )}
+                          </button>
+                          <div className="chat-session-actions">
+                            <button
+                              className="ghost chat-action"
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => setMenuChatId((prev) => (prev === session.chat_id ? "" : session.chat_id))}
+                            >
+                              ...
+                            </button>
+                            {menuChatId === session.chat_id ? (
+                              <div className="chat-session-menu">
+                                {isDeleted ? (
+                                  <>
+                                    <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => void restoreChatSession(session.chat_id)}>
+                                      Restore
+                                    </button>
+                                    <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void purgeChatSession(session.chat_id)}>
+                                      Purge
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => startInlineRename(session.chat_id, session.title)}>
+                                      Rename
+                                    </button>
+                                    {canDelete ? (
+                                      <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void deleteChatSession(session.chat_id)}>
+                                        Move to Trash
+                                      </button>
+                                    ) : null}
+                                  </>
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
-                      ) : null}
-                    </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                ) : null
+              )}
             </div>
           </aside>
 
