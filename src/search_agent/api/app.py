@@ -75,6 +75,23 @@ def _scope_chat_id(user_id: int) -> int:
     return int(zlib.crc32(key.encode("utf-8")) & 0x7FFFFFFF)
 
 
+def _normalize_scope_chat_id(raw: str | None) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return "default"
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "_", value)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        return "default"
+    return cleaned[:128]
+
+
+def _scoped_runtime_chat_id(user_id: int, scope_chat_id: str) -> int:
+    normalized = _normalize_scope_chat_id(scope_chat_id)
+    key = f"user:{max(0, int(user_id))}:{normalized}"
+    return int(zlib.crc32(key.encode("utf-8")) & 0x7FFFFFFF)
+
+
 def _user_scope_id(user_id: int) -> str:
     normalized = max(0, int(user_id))
     return f"user:{normalized}"
@@ -315,6 +332,7 @@ class MembershipUpsertRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+    chat_id: str | None = Field(default=None, max_length=128)
 
 
 class ChatMessage(BaseModel):
@@ -324,14 +342,38 @@ class ChatMessage(BaseModel):
     created_at: str
 
 
+class ChatSessionCreateRequest(BaseModel):
+    title: str = Field(default="", max_length=160)
+
+
+class ChatSessionUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+
+class ChatSessionSummary(BaseModel):
+    chat_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    deleted_at: str | None = None
+    message_count: int
+    preview: str
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionSummary]
+
+
 class ChatResponse(BaseModel):
     answer: str
     messages: list[ChatMessage]
+    chat_id: str = "default"
 
 
 class WsSendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     client_message_id: str | None = Field(default=None, max_length=128)
+    chat_id: str | None = Field(default=None, max_length=128)
 
 
 class OrganizationSummary(BaseModel):
@@ -1578,7 +1620,14 @@ class RealtimeChatHub:
         if member is None:
             raise HTTPException(status_code=403, detail="User is not a member of the target team")
 
-    def _load_group_history(self, *, user_id: int, limit: int = GROUP_SHORT_MEMORY_LIMIT) -> list[dict[str, str]]:
+    def _load_group_history(
+        self,
+        *,
+        user_id: int,
+        chat_id: str = "default",
+        limit: int = GROUP_SHORT_MEMORY_LIMIT,
+    ) -> list[dict[str, str]]:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
         with self.engine.begin() as conn:
             rows = conn.execute(
                 text(
@@ -1586,12 +1635,14 @@ class RealtimeChatHub:
                     SELECT sender_type, content
                     FROM group_messages
                     WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = :scope_chat_id
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
                 ),
                 {
                     "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
                     "limit": max(1, int(limit)),
                 },
             ).mappings().all()
@@ -1609,28 +1660,33 @@ class RealtimeChatHub:
         self,
         *,
         user_id: int,
+        chat_id: str,
         sender_user_id: int | None,
         sender_type: str,
         content: str,
     ) -> None:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     """
-                    INSERT INTO group_messages (scope_user_id, sender_user_id, sender_type, content, created_at)
-                    VALUES (:scope_user_id, :sender_user_id, :sender_type, :content, :created_at)
+                    INSERT INTO group_messages (scope_user_id, scope_chat_id, sender_user_id, sender_type, content, created_at)
+                    VALUES (:scope_user_id, :scope_chat_id, :sender_user_id, :sender_type, :content, :created_at)
                     """
                 ),
                 {
                     "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
                     "sender_user_id": int(sender_user_id) if sender_user_id is not None else None,
                     "sender_type": sender_type,
                     "content": content,
                     "created_at": datetime.now(UTC),
                 },
             )
+        self._touch_chat_session(user_id=user_id, chat_id=scope_chat_id, content=content)
 
-    def _read_group_messages(self, *, user_id: int, limit: int = 30) -> list[ChatMessage]:
+    def _read_group_messages(self, *, user_id: int, chat_id: str = "default", limit: int = 30) -> list[ChatMessage]:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
         with self.engine.begin() as conn:
             rows = conn.execute(
                 text(
@@ -1638,12 +1694,14 @@ class RealtimeChatHub:
                     SELECT sender_type, sender_user_id, content, created_at::text AS created_at
                     FROM group_messages
                     WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = :scope_chat_id
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
                 ),
                 {
                     "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
                     "limit": max(1, int(limit)),
                 },
             ).mappings().all()
@@ -1657,7 +1715,382 @@ class RealtimeChatHub:
             for row in reversed(rows)
         ]
 
-    def _recall_shared_memory(self, *, user_id: int, query: str) -> str:
+    def _touch_chat_session(self, *, user_id: int, chat_id: str, content: str | None = None) -> None:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        preview = str(content or "").strip().replace("\n", " ")[:160]
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
+                    VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
+                    ON CONFLICT (scope_user_id, chat_id) DO UPDATE
+                    SET updated_at = EXCLUDED.updated_at,
+                        deleted_at = NULL,
+                        last_message_preview = CASE
+                            WHEN EXCLUDED.last_message_preview <> '' THEN EXCLUDED.last_message_preview
+                            ELSE user_chat_sessions.last_message_preview
+                        END
+                    WHERE user_chat_sessions.scope_user_id = EXCLUDED.scope_user_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                    "title": "New Chat" if scope_chat_id == "default" else f"Chat {scope_chat_id[:8]}",
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_message_preview": preview,
+                },
+            )
+
+    def _maybe_autotitle_chat_session(self, *, user_id: int, chat_id: str, user_message: str) -> None:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        if not user_message.strip():
+            return
+
+        compact = re.sub(r"\s+", " ", user_message).strip()
+        title = compact[:60].strip(" .,:;!?-") or "New Chat"
+        if len(compact) > 60:
+            title = f"{title}..."
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE user_chat_sessions
+                    SET title = :title,
+                        updated_at = :updated_at
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                      AND (
+                        title = 'New Chat'
+                        OR title = ('Chat ' || left(chat_id, 8))
+                      )
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                    "title": title,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+
+    def list_chat_sessions(self, *, user_id: int, include_deleted: bool = False) -> list[ChatSessionSummary]:
+        self._touch_chat_session(user_id=user_id, chat_id="default")
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        s.chat_id,
+                        s.title,
+                        s.created_at::text AS created_at,
+                        s.updated_at::text AS updated_at,
+                        s.deleted_at::text AS deleted_at,
+                        s.last_message_preview,
+                        COALESCE(m.message_count, 0) AS message_count
+                    FROM user_chat_sessions AS s
+                    LEFT JOIN (
+                        SELECT scope_user_id, scope_chat_id, COUNT(*) AS message_count
+                        FROM group_messages
+                        WHERE scope_user_id = :scope_user_id
+                        GROUP BY scope_user_id, scope_chat_id
+                    ) AS m
+                      ON m.scope_user_id = s.scope_user_id
+                     AND m.scope_chat_id = s.chat_id
+                    WHERE s.scope_user_id = :scope_user_id
+                      AND (:include_deleted OR s.deleted_at IS NULL)
+                    ORDER BY s.updated_at DESC
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "include_deleted": bool(include_deleted),
+                },
+            ).mappings().all()
+
+        sessions: list[ChatSessionSummary] = []
+        for row in rows:
+            chat_id = _normalize_scope_chat_id(str(row.get("chat_id") or "default"))
+            title = str(row.get("title") or "").strip() or ("New Chat" if chat_id == "default" else f"Chat {chat_id[:8]}")
+            sessions.append(
+                ChatSessionSummary(
+                    chat_id=chat_id,
+                    title=title,
+                    created_at=str(row.get("created_at") or ""),
+                    updated_at=str(row.get("updated_at") or ""),
+                    deleted_at=str(row.get("deleted_at") or "") or None,
+                    message_count=int(row.get("message_count") or 0),
+                    preview=str(row.get("last_message_preview") or ""),
+                )
+            )
+        return sessions
+
+    def create_chat_session(self, *, user_id: int, title: str = "") -> ChatSessionSummary:
+        now = datetime.now(UTC)
+        chat_id = f"chat_{secrets.token_hex(8)}"
+        clean_title = str(title or "").strip()[:160] or "New Chat"
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
+                    VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": chat_id,
+                    "title": clean_title,
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_message_preview": "",
+                },
+            )
+        return ChatSessionSummary(
+            chat_id=chat_id,
+            title=clean_title,
+            created_at=now.isoformat(),
+            updated_at=now.isoformat(),
+            deleted_at=None,
+            message_count=0,
+            preview="",
+        )
+
+    def rename_chat_session(self, *, user_id: int, chat_id: str, title: str) -> ChatSessionSummary:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        clean_title = str(title or "").strip()[:160]
+        if not clean_title:
+            raise HTTPException(status_code=400, detail="Title is required")
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE user_chat_sessions
+                    SET title = :title,
+                        updated_at = :updated_at
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                                            AND deleted_at IS NULL
+                    RETURNING chat_id, title, created_at::text AS created_at, updated_at::text AS updated_at, last_message_preview
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                    "title": clean_title,
+                    "updated_at": datetime.now(UTC),
+                },
+            ).mappings().first()
+            if result is None:
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+            count_row = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS c
+                    FROM group_messages
+                    WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = :scope_chat_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+
+        return ChatSessionSummary(
+            chat_id=scope_chat_id,
+            title=str(result.get("title") or clean_title),
+            created_at=str(result.get("created_at") or ""),
+            updated_at=str(result.get("updated_at") or ""),
+            deleted_at=None,
+            message_count=int((count_row or {}).get("c") or 0),
+            preview=str(result.get("last_message_preview") or ""),
+        )
+
+    def delete_chat_session(self, *, user_id: int, chat_id: str) -> None:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        if scope_chat_id == "default":
+            raise HTTPException(status_code=400, detail="Default chat cannot be deleted")
+
+        with self.engine.begin() as conn:
+            deleted = conn.execute(
+                text(
+                    """
+                    UPDATE user_chat_sessions
+                    SET deleted_at = :deleted_at,
+                        updated_at = :updated_at
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                      AND deleted_at IS NULL
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                    "deleted_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+            if (deleted.rowcount or 0) <= 0:
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+    def restore_chat_session(self, *, user_id: int, chat_id: str) -> ChatSessionSummary:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE user_chat_sessions
+                    SET deleted_at = NULL,
+                        updated_at = :updated_at
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    RETURNING chat_id, title, created_at::text AS created_at, updated_at::text AS updated_at, last_message_preview
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                    "updated_at": datetime.now(UTC),
+                },
+            ).mappings().first()
+            if result is None:
+                raise HTTPException(status_code=404, detail="Chat not found")
+
+            count_row = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS c
+                    FROM group_messages
+                    WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = :scope_chat_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+
+        return ChatSessionSummary(
+            chat_id=scope_chat_id,
+            title=str(result.get("title") or "New Chat"),
+            created_at=str(result.get("created_at") or ""),
+            updated_at=str(result.get("updated_at") or ""),
+            deleted_at=None,
+            message_count=int((count_row or {}).get("c") or 0),
+            preview=str(result.get("last_message_preview") or ""),
+        )
+
+    def purge_chat_session(self, *, user_id: int, chat_id: str) -> None:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        if scope_chat_id == "default":
+            raise HTTPException(status_code=400, detail="Default chat cannot be purged")
+
+        with self.engine.begin() as conn:
+            session_row = conn.execute(
+                text(
+                    """
+                    SELECT deleted_at
+                    FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+            if session_row is None:
+                raise HTTPException(status_code=404, detail="Chat not found")
+            if session_row.get("deleted_at") is None:
+                raise HTTPException(status_code=400, detail="Only trashed chats can be purged")
+
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM group_messages
+                    WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = :scope_chat_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "scope_chat_id": scope_chat_id,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                },
+            )
+
+    def purge_all_trashed_chats(self, *, user_id: int) -> int:
+        with self.engine.begin() as conn:
+            trashed_rows = conn.execute(
+                text(
+                    """
+                    SELECT chat_id
+                    FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND deleted_at IS NOT NULL
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                },
+            ).mappings().all()
+
+            trashed_chat_ids = [str(row.get("chat_id") or "") for row in trashed_rows if str(row.get("chat_id") or "")]
+            if not trashed_chat_ids:
+                return 0
+
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM group_messages
+                    WHERE scope_user_id = :scope_user_id
+                      AND scope_chat_id = ANY(:chat_ids)
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_ids": trashed_chat_ids,
+                },
+            )
+            deleted = conn.execute(
+                text(
+                    """
+                    DELETE FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND deleted_at IS NOT NULL
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                },
+            )
+            return int(deleted.rowcount or 0)
+
+    def _recall_shared_memory(self, *, user_id: int, chat_id: str, query: str) -> str:
+        runtime_chat_id = _scoped_runtime_chat_id(user_id, chat_id)
         if self.long_term is None:
             return ""
 
@@ -1666,14 +2099,14 @@ class RealtimeChatHub:
             shared = self.long_term.recall(
                 org_id=USER_SCOPE_ORG_ID,
                 user_id=0,
-                chat_id=_scope_chat_id(user_id),
+                chat_id=runtime_chat_id,
                 query_text=query,
                 limit=3,
             )
             personal = self.long_term.recall(
                 org_id=USER_SCOPE_ORG_ID,
                 user_id=user_id,
-                chat_id=_scope_chat_id(user_id),
+                chat_id=runtime_chat_id,
                 query_text=query,
                 limit=3,
             )
@@ -1693,6 +2126,8 @@ class RealtimeChatHub:
         return "\n".join(lines)
 
     def send_group_chat(self, *, user_id: int, payload: ChatRequest) -> ChatResponse:
+        scope_chat_id = _normalize_scope_chat_id(payload.chat_id)
+        runtime_chat_id = _scoped_runtime_chat_id(user_id, scope_chat_id)
         org_id = USER_SCOPE_ORG_ID
         team_id = _user_scope_id(user_id)
 
@@ -1711,10 +2146,10 @@ class RealtimeChatHub:
 
         user_profile = self._user_profile_text(user_id=user_id)
         try:
-            history = self._load_group_history(user_id=user_id)
+            history = self._load_group_history(user_id=user_id, chat_id=scope_chat_id)
         except Exception:
             history = []
-        memory_context = self._recall_shared_memory(user_id=user_id, query=payload.message)
+        memory_context = self._recall_shared_memory(user_id=user_id, chat_id=scope_chat_id, query=payload.message)
         if user_profile:
             history = [{"role": "system", "content": user_profile}, *history]
         if memory_context:
@@ -1724,7 +2159,7 @@ class RealtimeChatHub:
             answer_result = self.agent.run(
                 payload.message,
                 history,
-                _scope_chat_id(user_id),
+                runtime_chat_id,
                 org_id,
                 team_id,
                 user_id,
@@ -1741,12 +2176,15 @@ class RealtimeChatHub:
         try:
             self._append_group_message(
                 user_id=user_id,
+                chat_id=scope_chat_id,
                 sender_user_id=user_id,
                 sender_type="user",
                 content=payload.message,
             )
+            self._maybe_autotitle_chat_session(user_id=user_id, chat_id=scope_chat_id, user_message=payload.message)
             self._append_group_message(
                 user_id=user_id,
+                chat_id=scope_chat_id,
                 sender_user_id=None,
                 sender_type="assistant",
                 content=answer,
@@ -1759,7 +2197,7 @@ class RealtimeChatHub:
                 self.long_term.remember(
                     org_id=org_id,
                     user_id=user_id,
-                    chat_id=_scope_chat_id(user_id),
+                    chat_id=runtime_chat_id,
                     user_text=payload.message,
                     assistant_text=answer,
                     source="api-chat",
@@ -1767,7 +2205,7 @@ class RealtimeChatHub:
                 self.long_term.remember(
                     org_id=org_id,
                     user_id=0,
-                    chat_id=_scope_chat_id(user_id),
+                    chat_id=runtime_chat_id,
                     user_text=payload.message,
                     assistant_text=answer,
                     source="api-group",
@@ -1776,7 +2214,7 @@ class RealtimeChatHub:
                 pass
 
         try:
-            messages = self._read_group_messages(user_id=user_id)
+            messages = self._read_group_messages(user_id=user_id, chat_id=scope_chat_id)
         except Exception:
             now_iso = datetime.now(UTC).isoformat()
             messages = [
@@ -1793,7 +2231,7 @@ class RealtimeChatHub:
                     created_at=now_iso,
                 ),
             ]
-        return ChatResponse(answer=answer, messages=messages)
+        return ChatResponse(answer=answer, messages=messages, chat_id=scope_chat_id)
 
     def _user_profile_text(self, *, user_id: int) -> str:
         with self.engine.begin() as conn:
@@ -1864,12 +2302,14 @@ def _legacy_scope_removed() -> NoReturn:
 def _build_chat_snapshot_payload(
     *,
     user_id: int,
+    chat_id: str,
     messages: Sequence[ChatMessage],
     client_message_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": "chat.snapshot",
         "user_id": int(user_id),
+        "chat_id": _normalize_scope_chat_id(chat_id),
         "messages": [message.model_dump() for message in messages],
     }
     if client_message_id:
@@ -2155,6 +2595,7 @@ async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
     response = service.send_group_chat(user_id=current_user_id, payload=payload)
     snapshot_payload = _build_chat_snapshot_payload(
         user_id=current_user_id,
+        chat_id=response.chat_id,
         messages=response.messages,
     )
     await chat_hub.publish_snapshot(snapshot_payload)
@@ -2162,8 +2603,51 @@ async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
 
 
 @app.get("/api/v1/chat/messages")
-def chat_messages(user: CurrentUser) -> list[ChatMessage]:
-    return service._read_group_messages(user_id=int(user["user_id"]))
+def chat_messages(user: CurrentUser, chat_id: str = "default") -> list[ChatMessage]:
+    return service._read_group_messages(user_id=int(user["user_id"]), chat_id=chat_id)
+
+
+@app.get("/api/v1/chat/sessions")
+def chat_sessions(user: CurrentUser, include_deleted: bool = False) -> ChatSessionListResponse:
+    sessions = service.list_chat_sessions(user_id=int(user["user_id"]), include_deleted=include_deleted)
+    return ChatSessionListResponse(sessions=sessions)
+
+
+@app.post("/api/v1/chat/sessions")
+def chat_session_create(payload: ChatSessionCreateRequest, user: CurrentUser) -> ChatSessionSummary:
+    return service.create_chat_session(user_id=int(user["user_id"]), title=payload.title)
+
+
+@app.patch("/api/v1/chat/sessions/{chat_id}")
+def chat_session_rename(chat_id: str, payload: ChatSessionUpdateRequest, user: CurrentUser) -> ChatSessionSummary:
+    return service.rename_chat_session(
+        user_id=int(user["user_id"]),
+        chat_id=chat_id,
+        title=payload.title,
+    )
+
+
+@app.delete("/api/v1/chat/sessions/{chat_id}")
+def chat_session_delete(chat_id: str, user: CurrentUser) -> dict[str, str]:
+    service.delete_chat_session(user_id=int(user["user_id"]), chat_id=chat_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/chat/sessions/{chat_id}/restore")
+def chat_session_restore(chat_id: str, user: CurrentUser) -> ChatSessionSummary:
+    return service.restore_chat_session(user_id=int(user["user_id"]), chat_id=chat_id)
+
+
+@app.delete("/api/v1/chat/sessions/{chat_id}/purge")
+def chat_session_purge(chat_id: str, user: CurrentUser) -> dict[str, str]:
+    service.purge_chat_session(user_id=int(user["user_id"]), chat_id=chat_id)
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/chat/sessions/trash/purge")
+def chat_sessions_trash_purge(user: CurrentUser) -> dict[str, int]:
+    purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
+    return {"purged": purged}
 
 
 @app.websocket("/api/v1/chat/ws")
@@ -2190,10 +2674,12 @@ async def chat_websocket(websocket: WebSocket) -> None:
 
             if action == "subscribe":
                 current_user_id = int(current_user["user_id"])
+                subscribe_chat_id = _normalize_scope_chat_id(str(incoming.get("chat_id") or "default"))
                 await chat_hub.register_scope(websocket, current_user_id)
                 snapshot = _build_chat_snapshot_payload(
                     user_id=current_user_id,
-                    messages=service._read_group_messages(user_id=current_user_id),
+                    chat_id=subscribe_chat_id,
+                    messages=service._read_group_messages(user_id=current_user_id, chat_id=subscribe_chat_id),
                 )
                 await websocket.send_json(snapshot)
                 continue
@@ -2212,6 +2698,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
                         user_id=current_user_id,
                         payload=ChatRequest(
                             message=request.message,
+                            chat_id=request.chat_id,
                         ),
                     )
                 except HTTPException:
@@ -2220,6 +2707,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
 
                 snapshot = _build_chat_snapshot_payload(
                     user_id=current_user_id,
+                    chat_id=response.chat_id,
                     messages=response.messages,
                     client_message_id=request.client_message_id,
                 )

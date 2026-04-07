@@ -5,6 +5,11 @@ import remarkGfm from "remark-gfm";
 
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
+const DEFAULT_CHAT_ID = "default";
+
+function ExternalLink(props) {
+  return <a {...props} target="_blank" rel="noreferrer noopener" />;
+}
 
 function readStoredToken() {
   try {
@@ -56,6 +61,24 @@ function normalizeMessages(items) {
     .filter((item) => item.content.trim().length > 0);
 }
 
+function normalizeSessions(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .map((item) => ({
+      chat_id: String(item?.chat_id || "").trim(),
+      title: String(item?.title || "New Chat").trim() || "New Chat",
+      created_at: String(item?.created_at || new Date().toISOString()),
+      updated_at: String(item?.updated_at || new Date().toISOString()),
+      deleted_at: item?.deleted_at ? String(item.deleted_at) : null,
+      message_count: Number(item?.message_count || 0),
+      preview: String(item?.preview || "").trim(),
+    }))
+    .filter((item) => item.chat_id.length > 0)
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+}
+
 function App() {
   const [mode, setMode] = useState("login");
   const [registerForm, setRegisterForm] = useState(DEFAULT_REGISTER_FORM);
@@ -66,15 +89,36 @@ function App() {
   const [isBusy, setIsBusy] = useState(false);
   const [wsStatus, setWsStatus] = useState("offline");
 
+  const [chatSessions, setChatSessions] = useState([]);
+  const [activeChatId, setActiveChatId] = useState(DEFAULT_CHAT_ID);
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashCount, setTrashCount] = useState(0);
+  const [menuChatId, setMenuChatId] = useState("");
+  const [editingChatId, setEditingChatId] = useState("");
+  const [editingTitle, setEditingTitle] = useState("");
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
 
   const wsRef = useRef(null);
   const wsRetryTimerRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const activeChatIdRef = useRef(DEFAULT_CHAT_ID);
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
+
+  function performSessionLogout(reason = "Session expired. Please sign in again.") {
+    closeSocket();
+    writeStoredToken("");
+    setToken("");
+    setChatSessions([]);
+    setTrashCount(0);
+    setActiveChatId(DEFAULT_CHAT_ID);
+    setMessages([]);
+    setDraft("");
+    setWsStatus("offline");
+    setStatus(reason);
+  }
 
   async function request(path, options = {}, withAuth = true) {
     const timeoutMs = Number(options.timeoutMs || 20000);
@@ -112,6 +156,9 @@ function App() {
       }
 
       if (!response.ok) {
+        if (withAuth && response.status === 401) {
+          performSessionLogout("Session expired. Please sign in again.");
+        }
         const details = parseApiError(payload) || response.statusText || "Request failed";
         throw new Error(details);
       }
@@ -139,18 +186,231 @@ function App() {
       const normalized = explicit.replace(/\/$/, "");
       return `${normalized}/chat/ws?token=${encodeURIComponent(token)}`;
     }
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = window.location.host;
+    const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = globalThis.location.host;
     return `${protocol}//${host}/api/v1/chat/ws?token=${encodeURIComponent(token)}`;
   }
 
-  async function fetchMessages() {
+  async function fetchChatSessions(includeDeleted = showTrash) {
+    if (!isAuthenticated) {
+      setChatSessions([]);
+      return [];
+    }
+    try {
+      const payload = await request(`/chat/sessions?include_deleted=${includeDeleted ? "true" : "false"}`, { timeoutMs: 15000 });
+      const sessions = normalizeSessions(payload?.sessions);
+      setChatSessions(sessions);
+      if (includeDeleted) {
+        setTrashCount(sessions.filter((item) => Boolean(item.deleted_at)).length);
+      }
+      return sessions;
+    } catch (error) {
+      setStatus(`Failed to load chats: ${error.message}`);
+      return [];
+    }
+  }
+
+  async function createChatSession() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const payload = await request("/chat/sessions", {
+        method: "POST",
+        body: JSON.stringify({ title: "" }),
+        timeoutMs: 15000,
+      });
+      const nextChatId = String(payload?.chat_id || "").trim();
+      if (!nextChatId) {
+        throw new Error("Empty chat id returned");
+      }
+      await fetchChatSessions(false);
+      setShowTrash(false);
+      setActiveChatId(nextChatId);
+      setStatus("New chat created.");
+    } catch (error) {
+      setStatus(`Failed to create chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function startInlineRename(chatId, title) {
+    const target = String(chatId || "").trim();
+    if (!target) {
+      return;
+    }
+    setMenuChatId("");
+    setEditingChatId(target);
+    setEditingTitle(String(title || "").trim());
+  }
+
+  function cancelInlineRename() {
+    setEditingChatId("");
+    setEditingTitle("");
+  }
+
+  async function renameChatSession(chatId, rawTitle) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const target = String(chatId || "").trim();
+    if (!target) {
+      return;
+    }
+    const cleanTitle = String(rawTitle || "").trim();
+    if (!cleanTitle) {
+      setStatus("Title cannot be empty.");
+      return;
+    }
+    setIsBusy(true);
+    try {
+      await request(`/chat/sessions/${encodeURIComponent(target)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: cleanTitle }),
+        timeoutMs: 15000,
+      });
+      await fetchChatSessions(showTrash);
+      cancelInlineRename();
+      setStatus("Chat renamed.");
+    } catch (error) {
+      setStatus(`Failed to rename chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function deleteChatSession(chatId) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const target = String(chatId || "").trim();
+    if (!target || target === DEFAULT_CHAT_ID) {
+      return;
+    }
+    if (!globalThis.confirm("Move this chat to Trash?")) {
+      return;
+    }
+    setMenuChatId("");
+    setIsBusy(true);
+    try {
+      await request(`/chat/sessions/${encodeURIComponent(target)}`, {
+        method: "DELETE",
+        timeoutMs: 15000,
+      });
+      const sessions = await fetchChatSessions(showTrash);
+      if (!showTrash) {
+        setTrashCount((prev) => prev + 1);
+      }
+      if (activeChatIdRef.current === target) {
+        const fallback = sessions[0]?.chat_id || DEFAULT_CHAT_ID;
+        setActiveChatId(fallback);
+      }
+      setStatus("Chat moved to Trash.");
+    } catch (error) {
+      setStatus(`Failed to delete chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function restoreChatSession(chatId) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const target = String(chatId || "").trim();
+    if (!target) {
+      return;
+    }
+    setMenuChatId("");
+    setIsBusy(true);
+    try {
+      await request(`/chat/sessions/${encodeURIComponent(target)}/restore`, {
+        method: "POST",
+        timeoutMs: 15000,
+      });
+      const sessions = await fetchChatSessions(true);
+      setChatSessions(sessions);
+      setStatus("Chat restored.");
+    } catch (error) {
+      setStatus(`Failed to restore chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function purgeChatSession(chatId) {
+    if (!isAuthenticated) {
+      return;
+    }
+    const target = String(chatId || "").trim();
+    if (!target || target === DEFAULT_CHAT_ID) {
+      return;
+    }
+    if (!globalThis.confirm("Purge chat permanently? This cannot be undone.")) {
+      return;
+    }
+
+    setMenuChatId("");
+    setIsBusy(true);
+    try {
+      await request(`/chat/sessions/${encodeURIComponent(target)}/purge`, {
+        method: "DELETE",
+        timeoutMs: 15000,
+      });
+      const sessions = await fetchChatSessions(true);
+      if (activeChatIdRef.current === target) {
+        const fallback = sessions[0]?.chat_id || DEFAULT_CHAT_ID;
+        setActiveChatId(fallback);
+      }
+      setStatus("Chat purged permanently.");
+    } catch (error) {
+      setStatus(`Failed to purge chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function purgeAllTrashedChats() {
+    if (!isAuthenticated) {
+      return;
+    }
+    if (!globalThis.confirm("Purge all chats from Trash permanently? This cannot be undone.")) {
+      return;
+    }
+
+    setMenuChatId("");
+    setIsBusy(true);
+    try {
+      const payload = await request("/chat/sessions/trash/purge", {
+        method: "DELETE",
+        timeoutMs: 15000,
+      });
+      const purgedCount = Number(payload?.purged || 0);
+      const sessions = await fetchChatSessions(true);
+      if (showTrash) {
+        const hasActive = sessions.some((item) => item.chat_id === activeChatIdRef.current);
+        if (!hasActive) {
+          setActiveChatId(DEFAULT_CHAT_ID);
+        }
+      }
+      setStatus(`Purged ${purgedCount} chats from Trash.`);
+    } catch (error) {
+      setStatus(`Failed to purge trash: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function fetchMessages(chatId = activeChatIdRef.current) {
     if (!isAuthenticated) {
       setMessages([]);
       return;
     }
     try {
-      const payload = await request("/chat/messages", { timeoutMs: 15000 });
+      const safeChatId = String(chatId || DEFAULT_CHAT_ID).trim() || DEFAULT_CHAT_ID;
+      const payload = await request(`/chat/messages?chat_id=${encodeURIComponent(safeChatId)}`, { timeoutMs: 15000 });
       setMessages(normalizeMessages(payload));
     } catch (error) {
       setStatus(`Failed to load messages: ${error.message}`);
@@ -159,7 +419,9 @@ function App() {
 
   async function sendMessage(rawText) {
     const text = String(rawText || "").trim();
-    if (!text || !isAuthenticated) {
+    const selected = chatSessions.find((session) => session.chat_id === activeChatIdRef.current);
+    const deletedSelected = Boolean(selected?.deleted_at);
+    if (!text || !isAuthenticated || showTrash || deletedSelected) {
       return;
     }
 
@@ -176,20 +438,27 @@ function App() {
 
     try {
       const socket = wsRef.current;
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ action: "send", message: text }));
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            action: "send",
+            chat_id: activeChatIdRef.current,
+            message: text,
+          })
+        );
       } else {
         const payload = await request("/chat/send", {
           method: "POST",
-          body: JSON.stringify({ message: text }),
+          body: JSON.stringify({ message: text, chat_id: activeChatIdRef.current }),
           timeoutMs: 45000,
         });
         setMessages(normalizeMessages(payload?.messages));
       }
+      await fetchChatSessions();
       setStatus("Assistant responded.");
     } catch (error) {
       setStatus(`Message failed: ${error.message}`);
-      await fetchMessages();
+      await fetchMessages(activeChatIdRef.current);
     } finally {
       setIsBusy(false);
     }
@@ -244,13 +513,7 @@ function App() {
   }
 
   function logout() {
-    closeSocket();
-    writeStoredToken("");
-    setToken("");
-    setMessages([]);
-    setDraft("");
-    setWsStatus("offline");
-    setStatus("Signed out.");
+    performSessionLogout("Signed out.");
   }
 
   useEffect(() => {
@@ -260,7 +523,22 @@ function App() {
       return undefined;
     }
 
-    fetchMessages();
+    const bootstrap = async () => {
+      const sessions = await fetchChatSessions(false);
+      if (!sessions.length) {
+        setActiveChatId(DEFAULT_CHAT_ID);
+        activeChatIdRef.current = DEFAULT_CHAT_ID;
+        await fetchMessages(DEFAULT_CHAT_ID);
+        return;
+      }
+
+      const hasCurrent = sessions.some((session) => session.chat_id === activeChatIdRef.current);
+      const nextActive = hasCurrent ? activeChatIdRef.current : sessions[0].chat_id;
+      setActiveChatId(nextActive);
+      activeChatIdRef.current = nextActive;
+      await fetchMessages(nextActive);
+    };
+    void bootstrap();
 
     let disposed = false;
     function connect() {
@@ -286,7 +564,12 @@ function App() {
           return;
         }
         setWsStatus("online");
-        socket.send(JSON.stringify({ action: "subscribe" }));
+        socket.send(
+          JSON.stringify({
+            action: "subscribe",
+            chat_id: activeChatIdRef.current,
+          })
+        );
       };
 
       socket.onmessage = (event) => {
@@ -297,12 +580,21 @@ function App() {
           return;
         }
         if (payload?.type === "chat.snapshot") {
+          const snapshotChatId = String(payload?.chat_id || DEFAULT_CHAT_ID).trim() || DEFAULT_CHAT_ID;
+          if (snapshotChatId !== activeChatIdRef.current) {
+            return;
+          }
           setMessages(normalizeMessages(payload.messages));
+          void fetchChatSessions(showTrash);
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (disposed) {
+          return;
+        }
+        if (event?.code === 4401) {
+          performSessionLogout("Session expired. Please sign in again.");
           return;
         }
         setWsStatus("offline");
@@ -322,7 +614,28 @@ function App() {
       disposed = true;
       closeSocket();
     };
-  }, [isAuthenticated, token]);
+  }, [isAuthenticated, token, showTrash]);
+
+  useEffect(() => {
+    activeChatIdRef.current = String(activeChatId || DEFAULT_CHAT_ID).trim() || DEFAULT_CHAT_ID;
+  }, [activeChatId]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    void fetchMessages(activeChatIdRef.current);
+
+    const socket = wsRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(
+        JSON.stringify({
+          action: "subscribe",
+          chat_id: activeChatIdRef.current,
+        })
+      );
+    }
+  }, [activeChatId, isAuthenticated]);
 
   useEffect(() => {
     if (!messagesEndRef.current) {
@@ -337,6 +650,10 @@ function App() {
       void sendMessage(draft);
     }
   }
+
+  const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
+  const isActiveDeleted = Boolean(activeSession?.deleted_at);
+  const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted;
 
   if (!isAuthenticated) {
     return (
@@ -388,46 +705,176 @@ function App() {
           </div>
         </header>
 
-        <section className="messages-card card">
-          <div className="messages-list" role="log" aria-live="polite">
-            {messages.length === 0 ? <div className="empty">No messages yet.</div> : null}
-            {messages.map((item, index) => (
-              <div key={`${item.created_at}-${index}`} className={`message ${item.sender_type === "assistant" ? "assistant" : "user"}`}>
-                <div className="meta">
-                  <span className="sender">{item.sender_type}</span>
-                  <span>{new Date(item.created_at).toLocaleString()}</span>
-                </div>
-                {item.sender_type === "assistant" ? (
-                  <div className="message-content markdown-content">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeHighlight]}
-                      components={{
-                        a: ({ node, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener" />,
-                      }}
-                    >
-                      {item.content}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <p>{item.content}</p>
-                )}
+        <section className="chat-layout">
+          <aside className="chat-history card">
+            <div className="chat-history-top">
+              <div className="chat-mode-tabs">
+                <button
+                  type="button"
+                  className={showTrash ? "ghost chat-action" : "secondary chat-action"}
+                  onClick={() => {
+                    setShowTrash(false);
+                    setMenuChatId("");
+                  }}
+                >
+                  Chats
+                </button>
+                <button
+                  type="button"
+                  className={showTrash ? "secondary chat-action" : "ghost chat-action"}
+                  onClick={() => {
+                    setShowTrash(true);
+                    setMenuChatId("");
+                  }}
+                >
+                  Trash {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
+                </button>
               </div>
-            ))}
-            {isBusy ? <div className="typing">Assistant is thinking...</div> : null}
-            <div ref={messagesEndRef} />
-          </div>
-        </section>
-
-        <section className="composer card">
-          <textarea rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a task for your assistant" />
-          <div className="composer-row">
-            <div className="compose-hint">Enter - send, Shift+Enter - new line</div>
-            <div className="composer-actions">
-              <button className="primary" type="button" disabled={isBusy || !draft.trim()} onClick={() => void sendMessage(draft)}>
-                {isBusy ? "Sending..." : "Send"}
-              </button>
+              {showTrash ? null : (
+                <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession()}>
+                  New
+                </button>
+              )}
+              {showTrash ? (
+                <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || chatSessions.length === 0} onClick={() => void purgeAllTrashedChats()}>
+                  Purge All
+                </button>
+              ) : null}
             </div>
+
+            <div className="chat-history-list" aria-label="Chat sessions">
+              {chatSessions.length === 0 ? <div className="empty">No chats yet.</div> : null}
+              {chatSessions.map((session) => {
+                const canDelete = session.chat_id !== DEFAULT_CHAT_ID;
+                const isEditing = session.chat_id === editingChatId;
+                const isDeleted = Boolean(session.deleted_at);
+                return (
+                  <div key={session.chat_id} className={session.chat_id === activeChatId ? "chat-session chat-session-active" : "chat-session"}>
+                    <button
+                      type="button"
+                      className="chat-session-open"
+                      disabled={isDeleted}
+                      onClick={() => setActiveChatId(session.chat_id)}
+                      onDoubleClick={() => startInlineRename(session.chat_id, session.title)}
+                    >
+                      {isEditing ? (
+                        <input
+                          className="chat-title-input"
+                          value={editingTitle}
+                          autoFocus
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => setEditingTitle(event.target.value)}
+                          onBlur={() => {
+                            if (!editingTitle.trim()) {
+                              cancelInlineRename();
+                              return;
+                            }
+                            void renameChatSession(session.chat_id, editingTitle);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              cancelInlineRename();
+                              return;
+                            }
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void renameChatSession(session.chat_id, editingTitle);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <strong>{session.title}</strong>
+                      )}
+                      <span>{session.preview || "No messages yet"}</span>
+                      <em>
+                        {session.message_count} msgs · {new Date(session.updated_at).toLocaleString()}
+                      </em>
+                    </button>
+                    <div className="chat-session-actions">
+                      <button
+                        className="ghost chat-action"
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => setMenuChatId((prev) => (prev === session.chat_id ? "" : session.chat_id))}
+                      >
+                        ...
+                      </button>
+                      {menuChatId === session.chat_id ? (
+                        <div className="chat-session-menu">
+                          {isDeleted ? (
+                            <>
+                              <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => void restoreChatSession(session.chat_id)}>
+                                Restore
+                              </button>
+                              <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void purgeChatSession(session.chat_id)}>
+                                Purge
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => startInlineRename(session.chat_id, session.title)}>
+                                Rename
+                              </button>
+                              {canDelete ? (
+                                <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void deleteChatSession(session.chat_id)}>
+                                  Move to Trash
+                                </button>
+                              ) : null}
+                            </>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </aside>
+
+          <div className="chat-main">
+            <section className="messages-card card">
+              <div className="messages-list" role="log" aria-live="polite">
+                {messages.length === 0 ? <div className="empty">No messages yet.</div> : null}
+                {messages.map((item, index) => (
+                  <div key={`${item.created_at}-${index}`} className={`message ${item.sender_type === "assistant" ? "assistant" : "user"}`}>
+                    <div className="meta">
+                      <span className="sender">{item.sender_type}</span>
+                      <span>{new Date(item.created_at).toLocaleString()}</span>
+                    </div>
+                    {item.sender_type === "assistant" ? (
+                      <div className="message-content markdown-content">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[rehypeHighlight]}
+                          components={{
+                            a: ExternalLink,
+                          }}
+                        >
+                          {item.content}
+                        </ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p>{item.content}</p>
+                    )}
+                  </div>
+                ))}
+                {isBusy ? <div className="typing">Assistant is thinking...</div> : null}
+                <div ref={messagesEndRef} />
+              </div>
+            </section>
+
+            <section className="composer card">
+              <textarea rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a task for your assistant" />
+              {showTrash || isActiveDeleted ? <div className="compose-hint">Messaging is disabled in Trash view. Restore a chat or switch to active chats.</div> : null}
+              <div className="composer-row">
+                <div className="compose-hint">Enter - send, Shift+Enter - new line</div>
+                <div className="composer-actions">
+                  <button className="primary" type="button" disabled={isComposeDisabled} onClick={() => void sendMessage(draft)}>
+                    {isBusy ? "Sending..." : "Send"}
+                  </button>
+                </div>
+              </div>
+            </section>
           </div>
         </section>
 
