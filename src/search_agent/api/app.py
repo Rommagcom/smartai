@@ -903,7 +903,7 @@ class RealtimeChatHub:
                     },
                 )
             force_change = bool(row.get("force_password_change")) if supports_otp else False
-            if supports_policy and self._is_password_age_expired(row.get("password_changed_at")):
+            if supports_policy and type(self)._is_password_age_expired(row.get("password_changed_at")):
                 force_change = True
                 if supports_otp:
                     conn.execute(
@@ -951,7 +951,7 @@ class RealtimeChatHub:
                 raise HTTPException(status_code=401, detail="Token expired")
         result = dict(row)
         force_change = bool(result.get("force_password_change"))
-        if supports_policy and self._is_password_age_expired(result.get("password_changed_at")):
+        if supports_policy and type(self)._is_password_age_expired(result.get("password_changed_at")):
             force_change = True
         result["force_password_change"] = force_change
         return result
