@@ -2830,7 +2830,12 @@ def grant_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.grant_skill(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        payload=SkillAssignmentRequest(org_id=USER_SCOPE_ORG_ID, tool_name=payload.tool_name),
+    )
+    return {"status": "ok"}
 
 
 @app.post(
@@ -2842,16 +2847,25 @@ def revoke_skill(
     payload: SkillAssignmentRequest,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    _legacy_scope_removed()
+    removed = service.revoke_skill(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        payload=SkillAssignmentRequest(org_id=USER_SCOPE_ORG_ID, tool_name=payload.tool_name),
+    )
+    return {"status": "ok", "removed": removed}
 
 
 @app.get("/api/v1/admin/users/{target_user_id}/skills", responses={403: {"description": "Admin access required"}})
 def list_user_skills(
     target_user_id: int,
-    org_id: str,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    _legacy_scope_removed()
+    skills = service.list_user_skills(
+        actor_user_id=int(user["user_id"]),
+        target_user_id=target_user_id,
+        org_id=USER_SCOPE_ORG_ID,
+    )
+    return {"org_id": USER_SCOPE_ORG_ID, "skills": skills}
 
 
 @app.get("/api/v1/admin/skills", responses={403: {"description": "Admin access required"}})

@@ -179,6 +179,12 @@ function App() {
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillsRole, setSkillsRole] = useState("member");
   const [userSkills, setUserSkills] = useState([]);
+  const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [adminAllSkills, setAdminAllSkills] = useState([]);
+  const [adminTargetUserId, setAdminTargetUserId] = useState(0);
+  const [adminAssignedSkills, setAdminAssignedSkills] = useState([]);
+  const [adminUserQuery, setAdminUserQuery] = useState("");
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -205,6 +211,12 @@ function App() {
     setSkillsOpen(false);
     setUserSkills([]);
     setSkillsRole("member");
+    setAdminSkillsOpen(false);
+    setAdminUsers([]);
+    setAdminAllSkills([]);
+    setAdminTargetUserId(0);
+    setAdminAssignedSkills([]);
+    setAdminUserQuery("");
     setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
@@ -363,6 +375,77 @@ function App() {
       setSkillsOpen(true);
     } catch (error) {
       setStatus(`Failed to load skills: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function loadAdminUserSkills(targetUserId) {
+    const selectedUserId = Number(targetUserId || 0);
+    if (!selectedUserId) {
+      setAdminAssignedSkills([]);
+      return;
+    }
+    const payload = await request(`/admin/users/${selectedUserId}/skills`, { timeoutMs: 15000 });
+    setAdminAssignedSkills(Array.isArray(payload?.skills) ? payload.skills.map((item) => String(item || "")).filter(Boolean) : []);
+  }
+
+  async function openAdminSkillsManager() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const usersPayload = await request("/admin/users/all", { timeoutMs: 15000 });
+      const skillsPayload = await request("/admin/skills", { timeoutMs: 15000 });
+      const users = Array.isArray(usersPayload)
+        ? usersPayload.map((item) => ({
+            user_id: Number(item?.user_id || 0),
+            email: String(item?.email || ""),
+            full_name: String(item?.full_name || "").trim() || String(item?.email || ""),
+          })).filter((item) => item.user_id > 0)
+        : [];
+      const allSkills = Array.isArray(skillsPayload?.skills)
+        ? skillsPayload.skills.map((item) => ({
+            tool_name: String(item?.tool_name || "").trim(),
+            description: String(item?.description || "").trim(),
+          })).filter((item) => item.tool_name)
+        : [];
+
+      setAdminUsers(users);
+      setAdminAllSkills(allSkills);
+      setAdminUserQuery("");
+      const firstUserId = users[0]?.user_id || 0;
+      setAdminTargetUserId(firstUserId);
+      await loadAdminUserSkills(firstUserId);
+      setAdminSkillsOpen(true);
+    } catch (error) {
+      setStatus(`Failed to load admin skills manager: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function toggleAdminSkill(skillName, shouldEnable) {
+    const selectedUserId = Number(adminTargetUserId || 0);
+    const normalizedSkill = String(skillName || "").trim();
+    if (!selectedUserId || !normalizedSkill) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      await request(`/admin/users/${selectedUserId}/skills/${shouldEnable ? "grant" : "revoke"}`, {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: "user",
+          tool_name: normalizedSkill,
+        }),
+        timeoutMs: 15000,
+      });
+      await loadAdminUserSkills(selectedUserId);
+      setStatus(shouldEnable ? "Skill granted." : "Skill revoked.");
+    } catch (error) {
+      setStatus(`Failed to update skill: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
@@ -723,6 +806,7 @@ function App() {
     setPasswordForm(DEFAULT_PASSWORD_FORM);
     setSkillsOpen(false);
     setUserSkills([]);
+    setAdminSkillsOpen(false);
   }
 
   useEffect(() => {
@@ -873,6 +957,37 @@ function App() {
     }
   }, [forcePasswordChange]);
 
+  const filteredAdminUsers = useMemo(() => {
+    const query = String(adminUserQuery || "").trim().toLowerCase();
+    if (!query) {
+      return adminUsers;
+    }
+    return adminUsers.filter((item) => {
+      const fullName = String(item?.full_name || "").toLowerCase();
+      const email = String(item?.email || "").toLowerCase();
+      return fullName.includes(query) || email.includes(query);
+    });
+  }, [adminUsers, adminUserQuery]);
+
+  useEffect(() => {
+    if (!adminSkillsOpen) {
+      return;
+    }
+    if (!filteredAdminUsers.length) {
+      if (adminTargetUserId) {
+        setAdminTargetUserId(0);
+        setAdminAssignedSkills([]);
+      }
+      return;
+    }
+    const hasCurrent = filteredAdminUsers.some((item) => item.user_id === Number(adminTargetUserId || 0));
+    if (!hasCurrent) {
+      const nextUserId = Number(filteredAdminUsers[0]?.user_id || 0);
+      setAdminTargetUserId(nextUserId);
+      void loadAdminUserSkills(nextUserId);
+    }
+  }, [adminSkillsOpen, filteredAdminUsers, adminTargetUserId]);
+
   function onComposerKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -932,6 +1047,7 @@ function App() {
           <div className="top-actions">
             <span className="pane-topbar-text">Realtime: {wsStatus}</span>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
             <button className="ghost" type="button" onClick={logout}>Logout</button>
@@ -1147,6 +1263,69 @@ function App() {
             <div className="top-actions">
               <button className="ghost" type="button" onClick={() => setSkillsOpen(false)}>Close</button>
               <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Refresh</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {adminSkillsOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setAdminSkillsOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin skills manager" onClick={(event) => event.stopPropagation()}>
+            <h2>Admin Skills Manager</h2>
+            <div className="context-grid profile-grid">
+              <label>
+                Search user
+                <input
+                  value={adminUserQuery}
+                  placeholder="Name or email"
+                  onChange={(event) => setAdminUserQuery(event.target.value)}
+                />
+              </label>
+              <label>
+                User
+                <select
+                  value={adminTargetUserId || 0}
+                  onChange={(event) => {
+                    const nextUserId = Number(event.target.value || 0);
+                    setAdminTargetUserId(nextUserId);
+                    void loadAdminUserSkills(nextUserId);
+                  }}
+                >
+                  {filteredAdminUsers.length === 0 ? <option value={0}>No users found</option> : null}
+                  {filteredAdminUsers.map((item) => (
+                    <option key={item.user_id} value={item.user_id}>
+                      {item.full_name} ({item.email})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>Available: {adminAllSkills.length}</span>
+                <span>Assigned: {adminAssignedSkills.length}</span>
+              </div>
+              <div className="skills-grid">
+                {adminAllSkills.length === 0 ? <div className="empty">No dynamic skills found.</div> : null}
+                {adminAllSkills.map((item) => {
+                  const isChecked = adminAssignedSkills.includes(item.tool_name);
+                  return (
+                    <label key={item.tool_name} className="skill-item">
+                      <span title={item.description || item.tool_name}>{item.tool_name}</span>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        disabled={isBusy || !adminTargetUserId}
+                        onChange={(event) => void toggleAdminSkill(item.tool_name, event.target.checked)}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setAdminSkillsOpen(false)}>Close</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Reload</button>
             </div>
           </div>
         </div>
