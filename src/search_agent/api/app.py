@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, Sequence
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 from redis import asyncio as redis_async
 from sqlalchemy import create_engine, text
@@ -30,6 +30,8 @@ TOKEN_TTL_HOURS = 24
 PBKDF2_ITERATIONS = 120_000
 GROUP_SHORT_MEMORY_LIMIT = 20
 USER_SCOPE_ORG_ID = "user"
+PASSWORD_MAX_AGE_DAYS = 90
+PASSWORD_HISTORY_SIZE = 3
 _SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
 
 
@@ -284,10 +286,25 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_at: str
+    force_password_change: bool = False
 
 
 class TelegramLinkRequest(BaseModel):
     telegram_id: int
+
+
+class UserProfileUpdateRequest(BaseModel):
+    full_name: str = Field(min_length=1, max_length=200)
+    title: str = Field(default="", max_length=200)
+    profile_bio: str = Field(default="", max_length=2000)
+
+
+class UserProfileResponse(BaseModel):
+    user_id: int
+    email: str
+    full_name: str
+    title: str
+    profile_bio: str
 
 
 class CreateOrgRequest(BaseModel):
@@ -434,6 +451,10 @@ class DynamicSkillSummary(BaseModel):
 
 class DynamicSkillListResponse(BaseModel):
     skills: list[DynamicSkillSummary]
+
+class UserSkillListResponse(BaseModel):
+    role: str
+    skills: list[str]
 
 
 class BulkClaudeConvertItem(BaseModel):
@@ -635,9 +656,42 @@ class RealtimeChatHub:
         except Exception:
             return False
 
+    def _supports_password_policy_fields(self) -> bool:
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM information_schema.columns
+                        WHERE table_name = 'auth_users'
+                          AND column_name = 'password_changed_at'
+                        """
+                    )
+                ).mappings().first()
+                table_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM information_schema.tables
+                        WHERE table_name = 'auth_password_history'
+                        """
+                    )
+                ).mappings().first()
+            return int(row.get("cnt") or 0) >= 1 and int(table_row.get("cnt") or 0) >= 1
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_password_age_expired(password_changed_at: datetime | None) -> bool:
+        if not isinstance(password_changed_at, datetime):
+            return True
+        return password_changed_at.astimezone(UTC) <= datetime.now(UTC) - timedelta(days=PASSWORD_MAX_AGE_DAYS)
+
     def register_user(self, payload: RegisterRequest) -> int:
         password_hash = _hash_password(payload.password)
         now = datetime.now(UTC)
+        supports_policy = self._supports_password_policy_fields()
         with self.engine.begin() as conn:
             existing_admin = conn.execute(
                 text(
@@ -658,24 +712,45 @@ class RealtimeChatHub:
             if existing is not None:
                 raise HTTPException(status_code=409, detail="Email already registered")
 
-            row = conn.execute(
-                text(
-                    """
-                    INSERT INTO auth_users (email, password_hash, full_name, title, profile_bio, created_at, updated_at)
-                    VALUES (:email, :password_hash, :full_name, :title, :profile_bio, :created_at, :updated_at)
-                    RETURNING user_id
-                    """
-                ),
-                {
-                    "email": payload.email.strip(),
-                    "password_hash": password_hash,
-                    "full_name": payload.full_name.strip(),
-                    "title": payload.title.strip(),
-                    "profile_bio": payload.profile_bio.strip(),
-                    "created_at": now,
-                    "updated_at": now,
-                },
-            ).mappings().first()
+            if supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (email, password_hash, full_name, title, profile_bio, password_changed_at, created_at, updated_at)
+                        VALUES (:email, :password_hash, :full_name, :title, :profile_bio, :password_changed_at, :created_at, :updated_at)
+                        RETURNING user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "password_hash": password_hash,
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "password_changed_at": now,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ).mappings().first()
+            else:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (email, password_hash, full_name, title, profile_bio, created_at, updated_at)
+                        VALUES (:email, :password_hash, :full_name, :title, :profile_bio, :created_at, :updated_at)
+                        RETURNING user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "password_hash": password_hash,
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ).mappings().first()
 
             user_id = int(row["user_id"])
             self.rbac.ensure_organization(org_id=USER_SCOPE_ORG_ID, name=USER_SCOPE_ORG_ID)
@@ -695,12 +770,45 @@ class RealtimeChatHub:
                     "created_at": now,
                 },
             )
+            if supports_policy:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_password_history (user_id, password_hash, changed_at)
+                        VALUES (:user_id, :password_hash, :changed_at)
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "password_hash": password_hash,
+                        "changed_at": now,
+                    },
+                )
         return user_id
 
     def create_token(self, *, email: str, password: str) -> TokenResponse:
         supports_otp = self._supports_auth_otp_fields()
+        supports_policy = self._supports_password_policy_fields()
         with self.engine.begin() as conn:
-            if supports_otp:
+            if supports_otp and supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT
+                            user_id,
+                            password_hash,
+                            one_time_password_hash,
+                            one_time_password_expires_at,
+                            force_password_change,
+                            password_changed_at
+                        FROM auth_users
+                        WHERE lower(email) = lower(:email)
+                        LIMIT 1
+                        """
+                    ),
+                    {"email": email.strip()},
+                ).mappings().first()
+            elif supports_otp:
                 row = conn.execute(
                     text(
                         """
@@ -710,6 +818,18 @@ class RealtimeChatHub:
                             one_time_password_hash,
                             one_time_password_expires_at,
                             force_password_change
+                        FROM auth_users
+                        WHERE lower(email) = lower(:email)
+                        LIMIT 1
+                        """
+                    ),
+                    {"email": email.strip()},
+                ).mappings().first()
+            elif supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT user_id, password_hash, password_changed_at
                         FROM auth_users
                         WHERE lower(email) = lower(:email)
                         LIMIT 1
@@ -782,15 +902,39 @@ class RealtimeChatHub:
                         "updated_at": now,
                     },
                 )
-        return TokenResponse(access_token=raw_token, expires_at=expires_at.isoformat())
+            force_change = bool(row.get("force_password_change")) if supports_otp else False
+            if supports_policy and self._is_password_age_expired(row.get("password_changed_at")):
+                force_change = True
+                if supports_otp:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE auth_users
+                            SET force_password_change = TRUE,
+                                updated_at = :updated_at
+                            WHERE user_id = :user_id
+                            """
+                        ),
+                        {
+                            "updated_at": now,
+                            "user_id": int(row["user_id"]),
+                        },
+                    )
+        return TokenResponse(access_token=raw_token, expires_at=expires_at.isoformat(), force_password_change=force_change)
 
     def get_user_from_token(self, token: str) -> dict[str, Any]:
         token_hash = _hash_token(token)
+        supports_otp = self._supports_auth_otp_fields()
+        supports_policy = self._supports_password_policy_fields()
         with self.engine.begin() as conn:
+            select_force = "COALESCE(u.force_password_change, FALSE) AS force_password_change" if supports_otp else "FALSE AS force_password_change"
+            select_changed_at = "u.password_changed_at AS password_changed_at" if supports_policy else "NULL AS password_changed_at"
             row = conn.execute(
                 text(
-                    """
-                    SELECT u.user_id, u.email, u.full_name, u.title, u.profile_bio, u.telegram_id, t.expires_at
+                    f"""
+                    SELECT u.user_id, u.email, u.full_name, u.title, u.profile_bio, u.telegram_id, t.expires_at,
+                           {select_force},
+                           {select_changed_at}
                     FROM auth_tokens t
                     JOIN auth_users u ON u.user_id = t.user_id
                     WHERE t.token_hash = :token_hash
@@ -805,16 +949,47 @@ class RealtimeChatHub:
         if isinstance(expires_at, datetime):
             if expires_at.astimezone(UTC) <= datetime.now(UTC):
                 raise HTTPException(status_code=401, detail="Token expired")
-        return dict(row)
+        result = dict(row)
+        force_change = bool(result.get("force_password_change"))
+        if supports_policy and self._is_password_age_expired(result.get("password_changed_at")):
+            force_change = True
+        result["force_password_change"] = force_change
+        return result
 
     def change_password(self, *, user_id: int, current_password: str, new_password: str) -> None:
         supports_otp = self._supports_auth_otp_fields()
+        supports_policy = self._supports_password_policy_fields()
+        now = datetime.now(UTC)
         with self.engine.begin() as conn:
-            if supports_otp:
+            if supports_otp and supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT password_hash, one_time_password_hash, one_time_password_expires_at, password_changed_at
+                        FROM auth_users
+                        WHERE user_id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": int(user_id)},
+                ).mappings().first()
+            elif supports_otp:
                 row = conn.execute(
                     text(
                         """
                         SELECT password_hash, one_time_password_hash, one_time_password_expires_at
+                        FROM auth_users
+                        WHERE user_id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": int(user_id)},
+                ).mappings().first()
+            elif supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT password_hash, password_changed_at
                         FROM auth_users
                         WHERE user_id = :user_id
                         LIMIT 1
@@ -846,7 +1021,56 @@ class RealtimeChatHub:
             if not base_ok and not otp_ok:
                 raise HTTPException(status_code=401, detail="Current password is invalid")
 
-            if supports_otp:
+            if _verify_password(new_password, str(row.get("password_hash") or "")):
+                raise HTTPException(status_code=400, detail="New password must be different from the current password")
+
+            if supports_policy:
+                history_rows = conn.execute(
+                    text(
+                        """
+                        SELECT password_hash
+                        FROM auth_password_history
+                        WHERE user_id = :user_id
+                        ORDER BY changed_at DESC
+                        LIMIT :history_size
+                        """
+                    ),
+                    {
+                        "user_id": int(user_id),
+                        "history_size": int(PASSWORD_HISTORY_SIZE),
+                    },
+                ).mappings().all()
+                for history_row in history_rows:
+                    if _verify_password(new_password, str(history_row.get("password_hash") or "")):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"New password must not match any of your last {PASSWORD_HISTORY_SIZE} passwords",
+                        )
+
+            new_password_hash = _hash_password(new_password)
+
+            if supports_otp and supports_policy:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET password_hash = :password_hash,
+                            force_password_change = FALSE,
+                            password_changed_at = :password_changed_at,
+                            one_time_password_hash = NULL,
+                            one_time_password_expires_at = NULL,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "password_hash": new_password_hash,
+                        "password_changed_at": now,
+                        "updated_at": now,
+                        "user_id": int(user_id),
+                    },
+                )
+            elif supports_otp:
                 conn.execute(
                     text(
                         """
@@ -860,8 +1084,26 @@ class RealtimeChatHub:
                         """
                     ),
                     {
-                        "password_hash": _hash_password(new_password),
-                        "updated_at": datetime.now(UTC),
+                        "password_hash": new_password_hash,
+                        "updated_at": now,
+                        "user_id": int(user_id),
+                    },
+                )
+            elif supports_policy:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE auth_users
+                        SET password_hash = :password_hash,
+                            password_changed_at = :password_changed_at,
+                            updated_at = :updated_at
+                        WHERE user_id = :user_id
+                        """
+                    ),
+                    {
+                        "password_hash": new_password_hash,
+                        "password_changed_at": now,
+                        "updated_at": now,
                         "user_id": int(user_id),
                     },
                 )
@@ -876,9 +1118,24 @@ class RealtimeChatHub:
                         """
                     ),
                     {
-                        "password_hash": _hash_password(new_password),
-                        "updated_at": datetime.now(UTC),
+                        "password_hash": new_password_hash,
+                        "updated_at": now,
                         "user_id": int(user_id),
+                    },
+                )
+
+            if supports_policy:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_password_history (user_id, password_hash, changed_at)
+                        VALUES (:user_id, :password_hash, :changed_at)
+                        """
+                    ),
+                    {
+                        "user_id": int(user_id),
+                        "password_hash": new_password_hash,
+                        "changed_at": now,
                     },
                 )
 
@@ -898,6 +1155,61 @@ class RealtimeChatHub:
                     "user_id": int(user_id),
                 },
             )
+
+    def get_user_profile(self, *, user_id: int) -> UserProfileResponse:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT user_id, email, full_name, title, profile_bio
+                    FROM auth_users
+                    WHERE user_id = :user_id
+                    LIMIT 1
+                    """
+                ),
+                {"user_id": int(user_id)},
+            ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        return UserProfileResponse(
+            user_id=int(row.get("user_id") or 0),
+            email=str(row.get("email") or ""),
+            full_name=str(row.get("full_name") or "").strip(),
+            title=str(row.get("title") or "").strip(),
+            profile_bio=str(row.get("profile_bio") or "").strip(),
+        )
+
+    def update_user_profile(self, *, user_id: int, payload: UserProfileUpdateRequest) -> UserProfileResponse:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE auth_users
+                    SET full_name = :full_name,
+                        title = :title,
+                        profile_bio = :profile_bio,
+                        updated_at = :updated_at
+                    WHERE user_id = :user_id
+                    RETURNING user_id, email, full_name, title, profile_bio
+                    """
+                ),
+                {
+                    "user_id": int(user_id),
+                    "full_name": payload.full_name.strip(),
+                    "title": payload.title.strip(),
+                    "profile_bio": payload.profile_bio.strip(),
+                    "updated_at": datetime.now(UTC),
+                },
+            ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        return UserProfileResponse(
+            user_id=int(row.get("user_id") or 0),
+            email=str(row.get("email") or ""),
+            full_name=str(row.get("full_name") or "").strip(),
+            title=str(row.get("title") or "").strip(),
+            profile_bio=str(row.get("profile_bio") or "").strip(),
+        )
 
     def list_organizations(self, *, actor_user_id: int) -> list[OrganizationSummary]:
         self._enforce_admin(actor_user_id)
@@ -922,6 +1234,8 @@ class RealtimeChatHub:
         now = datetime.now(UTC)
         generated_password = payload.password or secrets.token_urlsafe(12)
         supports_otp = self._supports_auth_otp_fields()
+        supports_policy = self._supports_password_policy_fields()
+        generated_password_hash = _hash_password(generated_password)
         with self.engine.begin() as conn:
             existing = conn.execute(
                 text("SELECT user_id FROM auth_users WHERE lower(email) = lower(:email) LIMIT 1"),
@@ -930,7 +1244,47 @@ class RealtimeChatHub:
             if existing is not None:
                 raise HTTPException(status_code=409, detail="Email already registered")
 
-            if supports_otp:
+            if supports_otp and supports_policy:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (
+                            email,
+                            password_hash,
+                            full_name,
+                            title,
+                            profile_bio,
+                            force_password_change,
+                            password_changed_at,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            :email,
+                            :password_hash,
+                            :full_name,
+                            :title,
+                            :profile_bio,
+                            TRUE,
+                            :password_changed_at,
+                            :created_at,
+                            :updated_at
+                        )
+                        RETURNING user_id
+                        """
+                    ),
+                    {
+                        "email": payload.email.strip(),
+                        "password_hash": generated_password_hash,
+                        "full_name": payload.full_name.strip(),
+                        "title": payload.title.strip(),
+                        "profile_bio": payload.profile_bio.strip(),
+                        "password_changed_at": now,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                ).mappings().first()
+            elif supports_otp:
                 row = conn.execute(
                     text(
                         """
@@ -959,7 +1313,7 @@ class RealtimeChatHub:
                     ),
                     {
                         "email": payload.email.strip(),
-                        "password_hash": _hash_password(generated_password),
+                        "password_hash": generated_password_hash,
                         "full_name": payload.full_name.strip(),
                         "title": payload.title.strip(),
                         "profile_bio": payload.profile_bio.strip(),
@@ -994,7 +1348,7 @@ class RealtimeChatHub:
                     ),
                     {
                         "email": payload.email.strip(),
-                        "password_hash": _hash_password(generated_password),
+                        "password_hash": generated_password_hash,
                         "full_name": payload.full_name.strip(),
                         "title": payload.title.strip(),
                         "profile_bio": payload.profile_bio.strip(),
@@ -1018,6 +1372,21 @@ class RealtimeChatHub:
                     "created_at": now,
                 },
             )
+
+            if supports_policy:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_password_history (user_id, password_hash, changed_at)
+                        VALUES (:user_id, :password_hash, :changed_at)
+                        """
+                    ),
+                    {
+                        "user_id": user_id,
+                        "password_hash": generated_password_hash,
+                        "changed_at": now,
+                    },
+                )
 
         self.rbac.upsert_user(org_id=payload.org_id, user_id=user_id, role=payload.role)
         self.rbac.audit(
@@ -1472,6 +1841,21 @@ class RealtimeChatHub:
             description = str(manifest.get("description") or "")
             skills.append(DynamicSkillSummary(folder=path.name, tool_name=tool_name, description=description))
         return skills
+
+    def list_current_user_skills(self, *, user_id: int) -> UserSkillListResponse:
+        role = self.rbac.get_role(org_id=USER_SCOPE_ORG_ID, user_id=user_id, fallback_role="member")
+        if self.settings.enable_dynamic_tools:
+            self.agent.refresh_dynamic_tools()
+            all_dynamic = set(self.agent.registry.tools.keys())
+        else:
+            all_dynamic = set()
+        allowed_dynamic = self.rbac.resolve_allowed_skills(
+            org_id=USER_SCOPE_ORG_ID,
+            user_id=user_id,
+            role=role,
+            all_dynamic_tools=all_dynamic,
+        )
+        return UserSkillListResponse(role=role, skills=sorted(allowed_dynamic))
 
     def convert_claude_markdown_to_skill(
         self,
@@ -2282,9 +2666,21 @@ def _extract_bearer_token(authorization: str) -> str:
     return token
 
 
-def get_current_user(authorization: Annotated[str, Header(alias="Authorization")]) -> dict[str, Any]:
+_PASSWORD_CHANGE_ALLOWED_PATHS = {
+    "/api/v1/users/me/password/change",
+    "/api/v1/users/me/profile",
+}
+
+
+def get_current_user(
+    authorization: Annotated[str, Header(alias="Authorization")],
+    request: Request,
+) -> dict[str, Any]:
     token = _extract_bearer_token(authorization)
-    return service.get_user_from_token(token)
+    user = service.get_user_from_token(token)
+    if bool(user.get("force_password_change")) and request.url.path not in _PASSWORD_CHANGE_ALLOWED_PATHS:
+        raise HTTPException(status_code=403, detail="password_change_required")
+    return user
 
 
 def _legacy_scope_removed() -> NoReturn:
@@ -2335,6 +2731,21 @@ def login(payload: LoginRequest) -> TokenResponse:
 def link_telegram(payload: TelegramLinkRequest, user: CurrentUser) -> dict[str, str]:
     service.link_telegram(user_id=int(user["user_id"]), telegram_id=payload.telegram_id)
     return {"status": "linked"}
+
+
+@app.get("/api/v1/users/me/profile")
+def users_me_profile(user: CurrentUser) -> UserProfileResponse:
+    return service.get_user_profile(user_id=int(user["user_id"]))
+
+
+@app.patch("/api/v1/users/me/profile")
+def users_me_profile_update(payload: UserProfileUpdateRequest, user: CurrentUser) -> UserProfileResponse:
+    return service.update_user_profile(user_id=int(user["user_id"]), payload=payload)
+
+
+@app.get("/api/v1/users/me/skills")
+def users_me_skills(user: CurrentUser) -> UserSkillListResponse:
+    return service.list_current_user_skills(user_id=int(user["user_id"]))
 
 
 @app.post("/api/v1/users/me/password/change", responses={401: {"description": "Current password is invalid"}})
@@ -2663,6 +3074,10 @@ async def chat_websocket(websocket: WebSocket) -> None:
         current_user = service.get_user_from_token(token)
     except HTTPException:
         await websocket.close(code=4401)
+        return
+
+    if bool(current_user.get("force_password_change")):
+        await websocket.close(code=4403)
         return
 
     await websocket.accept()

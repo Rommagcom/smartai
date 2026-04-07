@@ -6,6 +6,8 @@ import remarkGfm from "remark-gfm";
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
 const DEFAULT_CHAT_ID = "default";
+const DEFAULT_PROFILE_FORM = { email: "", full_name: "", title: "", profile_bio: "" };
+const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "", confirm_password: "" };
 
 function ExternalLink(props) {
   return <a {...props} target="_blank" rel="noreferrer noopener" />;
@@ -171,6 +173,13 @@ function App() {
   const [menuChatId, setMenuChatId] = useState("");
   const [editingChatId, setEditingChatId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileForm, setProfileForm] = useState(DEFAULT_PROFILE_FORM);
+  const [passwordForm, setPasswordForm] = useState(DEFAULT_PASSWORD_FORM);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsRole, setSkillsRole] = useState("member");
+  const [userSkills, setUserSkills] = useState([]);
+  const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
 
@@ -178,6 +187,7 @@ function App() {
   const wsRetryTimerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const activeChatIdRef = useRef(DEFAULT_CHAT_ID);
+  const forcePromptShownRef = useRef(false);
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
@@ -191,6 +201,11 @@ function App() {
     setActiveChatId(DEFAULT_CHAT_ID);
     setMessages([]);
     setDraft("");
+    setPasswordForm(DEFAULT_PASSWORD_FORM);
+    setSkillsOpen(false);
+    setUserSkills([]);
+    setSkillsRole("member");
+    setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
   }
@@ -235,6 +250,10 @@ function App() {
           performSessionLogout("Session expired. Please sign in again.");
         }
         const details = parseApiError(payload) || response.statusText || "Request failed";
+        if (withAuth && response.status === 403 && details === "password_change_required") {
+          setForcePasswordChange(true);
+          setStatus("Password rotation required. Change your password to continue.");
+        }
         throw new Error(details);
       }
 
@@ -306,6 +325,114 @@ function App() {
       setStatus("New chat created.");
     } catch (error) {
       setStatus(`Failed to create chat: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function openProfileEditor() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const profile = await request("/users/me/profile", { timeoutMs: 15000 });
+      setProfileForm({
+        email: String(profile?.email || ""),
+        full_name: String(profile?.full_name || ""),
+        title: String(profile?.title || ""),
+        profile_bio: String(profile?.profile_bio || ""),
+      });
+      setProfileOpen(true);
+    } catch (error) {
+      setStatus(`Failed to load profile: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function openSkillsViewer() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const payload = await request("/users/me/skills", { timeoutMs: 15000 });
+      setSkillsRole(String(payload?.role || "member"));
+      setUserSkills(Array.isArray(payload?.skills) ? payload.skills.map((item) => String(item || "")).filter(Boolean) : []);
+      setSkillsOpen(true);
+    } catch (error) {
+      setStatus(`Failed to load skills: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function saveProfile() {
+    if (!isAuthenticated) {
+      return;
+    }
+    const fullName = String(profileForm.full_name || "").trim();
+    if (!fullName) {
+      setStatus("Full name is required.");
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const profile = await request("/users/me/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          full_name: fullName,
+          title: String(profileForm.title || ""),
+          profile_bio: String(profileForm.profile_bio || ""),
+        }),
+        timeoutMs: 15000,
+      });
+      setProfileForm({
+        email: String(profile?.email || ""),
+        full_name: String(profile?.full_name || ""),
+        title: String(profile?.title || ""),
+        profile_bio: String(profile?.profile_bio || ""),
+      });
+      setProfileOpen(false);
+      setStatus("Profile updated.");
+    } catch (error) {
+      setStatus(`Failed to save profile: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function changePassword() {
+    if (!isAuthenticated) {
+      return;
+    }
+    const currentPassword = String(passwordForm.current_password || "");
+    const newPassword = String(passwordForm.new_password || "");
+    const confirmPassword = String(passwordForm.confirm_password || "");
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setStatus("Fill in all password fields.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setStatus("New password and confirmation do not match.");
+      return;
+    }
+    setIsBusy(true);
+    try {
+      await request("/users/me/password/change", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+        timeoutMs: 15000,
+      });
+      setPasswordForm(DEFAULT_PASSWORD_FORM);
+      setForcePasswordChange(false);
+      setStatus("Password changed successfully.");
+    } catch (error) {
+      setStatus(`Failed to change password: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
@@ -496,7 +623,7 @@ function App() {
     const text = String(rawText || "").trim();
     const selected = chatSessions.find((session) => session.chat_id === activeChatIdRef.current);
     const deletedSelected = Boolean(selected?.deleted_at);
-    if (!text || !isAuthenticated || showTrash || deletedSelected) {
+    if (!text || !isAuthenticated || showTrash || deletedSelected || forcePasswordChange) {
       return;
     }
 
@@ -557,7 +684,9 @@ function App() {
       }
       writeStoredToken(nextToken);
       setToken(nextToken);
-      setStatus("Signed in.");
+      const mustChangePassword = Boolean(payload?.force_password_change);
+      setForcePasswordChange(mustChangePassword);
+      setStatus(mustChangePassword ? "Signed in. Password change is required." : "Signed in.");
     } catch (error) {
       setStatus(`Login failed: ${error.message}`);
     } finally {
@@ -589,6 +718,11 @@ function App() {
 
   function logout() {
     performSessionLogout("Signed out.");
+    setProfileOpen(false);
+    setProfileForm(DEFAULT_PROFILE_FORM);
+    setPasswordForm(DEFAULT_PASSWORD_FORM);
+    setSkillsOpen(false);
+    setUserSkills([]);
   }
 
   useEffect(() => {
@@ -672,6 +806,12 @@ function App() {
           performSessionLogout("Session expired. Please sign in again.");
           return;
         }
+        if (event?.code === 4403) {
+          setWsStatus("offline");
+          setForcePasswordChange(true);
+          setStatus("Password rotation required. Change your password to continue.");
+          return;
+        }
         setWsStatus("offline");
         wsRetryTimerRef.current = setTimeout(connect, 2000);
       };
@@ -719,6 +859,20 @@ function App() {
     messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!isAuthenticated || !forcePasswordChange || profileOpen || forcePromptShownRef.current) {
+      return;
+    }
+    forcePromptShownRef.current = true;
+    void openProfileEditor();
+  }, [forcePasswordChange, isAuthenticated, profileOpen]);
+
+  useEffect(() => {
+    if (!forcePasswordChange) {
+      forcePromptShownRef.current = false;
+    }
+  }, [forcePasswordChange]);
+
   function onComposerKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -728,7 +882,7 @@ function App() {
 
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
-  const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted;
+  const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted || forcePasswordChange;
   const sessionGroups = groupSessionsByPeriod(chatSessions);
 
   if (!isAuthenticated) {
@@ -773,9 +927,12 @@ function App() {
           <div>
             <h1>Personal Chat</h1>
             <p className="subtitle">Context scope: user_id only</p>
+            {forcePasswordChange ? <p className="subtitle">Password change required before using chat.</p> : null}
           </div>
           <div className="top-actions">
             <span className="pane-topbar-text">Realtime: {wsStatus}</span>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
             <button className="ghost" type="button" onClick={logout}>Logout</button>
           </div>
@@ -953,6 +1110,7 @@ function App() {
             <section className="composer card">
               <textarea rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a task for your assistant" />
               {showTrash || isActiveDeleted ? <div className="compose-hint">Messaging is disabled in Trash view. Restore a chat or switch to active chats.</div> : null}
+              {forcePasswordChange ? <div className="compose-hint">Change your password in Profile to continue chatting.</div> : null}
               <div className="composer-row">
                 <div className="compose-hint">Enter - send, Shift+Enter - new line</div>
                 <div className="composer-actions">
@@ -967,6 +1125,56 @@ function App() {
 
         <div className="status">{status}</div>
       </div>
+
+      {skillsOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setSkillsOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Available skills" onClick={(event) => event.stopPropagation()}>
+            <h2>Available Skills</h2>
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>Your role: {skillsRole}</span>
+                <span>Total: {userSkills.length}</span>
+              </div>
+              <div className="skills-grid">
+                {userSkills.length === 0 ? <div className="empty">No skills assigned.</div> : null}
+                {userSkills.map((skillName) => (
+                  <div key={skillName} className="skill-item">
+                    <span>{skillName}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setSkillsOpen(false)}>Close</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Refresh</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {profileOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setProfileOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Edit profile" onClick={(event) => event.stopPropagation()}>
+            <h2>Edit Profile</h2>
+            <div className="context-grid profile-grid">
+              <label>Email<input value={profileForm.email} disabled /></label>
+              <label>Full Name<input value={profileForm.full_name} onChange={(e) => setProfileForm((p) => ({ ...p, full_name: e.target.value }))} /></label>
+              <label>Title<input value={profileForm.title} onChange={(e) => setProfileForm((p) => ({ ...p, title: e.target.value }))} /></label>
+              <label className="profile-bio-field">Bio<textarea rows={4} value={profileForm.profile_bio} onChange={(e) => setProfileForm((p) => ({ ...p, profile_bio: e.target.value }))} /></label>
+            </div>
+            <div className="context-grid profile-grid">
+              <label>Current Password<input type="password" value={passwordForm.current_password} onChange={(e) => setPasswordForm((p) => ({ ...p, current_password: e.target.value }))} /></label>
+              <label>New Password<input type="password" value={passwordForm.new_password} onChange={(e) => setPasswordForm((p) => ({ ...p, new_password: e.target.value }))} /></label>
+              <label>Confirm New Password<input type="password" value={passwordForm.confirm_password} onChange={(e) => setPasswordForm((p) => ({ ...p, confirm_password: e.target.value }))} /></label>
+            </div>
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setProfileOpen(false)}>Cancel</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void changePassword()}>Change Password</button>
+              <button className="primary" type="button" disabled={isBusy} onClick={() => void saveProfile()}>Save</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

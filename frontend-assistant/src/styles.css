@@ -1062,6 +1062,35 @@ input[type="checkbox"] {
   background: #ffffff;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 26, 50, 0.44);
+  display: grid;
+  place-items: center;
+  z-index: 30;
+  padding: 16px;
+}
+
+.modal-card {
+  width: min(700px, 100%);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.modal-card h2 {
+  margin: 0;
+}
+
+.profile-grid {
+  margin-top: 0;
+}
+
+.profile-bio-field {
+  grid-column: 1 / -1;
+}
+
 .reveal-up {
   animation: revealUp 0.45s ease forwards;
 }
