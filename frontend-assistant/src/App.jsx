@@ -6,10 +6,64 @@ import remarkGfm from "remark-gfm";
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
 const DEFAULT_CHAT_ID = "default";
-const DEFAULT_CHAT_DENSITY = "comfortable";
 
 function ExternalLink(props) {
   return <a {...props} target="_blank" rel="noreferrer noopener" />;
+}
+
+function parseAssistantFilePayload(content) {
+  const raw = String(content || "").trim();
+  if (!raw?.startsWith("{")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    const payloadType = String(parsed.type || "").toLowerCase();
+    if (!["file", "image", "video"].includes(payloadType)) {
+      return null;
+    }
+    const filename = String(parsed.filename || "generated.bin");
+    const mimeType = String(parsed.mime_type || "application/octet-stream");
+    const base64 = typeof parsed.base64 === "string" && parsed.base64 && parsed.base64 !== "<omitted>" ? parsed.base64 : "";
+    const path = typeof parsed.path === "string" ? parsed.path.trim() : "";
+    return { type: payloadType, filename, mimeType, base64, path };
+  } catch {
+    return null;
+  }
+}
+
+function buildPayloadDataUrl(payload) {
+  if (!payload?.base64) {
+    return "";
+  }
+  return `data:${payload.mimeType};base64,${payload.base64}`;
+}
+
+function renderAttachmentMessage(payload) {
+  if (!payload) {
+    return null;
+  }
+  const dataUrl = buildPayloadDataUrl(payload);
+  const openHref = dataUrl || payload.path || "";
+
+  return (
+    <div className="attachment-box">
+      <div className="attachment-title">Generated file: {payload.filename}</div>
+      <div className="attachment-meta">{payload.mimeType}</div>
+      {payload.type === "image" && dataUrl ? <img className="attachment-preview" src={dataUrl} alt={payload.filename} /> : null}
+      <div className="attachment-actions">
+        {openHref ? (
+          <a className="secondary" href={openHref} target="_blank" rel="noreferrer noopener" download={payload.filename}>
+            Download
+          </a>
+        ) : null}
+        {payload.path ? <span className="attachment-path">{payload.path}</span> : null}
+      </div>
+    </div>
+  );
 }
 
 function readStoredToken() {
@@ -27,23 +81,6 @@ function writeStoredToken(value) {
     } else {
       localStorage.removeItem("smartai_token");
     }
-  } catch {
-    // ignore storage policy errors
-  }
-}
-
-function readStoredChatDensity() {
-  try {
-    const value = localStorage.getItem("smartai_chat_density") || "";
-    return value === "compact" ? "compact" : DEFAULT_CHAT_DENSITY;
-  } catch {
-    return DEFAULT_CHAT_DENSITY;
-  }
-}
-
-function writeStoredChatDensity(value) {
-  try {
-    localStorage.setItem("smartai_chat_density", value === "comfortable" ? "comfortable" : DEFAULT_CHAT_DENSITY);
   } catch {
     // ignore storage policy errors
   }
@@ -131,7 +168,6 @@ function App() {
   const [activeChatId, setActiveChatId] = useState(DEFAULT_CHAT_ID);
   const [showTrash, setShowTrash] = useState(false);
   const [trashCount, setTrashCount] = useState(0);
-  const [chatDensity, setChatDensity] = useState(readStoredChatDensity);
   const [menuChatId, setMenuChatId] = useState("");
   const [editingChatId, setEditingChatId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
@@ -683,10 +719,6 @@ function App() {
     messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
-  useEffect(() => {
-    writeStoredChatDensity(chatDensity);
-  }, [chatDensity]);
-
   function onComposerKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -774,22 +806,6 @@ function App() {
                   Trash {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
                 </button>
               </div>
-              <div className="chat-density-toggle">
-                <button
-                  type="button"
-                  className={chatDensity === "compact" ? "secondary chat-action" : "ghost chat-action"}
-                  onClick={() => setChatDensity("compact")}
-                >
-                  Compact
-                </button>
-                <button
-                  type="button"
-                  className={chatDensity === "comfortable" ? "secondary chat-action" : "ghost chat-action"}
-                  onClick={() => setChatDensity("comfortable")}
-                >
-                  Comfortable
-                </button>
-              </div>
               {showTrash ? null : (
                 <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession()}>
                   New
@@ -802,7 +818,7 @@ function App() {
               ) : null}
             </div>
 
-            <div className={`chat-history-list density-${chatDensity}`} aria-label="Chat sessions">
+            <div className="chat-history-list density-compact" aria-label="Chat sessions">
               {chatSessions.length === 0 ? <div className="empty">No chats yet.</div> : null}
               {sessionGroups.map((group) =>
                 group.items.length > 0 ? (
@@ -905,17 +921,25 @@ function App() {
                       <span>{new Date(item.created_at).toLocaleString()}</span>
                     </div>
                     {item.sender_type === "assistant" ? (
-                      <div className="message-content markdown-content">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          rehypePlugins={[rehypeHighlight]}
-                          components={{
-                            a: ExternalLink,
-                          }}
-                        >
-                          {item.content}
-                        </ReactMarkdown>
-                      </div>
+                      (() => {
+                        const payload = parseAssistantFilePayload(item.content);
+                        if (payload) {
+                          return renderAttachmentMessage(payload);
+                        }
+                        return (
+                          <div className="message-content markdown-content">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              rehypePlugins={[rehypeHighlight]}
+                              components={{
+                                a: ExternalLink,
+                              }}
+                            >
+                              {item.content}
+                            </ReactMarkdown>
+                          </div>
+                        );
+                      })()
                     ) : (
                       <p>{item.content}</p>
                     )}
