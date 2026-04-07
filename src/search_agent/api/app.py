@@ -1779,7 +1779,6 @@ class RealtimeChatHub:
             )
 
     def list_chat_sessions(self, *, user_id: int, include_deleted: bool = False) -> list[ChatSessionSummary]:
-        self._touch_chat_session(user_id=user_id, chat_id="default")
         with self.engine.begin() as conn:
             rows = conn.execute(
                 text(
@@ -1916,8 +1915,6 @@ class RealtimeChatHub:
 
     def delete_chat_session(self, *, user_id: int, chat_id: str) -> None:
         scope_chat_id = _normalize_scope_chat_id(chat_id)
-        if scope_chat_id == "default":
-            raise HTTPException(status_code=400, detail="Default chat cannot be deleted")
 
         with self.engine.begin() as conn:
             deleted = conn.execute(
@@ -1992,8 +1989,6 @@ class RealtimeChatHub:
 
     def purge_chat_session(self, *, user_id: int, chat_id: str) -> None:
         scope_chat_id = _normalize_scope_chat_id(chat_id)
-        if scope_chat_id == "default":
-            raise HTTPException(status_code=400, detail="Default chat cannot be purged")
 
         with self.engine.begin() as conn:
             session_row = conn.execute(
@@ -2646,6 +2641,12 @@ def chat_session_purge(chat_id: str, user: CurrentUser) -> dict[str, str]:
 
 @app.delete("/api/v1/chat/sessions/trash/purge")
 def chat_sessions_trash_purge(user: CurrentUser) -> dict[str, int]:
+    purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
+    return {"purged": purged}
+
+
+@app.delete("/api/v1/chat/sessions/purge-trash")
+def chat_sessions_purge_trash(user: CurrentUser) -> dict[str, int]:
     purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
     return {"purged": purged}
 

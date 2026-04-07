@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
 const DEFAULT_CHAT_ID = "default";
+const DEFAULT_CHAT_DENSITY = "comfortable";
 
 function ExternalLink(props) {
   return <a {...props} target="_blank" rel="noreferrer noopener" />;
@@ -26,6 +27,23 @@ function writeStoredToken(value) {
     } else {
       localStorage.removeItem("smartai_token");
     }
+  } catch {
+    // ignore storage policy errors
+  }
+}
+
+function readStoredChatDensity() {
+  try {
+    const value = localStorage.getItem("smartai_chat_density") || "";
+    return value === "compact" ? "compact" : DEFAULT_CHAT_DENSITY;
+  } catch {
+    return DEFAULT_CHAT_DENSITY;
+  }
+}
+
+function writeStoredChatDensity(value) {
+  try {
+    localStorage.setItem("smartai_chat_density", value === "comfortable" ? "comfortable" : DEFAULT_CHAT_DENSITY);
   } catch {
     // ignore storage policy errors
   }
@@ -93,6 +111,7 @@ function App() {
   const [activeChatId, setActiveChatId] = useState(DEFAULT_CHAT_ID);
   const [showTrash, setShowTrash] = useState(false);
   const [trashCount, setTrashCount] = useState(0);
+  const [chatDensity, setChatDensity] = useState(readStoredChatDensity);
   const [menuChatId, setMenuChatId] = useState("");
   const [editingChatId, setEditingChatId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
@@ -286,7 +305,7 @@ function App() {
       return;
     }
     const target = String(chatId || "").trim();
-    if (!target || target === DEFAULT_CHAT_ID) {
+    if (!target) {
       return;
     }
     if (!globalThis.confirm("Move this chat to Trash?")) {
@@ -345,7 +364,7 @@ function App() {
       return;
     }
     const target = String(chatId || "").trim();
-    if (!target || target === DEFAULT_CHAT_ID) {
+    if (!target) {
       return;
     }
     if (!globalThis.confirm("Purge chat permanently? This cannot be undone.")) {
@@ -383,7 +402,7 @@ function App() {
     setMenuChatId("");
     setIsBusy(true);
     try {
-      const payload = await request("/chat/sessions/trash/purge", {
+        const payload = await request("/chat/sessions/purge-trash", {
         method: "DELETE",
         timeoutMs: 15000,
       });
@@ -644,6 +663,10 @@ function App() {
     messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  useEffect(() => {
+    writeStoredChatDensity(chatDensity);
+  }, [chatDensity]);
+
   function onComposerKeyDown(event) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -730,6 +753,22 @@ function App() {
                   Trash {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
                 </button>
               </div>
+              <div className="chat-density-toggle">
+                <button
+                  type="button"
+                  className={chatDensity === "compact" ? "secondary chat-action" : "ghost chat-action"}
+                  onClick={() => setChatDensity("compact")}
+                >
+                  Compact
+                </button>
+                <button
+                  type="button"
+                  className={chatDensity === "comfortable" ? "secondary chat-action" : "ghost chat-action"}
+                  onClick={() => setChatDensity("comfortable")}
+                >
+                  Comfortable
+                </button>
+              </div>
               {showTrash ? null : (
                 <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession()}>
                   New
@@ -742,10 +781,10 @@ function App() {
               ) : null}
             </div>
 
-            <div className="chat-history-list" aria-label="Chat sessions">
+            <div className={`chat-history-list density-${chatDensity}`} aria-label="Chat sessions">
               {chatSessions.length === 0 ? <div className="empty">No chats yet.</div> : null}
               {chatSessions.map((session) => {
-                const canDelete = session.chat_id !== DEFAULT_CHAT_ID;
+                const canDelete = true;
                 const isEditing = session.chat_id === editingChatId;
                 const isDeleted = Boolean(session.deleted_at);
                 return (
