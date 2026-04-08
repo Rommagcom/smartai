@@ -8,6 +8,14 @@ const DEFAULT_LOGIN_FORM = { email: "", password: "" };
 const DEFAULT_CHAT_ID = "default";
 const DEFAULT_PROFILE_FORM = { email: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "", confirm_password: "" };
+const DEFAULT_ADMIN_CREATE_USER_FORM = {
+  email: "",
+  password: "",
+  full_name: "",
+  title: "",
+  profile_bio: "",
+  role: "member",
+};
 
 function ExternalLink(props) {
   return <a {...props} target="_blank" rel="noreferrer noopener" />;
@@ -180,11 +188,13 @@ function App() {
   const [skillsRole, setSkillsRole] = useState("member");
   const [userSkills, setUserSkills] = useState([]);
   const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
+  const [adminUsersOpen, setAdminUsersOpen] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminAllSkills, setAdminAllSkills] = useState([]);
   const [adminTargetUserId, setAdminTargetUserId] = useState(0);
   const [adminAssignedSkills, setAdminAssignedSkills] = useState([]);
   const [adminUserQuery, setAdminUserQuery] = useState("");
+  const [adminCreateUserForm, setAdminCreateUserForm] = useState(DEFAULT_ADMIN_CREATE_USER_FORM);
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -212,11 +222,13 @@ function App() {
     setUserSkills([]);
     setSkillsRole("member");
     setAdminSkillsOpen(false);
+    setAdminUsersOpen(false);
     setAdminUsers([]);
     setAdminAllSkills([]);
     setAdminTargetUserId(0);
     setAdminAssignedSkills([]);
     setAdminUserQuery("");
+    setAdminCreateUserForm(DEFAULT_ADMIN_CREATE_USER_FORM);
     setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
@@ -241,11 +253,20 @@ function App() {
     const timerId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(`${apiBase}${path}`, {
-        ...fetchOptions,
-        headers,
-        signal: controller.signal,
-      });
+      let response;
+      try {
+        response = await fetch(`${apiBase}${path}`, {
+          ...fetchOptions,
+          headers,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const aborted = controller.signal.aborted || error?.name === "AbortError";
+        if (aborted) {
+          throw new Error(`Request timeout after ${timeoutMs}ms`);
+        }
+        throw error;
+      }
 
       let payload = null;
       const text = await response.text();
@@ -390,21 +411,27 @@ function App() {
     setAdminAssignedSkills(Array.isArray(payload?.skills) ? payload.skills.map((item) => String(item || "")).filter(Boolean) : []);
   }
 
+  async function fetchAdminUsersList() {
+    const usersPayload = await request("/admin/users/all", { timeoutMs: 15000 });
+    return Array.isArray(usersPayload)
+      ? usersPayload
+          .map((item) => ({
+            user_id: Number(item?.user_id || 0),
+            email: String(item?.email || ""),
+            full_name: String(item?.full_name || "").trim() || String(item?.email || ""),
+          }))
+          .filter((item) => item.user_id > 0)
+      : [];
+  }
+
   async function openAdminSkillsManager() {
     if (!isAuthenticated) {
       return;
     }
     setIsBusy(true);
     try {
-      const usersPayload = await request("/admin/users/all", { timeoutMs: 15000 });
+      const users = await fetchAdminUsersList();
       const skillsPayload = await request("/admin/skills", { timeoutMs: 15000 });
-      const users = Array.isArray(usersPayload)
-        ? usersPayload.map((item) => ({
-            user_id: Number(item?.user_id || 0),
-            email: String(item?.email || ""),
-            full_name: String(item?.full_name || "").trim() || String(item?.email || ""),
-          })).filter((item) => item.user_id > 0)
-        : [];
       const allSkills = Array.isArray(skillsPayload?.skills)
         ? skillsPayload.skills.map((item) => ({
             tool_name: String(item?.tool_name || "").trim(),
@@ -421,6 +448,65 @@ function App() {
       setAdminSkillsOpen(true);
     } catch (error) {
       setStatus(`Failed to load admin skills manager: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function openAdminUsersManager() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const users = await fetchAdminUsersList();
+      setAdminUsers(users);
+      setAdminUsersOpen(true);
+    } catch (error) {
+      setStatus(`Failed to load admin users: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function createUserByAdmin() {
+    if (!isAuthenticated) {
+      return;
+    }
+    const email = String(adminCreateUserForm.email || "").trim();
+    const fullName = String(adminCreateUserForm.full_name || "").trim();
+    if (!email || !fullName) {
+      setStatus("Email and full name are required.");
+      return;
+    }
+    const password = String(adminCreateUserForm.password || "");
+    if (password && password.length < 8) {
+      setStatus("Password must be at least 8 characters.");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const payload = await request("/admin/users", {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: "user",
+          email,
+          password: password || null,
+          full_name: fullName,
+          title: String(adminCreateUserForm.title || ""),
+          profile_bio: String(adminCreateUserForm.profile_bio || ""),
+          role: String(adminCreateUserForm.role || "member"),
+        }),
+        timeoutMs: 15000,
+      });
+      setAdminCreateUserForm(DEFAULT_ADMIN_CREATE_USER_FORM);
+      const users = await fetchAdminUsersList();
+      setAdminUsers(users);
+      const generatedPassword = String(payload?.password || "").trim();
+      setStatus(generatedPassword ? `User created. Generated password: ${generatedPassword}` : "User created.");
+    } catch (error) {
+      setStatus(`Failed to create user: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
@@ -804,6 +890,7 @@ function App() {
     setProfileOpen(false);
     setProfileForm(DEFAULT_PROFILE_FORM);
     setPasswordForm(DEFAULT_PASSWORD_FORM);
+    setAdminUsersOpen(false);
     setSkillsOpen(false);
     setUserSkills([]);
     setAdminSkillsOpen(false);
@@ -1047,6 +1134,7 @@ function App() {
           <div className="top-actions">
             <span className="pane-topbar-text">Realtime: {wsStatus}</span>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Admin Users</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
@@ -1263,6 +1351,48 @@ function App() {
             <div className="top-actions">
               <button className="ghost" type="button" onClick={() => setSkillsOpen(false)}>Close</button>
               <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Refresh</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {adminUsersOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setAdminUsersOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin users manager" onClick={(event) => event.stopPropagation()}>
+            <h2>Admin Users</h2>
+            <div className="context-grid profile-grid">
+              <label>Email<input value={adminCreateUserForm.email} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+              <label>Full Name<input value={adminCreateUserForm.full_name} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+              <label>Password (optional)<input type="password" value={adminCreateUserForm.password} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+              <label>Role
+                <select value={adminCreateUserForm.role} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, role: event.target.value }))}>
+                  <option value="member">member</option>
+                  <option value="manager">manager</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+              <label>Title<input value={adminCreateUserForm.title} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
+              <label className="profile-bio-field">Bio<textarea rows={3} value={adminCreateUserForm.profile_bio} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, profile_bio: event.target.value }))} /></label>
+            </div>
+            <div className="top-actions">
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createUserByAdmin()}>Create User</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Reload</button>
+            </div>
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>Users: {adminUsers.length}</span>
+              </div>
+              <div className="skills-grid">
+                {adminUsers.length === 0 ? <div className="empty">No users found.</div> : null}
+                {adminUsers.map((item) => (
+                  <div key={item.user_id} className="skill-item">
+                    <span>{item.full_name} ({item.email})</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setAdminUsersOpen(false)}>Close</button>
             </div>
           </div>
         </div>
