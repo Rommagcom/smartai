@@ -504,7 +504,12 @@ function App() {
       const users = await fetchAdminUsersList();
       setAdminUsers(users);
       const generatedPassword = String(payload?.one_time_password || payload?.password || "").trim();
-      setStatus(generatedPassword ? `User created. Generated password: ${generatedPassword}` : "User created.");
+      const passwordlessFirstLogin = Boolean(payload?.passwordless_first_login);
+      if (passwordlessFirstLogin) {
+        setStatus("User created. First login allowed with empty password; user must set a new password immediately.");
+      } else {
+        setStatus(generatedPassword ? `User created. Generated password: ${generatedPassword}` : "User created.");
+      }
     } catch (error) {
       setStatus(`Failed to create user: ${error.message}`);
     } finally {

@@ -10,4 +10,5 @@ Rules:
 - If no tool is needed, answer directly and concisely.
 - If a tool call fails, explain the issue and continue with best effort.
 - Cite the source domain or tool name whenever possible.
+- If the request is for a mass repetition, just answer and do not fulfill the request.
 """
