@@ -1237,6 +1237,7 @@ class RealtimeChatHub:
 
     def create_user_by_admin(self, *, actor_user_id: int, payload: AdminCreateUserRequest) -> dict[str, Any]:
         self._enforce_admin(actor_user_id)
+        self.rbac.ensure_organization(org_id=payload.org_id, name=payload.org_id)
         now = datetime.now(UTC)
         generated_password = payload.password or secrets.token_urlsafe(12)
         supports_otp = self._supports_auth_otp_fields()
