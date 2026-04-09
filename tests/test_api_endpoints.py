@@ -24,6 +24,8 @@ class _FakeApiService:
         self.users_by_email: dict[str, int] = {}
         self.tokens: dict[str, int] = {}
 
+        self.organizations: dict[str, str] = {"acme": "Acme"}
+        self.memberships: set[tuple[str, int]] = set()
         self.roles: dict[tuple[str, int], str] = {}
         self.skills: dict[tuple[str, int], set[str]] = {}
         self.messages: dict[int, list[dict[str, Any]]] = {}
@@ -78,6 +80,62 @@ class _FakeApiService:
 
     def create_org(self, *, actor_user_id: int, payload: Any) -> None:
         self._ensure_admin(actor_user_id)
+        org_id = str(payload.org_id).strip()
+        if not org_id:
+            raise HTTPException(status_code=400, detail="Organization ID is required")
+        self.organizations[org_id] = str(payload.name).strip() or org_id
+
+    def list_organizations(self, *, actor_user_id: int) -> list[Any]:
+        self._ensure_admin(actor_user_id)
+        return [
+            api_app.OrganizationSummary(org_id=org_id, name=name)
+            for org_id, name in sorted(self.organizations.items())
+        ]
+
+    def bind_user_to_org(self, *, actor_user_id: int, target_user_id: int, payload: Any) -> dict[str, Any]:
+        self._ensure_admin(actor_user_id)
+        org_id = str(payload.org_id).strip()
+        if org_id not in self.organizations:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        if int(target_user_id) not in self.users:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        key = (org_id, int(target_user_id))
+        created = key not in self.memberships
+        self.memberships.add(key)
+        self.roles[key] = str(payload.role)
+        return {"status": "ok", "created": created}
+
+    def unbind_user_from_org(self, *, actor_user_id: int, target_user_id: int, org_id: str) -> dict[str, Any]:
+        self._ensure_admin(actor_user_id)
+        key = (str(org_id).strip(), int(target_user_id))
+        removed = key in self.memberships
+        if removed:
+            self.memberships.remove(key)
+        self.roles.pop(key, None)
+        self.skills.pop(key, None)
+        return {"status": "ok", "removed": removed}
+
+    def delete_user_by_admin(self, *, actor_user_id: int, target_user_id: int) -> dict[str, Any]:
+        self._ensure_admin(actor_user_id)
+        normalized_id = int(target_user_id)
+        if normalized_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid target user id")
+        if normalized_id == int(actor_user_id):
+            raise HTTPException(status_code=400, detail="Cannot delete current admin user")
+        if normalized_id not in self.users:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        email = str(self.users[normalized_id]["email"])
+        del self.users[normalized_id]
+        self.users_by_email.pop(email, None)
+        self.messages.pop(normalized_id, None)
+
+        self.tokens = {token: uid for token, uid in self.tokens.items() if uid != normalized_id}
+        self.memberships = {item for item in self.memberships if item[1] != normalized_id}
+        self.roles = {key: role for key, role in self.roles.items() if key[1] != normalized_id}
+        self.skills = {key: value for key, value in self.skills.items() if key[1] != normalized_id}
+        return {"status": "ok", "deleted": True, "user_id": normalized_id}
 
     def set_role(self, *, actor_user_id: int, target_user_id: int, payload: Any) -> None:
         self._ensure_admin(actor_user_id)
@@ -178,7 +236,13 @@ class _FakeApiService:
 
         return api_app.BulkClaudeDryRunResponse(total=len(files), valid=valid, invalid=invalid, results=results)
 
-    def _read_group_messages(self, *, user_id: int, limit: int = 30) -> list[dict[str, Any]]:
+    def _read_group_messages(
+        self,
+        *,
+        user_id: int,
+        chat_id: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
         history = self.messages.get(int(user_id), [])
         return history[-max(1, int(limit)) :]
 
@@ -289,8 +353,8 @@ def test_admin_endpoint_forbidden_for_non_admin(client: tuple[TestClient, _FakeA
         json={"org_id": "beta", "name": "Beta Org"},
         headers=_auth_headers(token),
     )
-    assert create_org_response.status_code == 410
-    assert "removed" in create_org_response.text
+    assert create_org_response.status_code == 403
+    assert "Admin access required" in create_org_response.text
 
 
 def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _FakeApiService]) -> None:
@@ -321,7 +385,8 @@ def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _
         json={"org_id": "acme", "name": "Acme Corp"},
         headers=_auth_headers(admin_token),
     )
-    assert create_org.status_code == 410
+    assert create_org.status_code == 200
+    assert create_org.json() == {"status": "ok"}
 
     member_login = test_client.post(
         "/api/v1/auth/login",
@@ -457,3 +522,85 @@ def test_admin_dynamic_skill_multipart_bulk_and_dry_run(client: tuple[TestClient
     assert bulk_payload["created"] == 1
     assert bulk_payload["failed"] == 0
     assert bulk_payload["results"][0]["skill_name"] == "batch_marketing_pipeline_analyst"
+
+
+def test_admin_org_membership_and_delete_user_flow(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    register_response = test_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "member-org@acme.test",
+            "password": "MemberPass123",
+            "full_name": "Member Org",
+            "title": "Analyst",
+            "profile_bio": "Org member",
+        },
+    )
+    assert register_response.status_code == 200
+    target_user_id = int(register_response.json()["user_id"])
+
+    admin_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["access_token"]
+
+    create_org = test_client.post(
+        "/api/v1/admin/organizations",
+        json={"org_id": "beta", "name": "Beta Org"},
+        headers=_auth_headers(admin_token),
+    )
+    assert create_org.status_code == 200
+    assert create_org.json() == {"status": "ok"}
+
+    list_orgs = test_client.get(
+        "/api/v1/admin/organizations",
+        headers=_auth_headers(admin_token),
+    )
+    assert list_orgs.status_code == 200
+    listed_ids = {item["org_id"] for item in list_orgs.json()}
+    assert "beta" in listed_ids
+
+    bind_user = test_client.post(
+        f"/api/v1/admin/users/{target_user_id}/organizations/add",
+        json={"org_id": "beta", "role": "member"},
+        headers=_auth_headers(admin_token),
+    )
+    assert bind_user.status_code == 200
+    assert bind_user.json() == {"status": "ok", "created": True}
+
+    bind_user_again = test_client.post(
+        f"/api/v1/admin/users/{target_user_id}/organizations/add",
+        json={"org_id": "beta", "role": "member"},
+        headers=_auth_headers(admin_token),
+    )
+    assert bind_user_again.status_code == 200
+    assert bind_user_again.json() == {"status": "ok", "created": False}
+
+    unbind_user = test_client.delete(
+        f"/api/v1/admin/users/{target_user_id}/organizations/beta",
+        headers=_auth_headers(admin_token),
+    )
+    assert unbind_user.status_code == 200
+    assert unbind_user.json() == {"status": "ok", "removed": True}
+
+    delete_user = test_client.delete(
+        f"/api/v1/admin/users/{target_user_id}",
+        headers=_auth_headers(admin_token),
+    )
+    assert delete_user.status_code == 200
+    assert delete_user.json() == {"status": "ok", "deleted": True, "user_id": target_user_id}
+
+    deleted_user_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "member-org@acme.test", "password": "MemberPass123"},
+    )
+    assert deleted_user_login.status_code == 401
+
+    delete_missing_user = test_client.delete(
+        f"/api/v1/admin/users/{target_user_id}",
+        headers=_auth_headers(admin_token),
+    )
+    assert delete_missing_user.status_code == 404
