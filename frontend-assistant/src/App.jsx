@@ -1306,9 +1306,14 @@ function App() {
                     )}
                   </div>
                 ))}
-                {isBusy ? <div className="typing">Assistant is thinking...</div> : null}
                 <div ref={messagesEndRef} />
               </div>
+              {isBusy ? (
+                <div className="chat-busy-overlay" aria-live="polite" aria-label="Assistant is processing">
+                  <div className="chat-busy-spinner" />
+                  <div className="chat-busy-text">Assistant is working...</div>
+                </div>
+              ) : null}
             </section>
 
             <section className="composer card">

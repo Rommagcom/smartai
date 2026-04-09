@@ -578,6 +578,7 @@ button:disabled {
 .messages-card {
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .controls-top {
@@ -1054,6 +1055,42 @@ input[type="checkbox"] {
   color: var(--text-soft);
   font-size: 0.9rem;
   font-style: italic;
+}
+
+.chat-busy-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(1px);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.chat-busy-spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid rgba(31, 125, 226, 0.2);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+
+.chat-busy-text {
+  color: var(--text-strong);
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status {
