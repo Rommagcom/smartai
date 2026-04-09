@@ -777,6 +777,12 @@ input[type="checkbox"] {
   background: #f3fbf8;
 }
 
+.admin-org-list {
+  color: var(--text-soft);
+  white-space: normal;
+  word-break: break-word;
+}
+
 .composer textarea {
   width: 100%;
   display: block;

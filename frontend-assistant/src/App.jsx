@@ -16,6 +16,10 @@ const DEFAULT_ADMIN_CREATE_USER_FORM = {
   profile_bio: "",
   role: "member",
 };
+const DEFAULT_ADMIN_CREATE_ORG_FORM = {
+  org_id: "",
+  name: "",
+};
 
 function ExternalLink(props) {
   return <a {...props} target="_blank" rel="noreferrer noopener" />;
@@ -189,12 +193,18 @@ function App() {
   const [userSkills, setUserSkills] = useState([]);
   const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
   const [adminUsersOpen, setAdminUsersOpen] = useState(false);
+  const [adminOrganizationsOpen, setAdminOrganizationsOpen] = useState(false);
   const [adminUsers, setAdminUsers] = useState([]);
+  const [adminOrganizations, setAdminOrganizations] = useState([]);
   const [adminAllSkills, setAdminAllSkills] = useState([]);
   const [adminTargetUserId, setAdminTargetUserId] = useState(0);
   const [adminAssignedSkills, setAdminAssignedSkills] = useState([]);
   const [adminUserQuery, setAdminUserQuery] = useState("");
   const [adminCreateUserForm, setAdminCreateUserForm] = useState(DEFAULT_ADMIN_CREATE_USER_FORM);
+  const [adminCreateOrgForm, setAdminCreateOrgForm] = useState(DEFAULT_ADMIN_CREATE_ORG_FORM);
+  const [adminOrgTargetUserId, setAdminOrgTargetUserId] = useState(0);
+  const [adminOrgTargetOrgId, setAdminOrgTargetOrgId] = useState("");
+  const [adminOrgTargetRole, setAdminOrgTargetRole] = useState("member");
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -223,12 +233,18 @@ function App() {
     setSkillsRole("member");
     setAdminSkillsOpen(false);
     setAdminUsersOpen(false);
+    setAdminOrganizationsOpen(false);
     setAdminUsers([]);
+    setAdminOrganizations([]);
     setAdminAllSkills([]);
     setAdminTargetUserId(0);
     setAdminAssignedSkills([]);
     setAdminUserQuery("");
     setAdminCreateUserForm(DEFAULT_ADMIN_CREATE_USER_FORM);
+    setAdminCreateOrgForm(DEFAULT_ADMIN_CREATE_ORG_FORM);
+    setAdminOrgTargetUserId(0);
+    setAdminOrgTargetOrgId("");
+    setAdminOrgTargetRole("member");
     setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
@@ -419,8 +435,23 @@ function App() {
             user_id: Number(item?.user_id || 0),
             email: String(item?.email || ""),
             full_name: String(item?.full_name || "").trim() || String(item?.email || ""),
+            organization_ids: Array.isArray(item?.organization_ids)
+              ? item.organization_ids.map((org) => String(org || "").trim()).filter(Boolean)
+              : [],
           }))
           .filter((item) => item.user_id > 0)
+      : [];
+  }
+
+  async function fetchOrganizationsList() {
+    const orgsPayload = await request("/admin/organizations", { timeoutMs: 15000 });
+    return Array.isArray(orgsPayload)
+      ? orgsPayload
+          .map((item) => ({
+            org_id: String(item?.org_id || "").trim(),
+            name: String(item?.name || "").trim() || String(item?.org_id || "").trim(),
+          }))
+          .filter((item) => item.org_id)
       : [];
   }
 
@@ -512,6 +543,130 @@ function App() {
       }
     } catch (error) {
       setStatus(`Failed to create user: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function deleteUserByAdmin(targetUserId) {
+    const normalizedUserId = Number(targetUserId || 0);
+    if (!normalizedUserId) {
+      return;
+    }
+    if (!globalThis.confirm(`Delete user #${normalizedUserId}? This action cannot be undone.`)) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await request(`/admin/users/${normalizedUserId}`, {
+        method: "DELETE",
+        timeoutMs: 15000,
+      });
+      const users = await fetchAdminUsersList();
+      setAdminUsers(users);
+      setStatus("User deleted.");
+    } catch (error) {
+      setStatus(`Failed to delete user: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function openAdminOrganizationsManager() {
+    if (!isAuthenticated) {
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const [users, organizations] = await Promise.all([fetchAdminUsersList(), fetchOrganizationsList()]);
+      setAdminUsers(users);
+      setAdminOrganizations(organizations);
+      setAdminOrgTargetUserId(users[0]?.user_id || 0);
+      setAdminOrgTargetOrgId(organizations[0]?.org_id || "");
+      setAdminOrgTargetRole("member");
+      setAdminOrganizationsOpen(true);
+    } catch (error) {
+      setStatus(`Failed to load organizations manager: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function createOrganizationByAdmin() {
+    const orgId = String(adminCreateOrgForm.org_id || "").trim();
+    const name = String(adminCreateOrgForm.name || "").trim() || orgId;
+    if (!orgId) {
+      setStatus("Organization ID is required.");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await request("/admin/organizations", {
+        method: "POST",
+        body: JSON.stringify({ org_id: orgId, name }),
+        timeoutMs: 15000,
+      });
+      const organizations = await fetchOrganizationsList();
+      setAdminOrganizations(organizations);
+      setAdminCreateOrgForm(DEFAULT_ADMIN_CREATE_ORG_FORM);
+      if (!adminOrgTargetOrgId && organizations.length > 0) {
+        setAdminOrgTargetOrgId(organizations[0].org_id);
+      }
+      setStatus("Organization created.");
+    } catch (error) {
+      setStatus(`Failed to create organization: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function assignUserToOrganization() {
+    const targetUserId = Number(adminOrgTargetUserId || 0);
+    const orgId = String(adminOrgTargetOrgId || "").trim();
+    const role = String(adminOrgTargetRole || "member");
+    if (!targetUserId || !orgId) {
+      setStatus("Choose both user and organization.");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await request(`/admin/users/${targetUserId}/organizations/add`, {
+        method: "POST",
+        body: JSON.stringify({ org_id: orgId, role }),
+        timeoutMs: 15000,
+      });
+      const users = await fetchAdminUsersList();
+      setAdminUsers(users);
+      setStatus("User assigned to organization.");
+    } catch (error) {
+      setStatus(`Failed to assign user to organization: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function removeUserFromOrganization() {
+    const targetUserId = Number(adminOrgTargetUserId || 0);
+    const orgId = String(adminOrgTargetOrgId || "").trim();
+    if (!targetUserId || !orgId) {
+      setStatus("Choose both user and organization.");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await request(`/admin/users/${targetUserId}/organizations/${encodeURIComponent(orgId)}`, {
+        method: "DELETE",
+        timeoutMs: 15000,
+      });
+      const users = await fetchAdminUsersList();
+      setAdminUsers(users);
+      setStatus("User removed from organization.");
+    } catch (error) {
+      setStatus(`Failed to remove user from organization: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
@@ -1140,6 +1295,7 @@ function App() {
             <span className="pane-topbar-text">Realtime: {wsStatus}</span>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Admin Users</button>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Organizations</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
@@ -1392,17 +1548,114 @@ function App() {
               <div className="skills-summary">
                 <span>Users: {adminUsers.length}</span>
               </div>
-              <div className="skills-grid">
+              <div className="list-table">
                 {adminUsers.length === 0 ? <div className="empty">No users found.</div> : null}
+                {adminUsers.length > 0 ? (
+                  <div className="list-row list-header">
+                    <span>User</span>
+                    <span>Organizations</span>
+                    <span>Actions</span>
+                  </div>
+                ) : null}
                 {adminUsers.map((item) => (
-                  <div key={item.user_id} className="skill-item">
+                  <div key={item.user_id} className="list-row">
                     <span>{item.full_name} ({item.email})</span>
+                    <span className="admin-org-list">{item.organization_ids?.length ? item.organization_ids.join(", ") : "none"}</span>
+                    <span>
+                      <button
+                        className="ghost"
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => void deleteUserByAdmin(item.user_id)}
+                      >
+                        Delete
+                      </button>
+                    </span>
                   </div>
                 ))}
               </div>
             </div>
             <div className="top-actions">
               <button className="ghost" type="button" onClick={() => setAdminUsersOpen(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {adminOrganizationsOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setAdminOrganizationsOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin organizations manager" onClick={(event) => event.stopPropagation()}>
+            <h2>Organizations</h2>
+            <div className="context-grid profile-grid">
+              <label>Organization ID<input value={adminCreateOrgForm.org_id} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, org_id: event.target.value }))} /></label>
+              <label>Name<input value={adminCreateOrgForm.name} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, name: event.target.value }))} /></label>
+            </div>
+            <div className="top-actions">
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createOrganizationByAdmin()}>Create Organization</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Reload</button>
+            </div>
+
+            <div className="context-grid profile-grid">
+              <label>
+                User
+                <select value={adminOrgTargetUserId || 0} onChange={(event) => setAdminOrgTargetUserId(Number(event.target.value || 0))}>
+                  {adminUsers.length === 0 ? <option value={0}>No users</option> : null}
+                  {adminUsers.map((item) => (
+                    <option key={item.user_id} value={item.user_id}>{item.full_name} ({item.email})</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Organization
+                <select value={adminOrgTargetOrgId} onChange={(event) => setAdminOrgTargetOrgId(event.target.value)}>
+                  {adminOrganizations.length === 0 ? <option value="">No organizations</option> : null}
+                  {adminOrganizations.map((item) => (
+                    <option key={item.org_id} value={item.org_id}>{item.name} ({item.org_id})</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Role
+                <select value={adminOrgTargetRole} onChange={(event) => setAdminOrgTargetRole(event.target.value)}>
+                  <option value="member">member</option>
+                  <option value="manager">manager</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+            </div>
+            <div className="top-actions">
+              <button className="secondary" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void assignUserToOrganization()}>Assign User</button>
+              <button className="ghost" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void removeUserFromOrganization()}>Remove From Organization</button>
+            </div>
+
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>Organizations: {adminOrganizations.length}</span>
+              </div>
+              <div className="list-table">
+                {adminOrganizations.length === 0 ? <div className="empty">No organizations found.</div> : null}
+                {adminOrganizations.length > 0 ? (
+                  <div className="list-row list-header">
+                    <span>Organization</span>
+                    <span>ID</span>
+                    <span>Members</span>
+                  </div>
+                ) : null}
+                {adminOrganizations.map((item) => {
+                  const memberCount = adminUsers.filter((userItem) => Array.isArray(userItem.organization_ids) && userItem.organization_ids.includes(item.org_id)).length;
+                  return (
+                    <div key={item.org_id} className="list-row">
+                      <span>{item.name}</span>
+                      <span>{item.org_id}</span>
+                      <span>{memberCount}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setAdminOrganizationsOpen(false)}>Close</button>
             </div>
           </div>
         </div>

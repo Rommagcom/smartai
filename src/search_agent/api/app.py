@@ -688,6 +688,23 @@ class RealtimeChatHub:
         except Exception:
             return False
 
+    def _table_exists(self, table_name: str) -> bool:
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public' AND table_name = :table_name
+                        """
+                    ),
+                    {"table_name": table_name.strip()},
+                ).mappings().first()
+            return int(row.get("cnt") or 0) > 0 if row else False
+        except Exception:
+            return False
+
     @staticmethod
     def _is_password_age_expired(password_changed_at: datetime | None) -> bool:
         if not isinstance(password_changed_at, datetime):
@@ -1686,6 +1703,72 @@ class RealtimeChatHub:
             )
         return result
 
+    def delete_user_by_admin(self, *, actor_user_id: int, target_user_id: int) -> dict[str, Any]:
+        self._enforce_admin(actor_user_id)
+        normalized_target_id = int(target_user_id)
+        if normalized_target_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid target user id")
+        if normalized_target_id == int(actor_user_id):
+            raise HTTPException(status_code=400, detail="Cannot delete current admin user")
+
+        has_group_messages = self._table_exists("group_messages")
+        has_user_chat_sessions = self._table_exists("user_chat_sessions")
+        deleted_user = False
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                text("SELECT 1 FROM auth_users WHERE user_id = :user_id LIMIT 1"),
+                {"user_id": normalized_target_id},
+            ).first()
+            if existing is None:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            if has_group_messages:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM group_messages
+                        WHERE scope_user_id = :scope_user_id
+                           OR sender_user_id = :sender_user_id
+                        """
+                    ),
+                    {
+                        "scope_user_id": normalized_target_id,
+                        "sender_user_id": normalized_target_id,
+                    },
+                )
+            if has_user_chat_sessions:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM user_chat_sessions
+                        WHERE scope_user_id = :scope_user_id
+                        """
+                    ),
+                    {"scope_user_id": normalized_target_id},
+                )
+
+            deleted = conn.execute(
+                text(
+                    """
+                    DELETE FROM auth_users
+                    WHERE user_id = :user_id
+                    """
+                ),
+                {"user_id": normalized_target_id},
+            )
+            deleted_user = int(deleted.rowcount or 0) > 0
+
+        self.rbac.audit(
+            org_id=USER_SCOPE_ORG_ID,
+            team_id="",
+            actor_user_id=actor_user_id,
+            action="rbac.delete_user",
+            target_type="user",
+            target_id=str(normalized_target_id),
+            details={"deleted": deleted_user},
+        )
+        return {"status": "ok", "deleted": deleted_user, "user_id": normalized_target_id}
+
     def bind_user_to_org(
         self,
         *,
@@ -1700,6 +1783,13 @@ class RealtimeChatHub:
 
         now = datetime.now(UTC)
         with self.engine.begin() as conn:
+            org_exists = conn.execute(
+                text("SELECT 1 FROM organizations WHERE org_id = :org_id LIMIT 1"),
+                {"org_id": org_id},
+            ).first()
+            if org_exists is None:
+                raise HTTPException(status_code=404, detail="Organization not found")
+
             user_exists = conn.execute(
                 text("SELECT 1 FROM auth_users WHERE user_id = :user_id LIMIT 1"),
                 {"user_id": int(target_user_id)},
@@ -2767,12 +2857,13 @@ def change_my_password(payload: PasswordChangeRequest, user: CurrentUser) -> dic
 
 @app.post("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def create_org(payload: CreateOrgRequest, user: CurrentUser) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.create_org(actor_user_id=int(user["user_id"]), payload=payload)
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/admin/organizations", responses={403: {"description": "Admin access required"}})
 def list_organizations(user: CurrentUser) -> list[OrganizationSummary]:
-    _legacy_scope_removed()
+    return service.list_organizations(actor_user_id=int(user["user_id"]))
 
 
 @app.get("/api/v1/admin/users", responses={403: {"description": "Admin access required"}})
@@ -2781,7 +2872,11 @@ def list_org_users(
     user: CurrentUser,
     team_id: str | None = None,
 ) -> list[AdminUserSummary]:
-    _legacy_scope_removed()
+    return service.list_org_users(
+        actor_user_id=int(user["user_id"]),
+        org_id=org_id,
+        team_id=team_id,
+    )
 
 
 @app.get("/api/v1/admin/users/all", responses={403: {"description": "Admin access required"}})
@@ -2812,27 +2907,42 @@ def create_user_by_admin(payload: AdminCreateUserRequest, user: CurrentUser) -> 
 
 @app.patch("/api/v1/admin/users/{target_user_id}", responses={403: {"description": "Admin access required"}})
 def update_user_by_admin(target_user_id: int, payload: AdminUpdateUserRequest, user: CurrentUser) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.update_user_by_admin(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/admin/users/{target_user_id}", responses={403: {"description": "Admin access required"}, 404: {"description": "User not found"}})
+def delete_user_by_admin(target_user_id: int, user: CurrentUser) -> dict[str, Any]:
+    return service.delete_user_by_admin(actor_user_id=int(user["user_id"]), target_user_id=target_user_id)
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/otp", responses={403: {"description": "Admin access required"}})
 def reset_user_otp(target_user_id: int, payload: ResetPasswordRequest, user: CurrentUser) -> dict[str, Any]:
-    _legacy_scope_removed()
+    return service.reset_user_password_one_time(
+        actor_user_id=int(user["user_id"]),
+        org_id=payload.org_id,
+        target_user_id=target_user_id,
+        ttl_minutes=payload.ttl_minutes,
+    )
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/force-password-change", responses={403: {"description": "Admin access required"}})
 def force_user_password_change(target_user_id: int, payload: ForcePasswordChangeRequest, user: CurrentUser) -> dict[str, Any]:
-    _legacy_scope_removed()
+    return service.force_user_password_change(
+        actor_user_id=int(user["user_id"]),
+        org_id=payload.org_id,
+        target_user_id=target_user_id,
+    )
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/organizations/add", responses={403: {"description": "Admin access required"}})
 def bind_user_to_org(target_user_id: int, payload: MembershipUpsertRequest, user: CurrentUser) -> dict[str, Any]:
-    _legacy_scope_removed()
+    return service.bind_user_to_org(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
 
 
 @app.delete("/api/v1/admin/users/{target_user_id}/organizations/{org_id}", responses={403: {"description": "Admin access required"}})
 def unbind_user_from_org(target_user_id: int, org_id: str, user: CurrentUser) -> dict[str, Any]:
-    _legacy_scope_removed()
+    return service.unbind_user_from_org(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, org_id=org_id)
 
 
 @app.post("/api/v1/admin/users/{target_user_id}/role", responses={403: {"description": "Admin access required"}})
@@ -2841,7 +2951,8 @@ def set_role(
     payload: SetRoleRequest,
     user: CurrentUser,
 ) -> dict[str, str]:
-    _legacy_scope_removed()
+    service.set_role(actor_user_id=int(user["user_id"]), target_user_id=target_user_id, payload=payload)
+    return {"status": "ok"}
 
 
 @app.post(
