@@ -2790,18 +2790,23 @@ def list_all_users(user: CurrentUser) -> list[GlobalAdminUserSummary]:
 
 @app.post("/api/v1/admin/users", responses={403: {"description": "Admin access required"}, 409: {"description": "Email already registered"}})
 def create_user_by_admin(payload: AdminCreateUserRequest, user: CurrentUser) -> dict[str, Any]:
-    return service.create_user_by_admin(
-        actor_user_id=int(user["user_id"]),
-        payload=AdminCreateUserRequest(
-            org_id=USER_SCOPE_ORG_ID,
-            email=payload.email,
-            password=payload.password,
-            full_name=payload.full_name,
-            title=payload.title,
-            profile_bio=payload.profile_bio,
-            role=payload.role,
-        ),
-    )
+    try:
+        return service.create_user_by_admin(
+            actor_user_id=int(user["user_id"]),
+            payload=AdminCreateUserRequest(
+                org_id=USER_SCOPE_ORG_ID,
+                email=payload.email,
+                password=payload.password,
+                full_name=payload.full_name,
+                title=payload.title,
+                profile_bio=payload.profile_bio,
+                role=payload.role,
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed_to_create_user: {exc}") from exc
 
 
 @app.patch("/api/v1/admin/users/{target_user_id}", responses={403: {"description": "Admin access required"}})

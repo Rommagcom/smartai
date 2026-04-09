@@ -503,7 +503,7 @@ function App() {
       setAdminCreateUserForm(DEFAULT_ADMIN_CREATE_USER_FORM);
       const users = await fetchAdminUsersList();
       setAdminUsers(users);
-      const generatedPassword = String(payload?.password || "").trim();
+      const generatedPassword = String(payload?.one_time_password || payload?.password || "").trim();
       setStatus(generatedPassword ? `User created. Generated password: ${generatedPassword}` : "User created.");
     } catch (error) {
       setStatus(`Failed to create user: ${error.message}`);
