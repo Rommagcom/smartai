@@ -662,3 +662,78 @@ def test_collect_user_org_ids_keeps_only_unique_non_empty_values() -> None:
     org_ids = service._collect_user_org_ids(org_rows=org_rows)
 
     assert org_ids == ["acme", "beta"]
+
+
+def test_organization_people_context_filters_to_requester_orgs() -> None:
+    service = api_app.ApiService.__new__(api_app.ApiService)
+
+    class _FakeResult:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self._rows = rows
+
+        def mappings(self) -> "_FakeResult":
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return self._rows
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+            self._calls += 1
+            query_params = params or {}
+
+            if self._calls == 1:
+                # Memberships of requesting user: only acme.
+                assert int(query_params.get("user_id") or 0) == 10
+                return _FakeResult([{"org_id": "acme"}])
+
+            if self._calls == 2:
+                # Organization names lookup must be restricted to requester orgs.
+                assert query_params.get("org_ids") == ["acme"]
+                return _FakeResult([{"org_id": "acme", "name": "Acme Corp"}])
+
+            if self._calls == 3:
+                # Members query must also be restricted to requester orgs.
+                assert query_params.get("org_ids") == ["acme"]
+                return _FakeResult(
+                    [
+                        {
+                            "org_id": "acme",
+                            "user_id": 10,
+                            "email": "requester@acme.test",
+                            "full_name": "Requester",
+                            "title": "Manager",
+                            "profile_bio": "Leads product",
+                        },
+                        {
+                            "org_id": "acme",
+                            "user_id": 11,
+                            "email": "colleague@acme.test",
+                            "full_name": "Colleague",
+                            "title": "Analyst",
+                            "profile_bio": "Owns reporting",
+                        },
+                    ]
+                )
+
+            return _FakeResult([])
+
+    class _FakeBegin:
+        def __enter__(self) -> _FakeConn:
+            return _FakeConn()
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+    service.engine = SimpleNamespace(begin=lambda: _FakeBegin())
+    service._table_exists = lambda table_name: table_name in {"org_memberships", "organizations"}
+
+    context = service._organization_people_context(user_id=10)
+
+    assert "Org acme (Acme Corp):" in context
+    assert "Requester (you); title: Manager" in context
+    assert "Colleague; title: Analyst" in context
+    assert "Org beta" not in context
