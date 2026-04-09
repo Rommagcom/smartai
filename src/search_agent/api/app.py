@@ -2621,11 +2621,14 @@ class RealtimeChatHub:
         )
 
         user_profile = self._user_profile_text(user_id=user_id)
+        org_people_context = self._organization_people_context(user_id=user_id)
         try:
             history = self._load_group_history(user_id=user_id, chat_id=scope_chat_id)
         except Exception:
             history = []
         memory_context = self._recall_shared_memory(user_id=user_id, chat_id=scope_chat_id, query=payload.message)
+        if org_people_context:
+            history = [{"role": "system", "content": org_people_context}, *history]
         if user_profile:
             history = [{"role": "system", "content": user_profile}, *history]
         if memory_context:
@@ -2708,6 +2711,133 @@ class RealtimeChatHub:
                 ),
             ]
         return ChatResponse(answer=answer, messages=messages, chat_id=scope_chat_id)
+
+    def _format_org_member_line(self, *, row: dict[str, Any], user_id: int, max_bio_len: int) -> str:
+        row_user_id = int(row.get("user_id") or 0)
+        email = str(row.get("email") or "").strip() or "unknown"
+        full_name = str(row.get("full_name") or "").strip() or email
+        title = str(row.get("title") or "").strip() or "Unknown"
+        bio = re.sub(r"\s+", " ", str(row.get("profile_bio") or "").strip())
+        if len(bio) > max_bio_len:
+            bio = f"{bio[:max_bio_len].rstrip()}..."
+        you_suffix = " (you)" if row_user_id == int(user_id) else ""
+        if bio:
+            return f"- {full_name}{you_suffix}; title: {title}; email: {email}; about: {bio}"
+        return f"- {full_name}{you_suffix}; title: {title}; email: {email}"
+
+    def _resolve_org_name_map(self, conn: Any, org_ids: list[str]) -> dict[str, str]:
+        org_name_map: dict[str, str] = {org_id: org_id for org_id in org_ids}
+        if not self._table_exists("organizations"):
+            return org_name_map
+
+        name_rows = conn.execute(
+            text(
+                """
+                SELECT org_id, name
+                FROM organizations
+                WHERE org_id = ANY(:org_ids)
+                """
+            ),
+            {"org_ids": org_ids},
+        ).mappings().all()
+        for row in name_rows:
+            org_key = str(row.get("org_id") or "").strip()
+            if not org_key:
+                continue
+            org_name_map[org_key] = str(row.get("name") or org_key).strip() or org_key
+        return org_name_map
+
+    def _collect_user_org_ids(self, *, org_rows: Sequence[dict[str, Any]]) -> list[str]:
+        collected: list[str] = []
+        seen: set[str] = set()
+        for row in org_rows:
+            org_id = str(row.get("org_id") or "").strip()
+            if org_id and org_id not in seen:
+                collected.append(org_id)
+                seen.add(org_id)
+        return collected
+
+    def _load_org_member_rows(self, conn: Any, *, org_ids: list[str]) -> list[dict[str, Any]]:
+        return list(
+            conn.execute(
+                text(
+                    """
+                    SELECT
+                        om.org_id,
+                        u.user_id,
+                        u.email,
+                        u.full_name,
+                        u.title,
+                        u.profile_bio
+                    FROM org_memberships om
+                    JOIN auth_users u ON u.user_id = om.user_id
+                    WHERE om.org_id = ANY(:org_ids)
+                    ORDER BY om.org_id ASC, u.full_name ASC, u.email ASC
+                    """
+                ),
+                {"org_ids": org_ids},
+            ).mappings().all()
+        )
+
+    def _organization_people_context(self, *, user_id: int) -> str:
+        # Keep context compact so it helps planning without overwhelming the model prompt.
+        if not self._table_exists("org_memberships"):
+            return ""
+
+        max_orgs = 5
+        max_people_per_org = 15
+        max_bio_len = 180
+
+        try:
+            with self.engine.begin() as conn:
+                org_rows = conn.execute(
+                    text(
+                        """
+                        SELECT om.org_id
+                        FROM org_memberships om
+                        WHERE om.user_id = :user_id
+                        ORDER BY om.org_id ASC
+                        LIMIT :limit
+                        """
+                    ),
+                    {
+                        "user_id": int(user_id),
+                        "limit": int(max_orgs),
+                    },
+                ).mappings().all()
+
+                org_ids = self._collect_user_org_ids(org_rows=org_rows)
+                if not org_ids:
+                    return ""
+                org_name_map = self._resolve_org_name_map(conn, org_ids)
+                member_rows = self._load_org_member_rows(conn, org_ids=org_ids)
+        except Exception:
+            return ""
+
+        grouped: dict[str, list[str]] = {org_id: [] for org_id in org_ids}
+        for row in member_rows:
+            org_key = str(row.get("org_id") or "").strip()
+            if org_key not in grouped:
+                continue
+            if len(grouped[org_key]) >= max_people_per_org:
+                continue
+            grouped[org_key].append(self._format_org_member_line(row=dict(row), user_id=user_id, max_bio_len=max_bio_len))
+
+        lines = ["Organization employee directory context:"]
+        has_any_member = False
+        for org_id in org_ids:
+            people = grouped.get(org_id, [])
+            if not people:
+                continue
+            has_any_member = True
+            org_name = org_name_map.get(org_id, org_id)
+            lines.append(f"Org {org_id} ({org_name}):")
+            lines.extend(people)
+
+        if not has_any_member:
+            return ""
+        lines.append("Use this directory to answer coworker/profile questions accurately.")
+        return "\n".join(lines)
 
     def _user_profile_text(self, *, user_id: int) -> str:
         with self.engine.begin() as conn:

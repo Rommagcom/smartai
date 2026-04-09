@@ -4,6 +4,7 @@ import os
 import importlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -604,3 +605,60 @@ def test_admin_org_membership_and_delete_user_flow(client: tuple[TestClient, _Fa
         headers=_auth_headers(admin_token),
     )
     assert delete_missing_user.status_code == 404
+
+
+def test_send_group_chat_includes_org_employee_directory_context() -> None:
+    service = api_app.ApiService.__new__(api_app.ApiService)
+
+    captured: dict[str, Any] = {}
+
+    class _DummyAgent:
+        def __init__(self) -> None:
+            self.registry = SimpleNamespace(tools={})
+
+        def refresh_dynamic_tools(self) -> None:
+            return None
+
+        def run(self, message: str, history: list[dict[str, str]], *args: Any, **kwargs: Any) -> Any:
+            captured["message"] = message
+            captured["history"] = history
+            return SimpleNamespace(answer="ok", messages=[])
+
+    service.settings = SimpleNamespace(enable_dynamic_tools=False)
+    service.rbac = SimpleNamespace(
+        get_role=lambda **_: "member",
+        resolve_allowed_skills=lambda **_: set(),
+    )
+    service.agent = _DummyAgent()
+    service.long_term = None
+
+    service._organization_people_context = lambda **_: "ORG_CTX"
+    service._user_profile_text = lambda **_: "USER_CTX"
+    service._recall_shared_memory = lambda **_: "MEM_CTX"
+    service._load_group_history = lambda **_: [{"role": "user", "content": "previous message"}]
+    service._append_group_message = lambda **_: None
+    service._maybe_autotitle_chat_session = lambda **_: None
+    service._read_group_messages = lambda **_: []
+
+    response = service.send_group_chat(user_id=7, payload=api_app.ChatRequest(message="Who is on my team?"))
+
+    assert response.answer == "ok"
+    sent_history = captured["history"]
+    assert [item["content"] for item in sent_history[:3]] == ["MEM_CTX", "USER_CTX", "ORG_CTX"]
+    assert sent_history[3] == {"role": "user", "content": "previous message"}
+
+
+def test_collect_user_org_ids_keeps_only_unique_non_empty_values() -> None:
+    service = api_app.ApiService.__new__(api_app.ApiService)
+
+    org_rows = [
+        {"org_id": "acme"},
+        {"org_id": "beta"},
+        {"org_id": "acme"},
+        {"org_id": ""},
+        {"org_id": None},
+    ]
+
+    org_ids = service._collect_user_org_ids(org_rows=org_rows)
+
+    assert org_ids == ["acme", "beta"]
