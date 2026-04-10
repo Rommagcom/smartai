@@ -3379,18 +3379,6 @@ def chat_session_purge(chat_id: str, user: CurrentUser) -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.delete("/api/v1/chat/sessions/trash/purge")
-def chat_sessions_trash_purge(user: CurrentUser) -> dict[str, int]:
-    purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
-    return {"purged": purged}
-
-
-@app.delete("/api/v1/chat/sessions/purge-trash")
-def chat_sessions_purge_trash(user: CurrentUser) -> dict[str, int]:
-    purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
-    return {"purged": purged}
-
-
 @app.delete("/api/v1/chat/trash/purge")
 def chat_trash_purge(user: CurrentUser) -> dict[str, int]:
     purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
