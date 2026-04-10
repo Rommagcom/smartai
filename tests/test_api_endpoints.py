@@ -587,7 +587,7 @@ def test_chat_trash_lifecycle_updates_session_lists_without_reload(client: tuple
     delete_second = test_client.delete(f"/api/v1/chat/sessions/{second_chat_id}", headers=headers)
     assert delete_second.status_code == 200
 
-    purge_all = test_client.delete("/api/v1/chat/sessions/purge-trash", headers=headers)
+    purge_all = test_client.delete("/api/v1/chat/sessions/trash/purge", headers=headers)
     assert purge_all.status_code == 200
     assert purge_all.json()["purged"] == 1
 
