@@ -473,6 +473,13 @@ button:disabled {
   transform: translateY(-6px) rotate(-35deg);
 }
 
+.history-toggle-btn-floating {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 4;
+}
+
 .app-grid {
   display: grid;
   grid-template-columns: 320px 1fr;

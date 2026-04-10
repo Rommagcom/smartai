@@ -1315,6 +1315,7 @@ function App() {
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const activeChatKind = String(activeSession?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
   const resolvedChatTitle = activeChatKind === "personal" ? t("personalChat") : hasGroupMemberships ? t("groupChat") : t("personalChat");
+  const resolvedContextSubtitle = activeChatKind === "personal" ? t("personalContextSubtitle") : t("contextSubtitle");
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
   const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted || forcePasswordChange;
   const sessionGroups = groupSessionsByPeriod(chatSessions);
@@ -1369,23 +1370,12 @@ function App() {
         <header className="chat-header card">
           <div>
             <h1>{resolvedChatTitle}</h1>
-            <p className="subtitle">{t("contextSubtitle")}</p>
+            <p className="subtitle">{resolvedContextSubtitle}</p>
             {forcePasswordChange ? <p className="subtitle">{t("passwordChangeRequired")}</p> : null}
           </div>
           <div className="top-actions">
             <span className="pane-topbar-text">{t("realtime")}: {wsStatus}</span>
             <span className="pane-topbar-text">{t("role")}: {isAdmin ? t("roleAdmin") : t("roleMember")}</span>
-            <button
-              className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
-              type="button"
-              onClick={() => setIsHistoryCollapsed((prev) => !prev)}
-              aria-label={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
-              title={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
-            >
-              <span />
-              <span />
-              <span />
-            </button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>{t("skills")}</button>
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>{t("adminUsers")}</button> : null}
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>{t("organizations")}</button> : null}
@@ -1407,6 +1397,17 @@ function App() {
         <section className={isHistoryCollapsed ? "chat-layout chat-layout-collapsed" : "chat-layout"}>
           <aside className="chat-history card">
             <div className="chat-history-top">
+              <button
+                className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
+                type="button"
+                onClick={() => setIsHistoryCollapsed((prev) => !prev)}
+                aria-label={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+                title={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
               <div className="chat-mode-tabs">
                 <button
                   type="button"
@@ -1541,6 +1542,19 @@ function App() {
           </aside>
 
           <div className="chat-main">
+            {isHistoryCollapsed ? (
+              <button
+                className="ghost history-toggle-btn history-toggle-btn-floating is-collapsed"
+                type="button"
+                onClick={() => setIsHistoryCollapsed(false)}
+                aria-label={t("showHistory")}
+                title={t("showHistory")}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
+            ) : null}
             <section className="messages-card card">
               <div className="messages-list" role="log" aria-live="polite">
                 {messages.length === 0 ? <div className="empty">{t("noMessages")}</div> : null}
