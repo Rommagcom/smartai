@@ -1125,7 +1125,7 @@ function App() {
 
     const bootstrap = async () => {
       await refreshCurrentRole();
-      const sessions = await fetchChatSessions(false);
+      const sessions = await fetchChatSessions(showTrash);
       if (!sessions.length) {
         setActiveChatId(DEFAULT_CHAT_ID);
         activeChatIdRef.current = DEFAULT_CHAT_ID;
@@ -1312,13 +1312,20 @@ function App() {
     }
   }
 
+  const visibleChatSessions = useMemo(() => {
+    if (showTrash) {
+      return chatSessions.filter((session) => Boolean(session?.deleted_at));
+    }
+    return chatSessions.filter((session) => !session?.deleted_at);
+  }, [chatSessions, showTrash]);
+
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const activeChatKind = String(activeSession?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
   const resolvedChatTitle = activeChatKind === "personal" ? t("personalChat") : hasGroupMemberships ? t("groupChat") : t("personalChat");
   const resolvedContextSubtitle = activeChatKind === "personal" ? t("personalContextSubtitle") : t("contextSubtitle");
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
   const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted || forcePasswordChange;
-  const sessionGroups = groupSessionsByPeriod(chatSessions);
+  const sessionGroups = groupSessionsByPeriod(visibleChatSessions);
 
   if (!isAuthenticated) {
     return (
@@ -1445,14 +1452,14 @@ function App() {
                 </button>
               </div>
               {showTrash ? (
-                <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || chatSessions.length === 0} onClick={() => void purgeAllTrashedChats()}>
+                <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || trashCount === 0} onClick={() => void purgeAllTrashedChats()}>
                   {t("purgeAll")}
                 </button>
               ) : null}
             </div>
 
             <div className="chat-history-list density-compact" aria-label="Chat sessions">
-              {chatSessions.length === 0 ? <div className="empty">{t("noChats")}</div> : null}
+              {visibleChatSessions.length === 0 ? <div className="empty">{t("noChats")}</div> : null}
               {sessionGroups.map((group) =>
                 group.items.length > 0 ? (
                   <div key={group.title} className="chat-group">

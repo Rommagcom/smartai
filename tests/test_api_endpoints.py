@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import importlib
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,14 @@ class _FakeApiService:
         self.skills: dict[tuple[str, int], set[str]] = {}
         self.messages: dict[int, list[dict[str, Any]]] = {}
         self.dynamic_skills: dict[str, dict[str, str]] = {}
+        self.chat_sessions: dict[int, dict[str, dict[str, Any]]] = {}
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(UTC).isoformat()
+
+    def _ensure_user_session_store(self, user_id: int) -> dict[str, dict[str, Any]]:
+        return self.chat_sessions.setdefault(int(user_id), {})
 
     def register_user(self, payload: Any) -> int:
         email = payload.email.strip().lower()
@@ -249,7 +258,7 @@ class _FakeApiService:
 
     def send_group_chat(self, *, user_id: int, payload: Any) -> Any:
         history = self.messages.setdefault(int(user_id), [])
-        now = datetime.now(UTC).isoformat()
+        now = self._now_iso()
         history.append(
             api_app.ChatMessage(
                 sender_type="user",
@@ -268,6 +277,76 @@ class _FakeApiService:
             )
         )
         return api_app.ChatResponse(answer=answer, messages=list(history))
+
+    def list_chat_sessions(self, *, user_id: int, include_deleted: bool = False) -> list[Any]:
+        store = self._ensure_user_session_store(int(user_id))
+        sessions = []
+        for record in store.values():
+            if not include_deleted and record.get("deleted_at"):
+                continue
+            sessions.append(api_app.ChatSessionSummary(**record))
+        sessions.sort(key=lambda item: item.updated_at, reverse=True)
+        return sessions
+
+    def create_chat_session(self, *, user_id: int, title: str = "") -> Any:
+        store = self._ensure_user_session_store(int(user_id))
+        now = self._now_iso()
+        chat_id = f"chat-{uuid.uuid4().hex[:10]}"
+        payload = {
+            "chat_id": chat_id,
+            "title": str(title or "").strip() or "New Chat",
+            "created_at": now,
+            "updated_at": now,
+            "deleted_at": None,
+            "message_count": 0,
+            "preview": "",
+        }
+        store[chat_id] = payload
+        return api_app.ChatSessionSummary(**payload)
+
+    def rename_chat_session(self, *, user_id: int, chat_id: str, title: str) -> Any:
+        store = self._ensure_user_session_store(int(user_id))
+        key = str(chat_id).strip()
+        if key not in store:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        store[key]["title"] = str(title).strip()
+        store[key]["updated_at"] = self._now_iso()
+        return api_app.ChatSessionSummary(**store[key])
+
+    def delete_chat_session(self, *, user_id: int, chat_id: str) -> None:
+        store = self._ensure_user_session_store(int(user_id))
+        key = str(chat_id).strip()
+        if key not in store:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        now = self._now_iso()
+        store[key]["deleted_at"] = now
+        store[key]["updated_at"] = now
+
+    def restore_chat_session(self, *, user_id: int, chat_id: str) -> Any:
+        store = self._ensure_user_session_store(int(user_id))
+        key = str(chat_id).strip()
+        if key not in store:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        store[key]["deleted_at"] = None
+        store[key]["updated_at"] = self._now_iso()
+        return api_app.ChatSessionSummary(**store[key])
+
+    def purge_chat_session(self, *, user_id: int, chat_id: str) -> None:
+        store = self._ensure_user_session_store(int(user_id))
+        key = str(chat_id).strip()
+        record = store.get(key)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        if not record.get("deleted_at"):
+            raise HTTPException(status_code=409, detail="Chat session must be in trash before purge")
+        del store[key]
+
+    def purge_all_trashed_chats(self, *, user_id: int) -> int:
+        store = self._ensure_user_session_store(int(user_id))
+        to_remove = [chat_id for chat_id, record in store.items() if record.get("deleted_at")]
+        for chat_id in to_remove:
+            del store[chat_id]
+        return len(to_remove)
 
 
 @pytest.fixture()
@@ -443,6 +522,82 @@ def test_chat_send_is_available_for_new_user_scope(client: tuple[TestClient, _Fa
     )
     assert chat_send.status_code == 200
     assert chat_send.json()["answer"] == "ACK: Hello"
+
+
+def test_chat_trash_lifecycle_updates_session_lists_without_reload(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    member_register = test_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "trash-user@acme.test",
+            "password": "TrashPass123",
+            "full_name": "Trash User",
+            "title": "Analyst",
+            "profile_bio": "Trash checks",
+        },
+    )
+    assert member_register.status_code == 200
+
+    member_login = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "trash-user@acme.test", "password": "TrashPass123"},
+    )
+    assert member_login.status_code == 200
+    token = member_login.json()["access_token"]
+    headers = _auth_headers(token)
+
+    first = test_client.post("/api/v1/chat/sessions", json={"title": "Chat A"}, headers=headers)
+    second = test_client.post("/api/v1/chat/sessions", json={"title": "Chat B"}, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_chat_id = first.json()["chat_id"]
+    second_chat_id = second.json()["chat_id"]
+
+    active_list = test_client.get("/api/v1/chat/sessions", headers=headers)
+    assert active_list.status_code == 200
+    active_payload = active_list.json()["sessions"]
+    assert len(active_payload) == 2
+    assert all(item["deleted_at"] is None for item in active_payload)
+
+    delete_first = test_client.delete(f"/api/v1/chat/sessions/{first_chat_id}", headers=headers)
+    assert delete_first.status_code == 200
+
+    active_after_delete = test_client.get("/api/v1/chat/sessions", headers=headers)
+    assert active_after_delete.status_code == 200
+    active_after_delete_ids = {item["chat_id"] for item in active_after_delete.json()["sessions"]}
+    assert active_after_delete_ids == {second_chat_id}
+
+    trash_list = test_client.get("/api/v1/chat/sessions?include_deleted=true", headers=headers)
+    assert trash_list.status_code == 200
+    trash_payload = trash_list.json()["sessions"]
+    assert len(trash_payload) == 2
+    deleted_rows = [item for item in trash_payload if item["deleted_at"]]
+    assert len(deleted_rows) == 1
+    assert deleted_rows[0]["chat_id"] == first_chat_id
+
+    purge_first = test_client.delete(f"/api/v1/chat/sessions/{first_chat_id}/purge", headers=headers)
+    assert purge_first.status_code == 200
+
+    after_purge = test_client.get("/api/v1/chat/sessions?include_deleted=true", headers=headers)
+    assert after_purge.status_code == 200
+    after_purge_ids = {item["chat_id"] for item in after_purge.json()["sessions"]}
+    assert after_purge_ids == {second_chat_id}
+
+    delete_second = test_client.delete(f"/api/v1/chat/sessions/{second_chat_id}", headers=headers)
+    assert delete_second.status_code == 200
+
+    purge_all = test_client.delete("/api/v1/chat/sessions/purge-trash", headers=headers)
+    assert purge_all.status_code == 200
+    assert purge_all.json()["purged"] == 1
+
+    final_active = test_client.get("/api/v1/chat/sessions", headers=headers)
+    assert final_active.status_code == 200
+    assert final_active.json()["sessions"] == []
+
+    final_all = test_client.get("/api/v1/chat/sessions?include_deleted=true", headers=headers)
+    assert final_all.status_code == 200
+    assert final_all.json()["sessions"] == []
 
 
 def test_admin_dynamic_skill_endpoints_with_uploaded_markdown_file(client: tuple[TestClient, _FakeApiService]) -> None:
