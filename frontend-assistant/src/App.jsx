@@ -4,6 +4,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { I18N, SUPPORTED_LANGUAGES } from "./i18n";
 import { readStoredLanguage, writeStoredLanguage } from "./languageStorage";
+import { readStoredTheme, SUPPORTED_THEMES, writeStoredTheme } from "./themeStorage";
 
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
@@ -12,6 +13,8 @@ const DEFAULT_PROFILE_FORM = { email: "", full_name: "", title: "", profile_bio:
 const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "", confirm_password: "" };
 const PERSONAL_CHAT_MARKER = "[personal]";
 const GROUP_CHAT_MARKER = "[group]";
+const GROUP_FILTER_ALL = "__all__";
+const GROUP_FILTER_PERSONAL = "__personal__";
 const DEFAULT_ADMIN_CREATE_USER_FORM = {
   email: "",
   password: "",
@@ -203,6 +206,7 @@ function groupSessionsByPeriod(items) {
 
 function App() {
   const [language, setLanguage] = useState(readStoredLanguage);
+  const [theme, setTheme] = useState(readStoredTheme);
   const [mode, setMode] = useState("login");
   const [registerForm, setRegisterForm] = useState(DEFAULT_REGISTER_FORM);
   const [loginForm, setLoginForm] = useState(DEFAULT_LOGIN_FORM);
@@ -243,7 +247,7 @@ function App() {
   const [adminOrgTargetUserId, setAdminOrgTargetUserId] = useState(0);
   const [adminOrgTargetOrgId, setAdminOrgTargetOrgId] = useState("");
   const [adminOrgTargetRole, setAdminOrgTargetRole] = useState("member");
-  const [groupChatOrgId, setGroupChatOrgId] = useState("");
+  const [groupChatOrgId, setGroupChatOrgId] = useState(GROUP_FILTER_ALL);
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -266,6 +270,15 @@ function App() {
     }
     setLanguage(normalized);
     writeStoredLanguage(normalized);
+  }
+
+  function onChangeTheme(nextTheme) {
+    const normalized = String(nextTheme || "").trim().toLowerCase();
+    if (!SUPPORTED_THEMES.includes(normalized)) {
+      return;
+    }
+    setTheme(normalized);
+    writeStoredTheme(normalized);
   }
 
   function performSessionLogout(reason = "Session expired. Please sign in again.") {
@@ -299,7 +312,7 @@ function App() {
     setAdminOrgTargetUserId(0);
     setAdminOrgTargetOrgId("");
     setAdminOrgTargetRole("member");
-    setGroupChatOrgId("");
+    setGroupChatOrgId(GROUP_FILTER_ALL);
     setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
@@ -414,7 +427,11 @@ function App() {
     }
     const normalizedKind = String(kind || "group").toLowerCase() === "personal" ? "personal" : "group";
     const title = normalizedKind === "personal" ? `${PERSONAL_CHAT_MARKER} Personal Chat` : `${GROUP_CHAT_MARKER} Group Chat`;
-    const selectedOrgId = String(groupChatOrgId || "").trim();
+    const selectedFilterValue = String(groupChatOrgId || "").trim();
+    const selectedOrgId =
+      selectedFilterValue && selectedFilterValue !== GROUP_FILTER_ALL && selectedFilterValue !== GROUP_FILTER_PERSONAL
+        ? selectedFilterValue
+        : String(adminOrganizations[0]?.org_id || "").trim();
     if (normalizedKind === "group" && isAdmin && !selectedOrgId) {
       setStatus("Choose organization for group chat.");
       return;
@@ -1144,6 +1161,15 @@ function App() {
   }
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    const resolvedTheme = theme === "dark" ? "dark" : "light";
+    document.body.setAttribute("data-theme", resolvedTheme);
+    document.body.style.colorScheme = resolvedTheme;
+  }, [theme]);
+
+  useEffect(() => {
     if (!isAuthenticated) {
       closeSocket();
       setWsStatus("offline");
@@ -1167,18 +1193,18 @@ function App() {
           const filteredOrganizations = organizations.filter((item) => myOrgIds.has(String(item?.org_id || "").trim()));
           setAdminOrganizations(filteredOrganizations);
           if (!groupChatOrgId && filteredOrganizations.length > 0) {
-            setGroupChatOrgId(String(filteredOrganizations[0].org_id || ""));
+            setGroupChatOrgId(GROUP_FILTER_ALL);
           }
         } else {
           setAdminOrganizations([]);
-          setGroupChatOrgId("");
+          setGroupChatOrgId(GROUP_FILTER_ALL);
         }
       } catch {
         setCurrentUserRole("member");
         setCurrentUserFullName("");
         setHasGroupMemberships(false);
         setAdminOrganizations([]);
-        setGroupChatOrgId("");
+        setGroupChatOrgId(GROUP_FILTER_ALL);
       }
     };
 
@@ -1374,8 +1400,14 @@ function App() {
   const visibleChatSessions = useMemo(() => {
     const selectedOrgId = String(groupChatOrgId || "").trim();
     const baseSessions = showTrash ? chatSessions.filter((session) => Boolean(session?.deleted_at)) : chatSessions.filter((session) => !session?.deleted_at);
-    if (showTrash || !isAdmin || !hasGroupMemberships || !selectedOrgId) {
+    if (showTrash || !isAdmin || !hasGroupMemberships) {
       return baseSessions;
+    }
+    if (!selectedOrgId || selectedOrgId === GROUP_FILTER_ALL) {
+      return baseSessions;
+    }
+    if (selectedOrgId === GROUP_FILTER_PERSONAL) {
+      return baseSessions.filter((session) => session?.chat_kind === "personal");
     }
     return baseSessions.filter(
       (session) => session?.chat_kind === "group" && String(session?.group_label || "").trim() === selectedOrgId
@@ -1414,6 +1446,11 @@ function App() {
           <p className="subtitle">{t("userOnlyMode")}</p>
 
           <div className="top-actions" style={{ justifyContent: "flex-end" }}>
+            <label className="pane-topbar-text" htmlFor="theme-switch-auth">{t("theme")}:</label>
+            <select id="theme-switch-auth" value={theme} onChange={(event) => onChangeTheme(event.target.value)}>
+              <option value="light">{t("themeLight")}</option>
+              <option value="dark">{t("themeDark")}</option>
+            </select>
             <label className="pane-topbar-text" htmlFor="lang-switch-auth">{t("language")}:</label>
             <select id="lang-switch-auth" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
               <option value="kk">KK</option>
@@ -1469,6 +1506,13 @@ function App() {
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>{t("profile")}</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>{t("refresh")}</button>
             <button className="ghost" type="button" onClick={logout}>{t("logout")}</button>
+            <div className="theme-switch theme-switch-right">
+              <label className="pane-topbar-text" htmlFor="theme-switch-chat">{t("theme")}:</label>
+              <select id="theme-switch-chat" value={theme} onChange={(event) => onChangeTheme(event.target.value)}>
+                <option value="light">{t("themeLight")}</option>
+                <option value="dark">{t("themeDark")}</option>
+              </select>
+            </div>
             <div className="lang-switch lang-switch-right">
               <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
               <select id="lang-switch-chat" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
@@ -1494,6 +1538,19 @@ function App() {
                 <span />
                 <span />
               </button>
+              {isAdmin && hasGroupMemberships && !showTrash ? (
+                <div className="chat-group-select-wrap">
+                  <label className="pane-topbar-text" htmlFor="group-chat-org-select">{t("groupChatOrgLabel")}</label>
+                  <select id="group-chat-org-select" className="chat-group-select" value={groupChatOrgId} onChange={(event) => setGroupChatOrgId(event.target.value)}>
+                    <option value={GROUP_FILTER_ALL}>{t("groupFilterAll")}</option>
+                    <option value={GROUP_FILTER_PERSONAL}>{t("groupFilterPersonalChats")}</option>
+                    {adminOrganizations.length === 0 ? <option value="">{t("noOrganizations")}</option> : null}
+                    {adminOrganizations.map((item) => (
+                      <option key={item.org_id} value={item.org_id}>{item.org_id} - {item.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               {showTrash ? null : (
                 <div className="chat-create-row">
                   {isAdmin && hasGroupMemberships ? (
@@ -1508,17 +1565,6 @@ function App() {
                   </button>
                 </div>
               )}
-              {isAdmin && hasGroupMemberships && !showTrash ? (
-                <div className="chat-group-select-wrap">
-                  <label className="pane-topbar-text" htmlFor="group-chat-org-select">{t("groupChatOrgLabel")}</label>
-                  <select id="group-chat-org-select" className="chat-group-select" value={groupChatOrgId} onChange={(event) => setGroupChatOrgId(event.target.value)}>
-                    {adminOrganizations.length === 0 ? <option value="">{t("noOrganizations")}</option> : null}
-                    {adminOrganizations.map((item) => (
-                      <option key={item.org_id} value={item.org_id}>{item.org_id} - {item.name}</option>
-                    ))}
-                  </select>
-                </div>
-              ) : null}
               <div className="chat-mode-tabs">
                 <button
                   type="button"
