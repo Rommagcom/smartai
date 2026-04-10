@@ -465,6 +465,17 @@ button:disabled {
   line-height: 1.25;
 }
 
+.chat-session-subtitle {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: rgba(225, 241, 255, 0.78);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-title-input:focus {
   outline: 2px solid rgba(115, 199, 255, 0.55);
   border-color: transparent;

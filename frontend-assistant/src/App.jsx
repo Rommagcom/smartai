@@ -128,6 +128,7 @@ function normalizeMessages(items) {
     .map((item) => ({
       sender_type: String(item?.sender_type || "assistant"),
       sender_user_id: item?.sender_user_id ?? null,
+      sender_full_name: String(item?.sender_full_name || "").trim(),
       content: String(item?.content || ""),
       created_at: String(item?.created_at || new Date().toISOString()),
     }))
@@ -141,6 +142,14 @@ function normalizeSessions(items) {
   return items
     .map((item) => ({
       chat_id: String(item?.chat_id || "").trim(),
+      group_label: (() => {
+        const rawTitle = String(item?.title || "").trim();
+        const groupMatch = rawTitle.match(/^\[group(?::([^\]]+))?\]\s*(.*)$/i);
+        if (!groupMatch) {
+          return "";
+        }
+        return String(groupMatch[1] || "").trim();
+      })(),
       title: (() => {
         const rawTitle = String(item?.title || "New Chat").trim() || "New Chat";
         if (rawTitle.toLowerCase().startsWith(`${PERSONAL_CHAT_MARKER} `)) {
@@ -218,6 +227,7 @@ function App() {
   const [skillsRole, setSkillsRole] = useState("member");
   const [hasGroupMemberships, setHasGroupMemberships] = useState(false);
   const [currentUserRole, setCurrentUserRole] = useState("member");
+  const [currentUserFullName, setCurrentUserFullName] = useState("");
   const [userSkills, setUserSkills] = useState([]);
   const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
   const [adminUsersOpen, setAdminUsersOpen] = useState(false);
@@ -274,6 +284,7 @@ function App() {
     setSkillsRole("member");
     setHasGroupMemberships(false);
     setCurrentUserRole("member");
+    setCurrentUserFullName("");
     setAdminSkillsOpen(false);
     setAdminUsersOpen(false);
     setAdminOrganizationsOpen(false);
@@ -443,6 +454,7 @@ function App() {
         title: String(profile?.title || ""),
         profile_bio: String(profile?.profile_bio || ""),
       });
+      setCurrentUserFullName(String(profile?.full_name || "").trim());
       setProfileOpen(true);
     } catch (error) {
       setStatus(`Failed to load profile: ${error.message}`);
@@ -792,6 +804,7 @@ function App() {
         title: String(profile?.title || ""),
         profile_bio: String(profile?.profile_bio || ""),
       });
+      setCurrentUserFullName(String(profile?.full_name || "").trim());
       setProfileOpen(false);
       setStatus("Profile updated.");
     } catch (error) {
@@ -1032,6 +1045,7 @@ function App() {
     const optimistic = {
       sender_type: "user",
       sender_user_id: null,
+      sender_full_name: currentUserFullName,
       content: text,
       created_at: new Date().toISOString(),
       temp_id: `tmp-${Date.now()}`,
@@ -1140,6 +1154,7 @@ function App() {
       try {
         const profilePayload = await request("/users/me/profile", { timeoutMs: 15000 });
         const resolvedUserId = Number(profilePayload?.user_id || 0);
+        setCurrentUserFullName(String(profilePayload?.full_name || "").trim());
 
         const payload = await request("/users/me/skills", { timeoutMs: 15000 });
         const resolvedRole = String(payload?.role || "member");
@@ -1160,6 +1175,7 @@ function App() {
         }
       } catch {
         setCurrentUserRole("member");
+        setCurrentUserFullName("");
         setHasGroupMemberships(false);
         setAdminOrganizations([]);
         setGroupChatOrgId("");
@@ -1356,11 +1372,30 @@ function App() {
   }
 
   const visibleChatSessions = useMemo(() => {
-    if (showTrash) {
-      return chatSessions.filter((session) => Boolean(session?.deleted_at));
+    const selectedOrgId = String(groupChatOrgId || "").trim();
+    const baseSessions = showTrash ? chatSessions.filter((session) => Boolean(session?.deleted_at)) : chatSessions.filter((session) => !session?.deleted_at);
+    if (showTrash || !isAdmin || !hasGroupMemberships || !selectedOrgId) {
+      return baseSessions;
     }
-    return chatSessions.filter((session) => !session?.deleted_at);
-  }, [chatSessions, showTrash]);
+    return baseSessions.filter(
+      (session) => session?.chat_kind === "group" && String(session?.group_label || "").trim() === selectedOrgId
+    );
+  }, [chatSessions, showTrash, isAdmin, hasGroupMemberships, groupChatOrgId]);
+
+  function resolveSenderLabel(item) {
+    const senderType = String(item?.sender_type || "").toLowerCase();
+    if (senderType === "assistant") {
+      return "SmartAI";
+    }
+    const fullName = String(item?.sender_full_name || "").trim();
+    if (fullName) {
+      return fullName;
+    }
+    if (String(item?.sender_user_id || "").trim()) {
+      return `${t("user") || "User"} #${item.sender_user_id}`;
+    }
+    return currentUserFullName || t("user") || "User";
+  }
 
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const activeChatKind = String(activeSession?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
@@ -1558,7 +1593,10 @@ function App() {
                                 }}
                               />
                             ) : (
-                              <strong className="chat-session-title">{session.title}</strong>
+                              <>
+                                <strong className="chat-session-title">{session.title}</strong>
+                                {session.chat_kind === "group" && session.group_label ? <span className="chat-session-subtitle">{t("groupShort")}: {session.group_label}</span> : null}
+                              </>
                             )}
                           </button>
                           <div className="chat-session-actions">
@@ -1625,7 +1663,7 @@ function App() {
                 {messages.map((item, index) => (
                   <div key={`${item.created_at}-${index}`} className={`message ${item.sender_type === "assistant" ? "assistant" : "user"}`}>
                     <div className="meta">
-                      <span className="sender">{item.sender_type}</span>
+                      <span className="sender">{resolveSenderLabel(item)}</span>
                       <span>{new Date(item.created_at).toLocaleString()}</span>
                     </div>
                     {item.sender_type === "assistant" ? (

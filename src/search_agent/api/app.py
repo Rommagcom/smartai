@@ -365,6 +365,7 @@ class ChatRequest(BaseModel):
 class ChatMessage(BaseModel):
     sender_type: str
     sender_user_id: int | None
+    sender_full_name: str | None = None
     content: str
     created_at: str
 
@@ -2287,11 +2288,17 @@ class RealtimeChatHub:
             rows = conn.execute(
                 text(
                     """
-                    SELECT sender_type, sender_user_id, content, created_at::text AS created_at
-                    FROM group_messages
-                    WHERE scope_user_id = :scope_user_id
-                      AND scope_chat_id = :scope_chat_id
-                    ORDER BY created_at DESC
+                                        SELECT
+                                                gm.sender_type,
+                                                gm.sender_user_id,
+                                                au.full_name AS sender_full_name,
+                                                gm.content,
+                                                gm.created_at::text AS created_at
+                    FROM group_messages gm
+                                        LEFT JOIN auth_users au ON au.user_id = gm.sender_user_id
+                                        WHERE gm.scope_user_id = :scope_user_id
+                                            AND gm.scope_chat_id = :scope_chat_id
+                                        ORDER BY gm.created_at DESC
                     LIMIT :limit
                     """
                 ),
@@ -2305,6 +2312,7 @@ class RealtimeChatHub:
             ChatMessage(
                 sender_type=str(row.get("sender_type") or "user"),
                 sender_user_id=int(row["sender_user_id"]) if row.get("sender_user_id") is not None else None,
+                sender_full_name=str(row.get("sender_full_name") or "").strip() or None,
                 content=str(row.get("content") or ""),
                 created_at=str(row.get("created_at") or ""),
             )
