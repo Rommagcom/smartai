@@ -2892,8 +2892,7 @@ class RealtimeChatHub:
                 seen.add(org_id)
         return collected
 
-    @staticmethod
-    def _parse_group_marker(raw_title: str) -> tuple[str | None, str]:
+    def _parse_group_marker(self, raw_title: str) -> tuple[str | None, str]:
         match = _GROUP_CHAT_MARKER_RE.match(str(raw_title or "").strip())
         if match is None:
             return None, str(raw_title or "").strip()
