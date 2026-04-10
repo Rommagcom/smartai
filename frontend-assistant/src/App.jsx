@@ -1354,12 +1354,6 @@ function App() {
             {forcePasswordChange ? <p className="subtitle">{t("passwordChangeRequired")}</p> : null}
           </div>
           <div className="top-actions">
-            <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
-            <select id="lang-switch-chat" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
-              <option value="kk">KK</option>
-              <option value="ru">RU</option>
-              <option value="en">EN</option>
-            </select>
             <span className="pane-topbar-text">{t("realtime")}: {wsStatus}</span>
             <span className="pane-topbar-text">{t("role")}: {isAdmin ? t("roleAdmin") : t("roleMember")}</span>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>{t("skills")}</button>
@@ -1369,6 +1363,14 @@ function App() {
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>{t("profile")}</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>{t("refresh")}</button>
             <button className="ghost" type="button" onClick={logout}>{t("logout")}</button>
+            <div className="lang-switch lang-switch-right">
+              <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
+              <select id="lang-switch-chat" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
+                <option value="kk">KK</option>
+                <option value="ru">RU</option>
+                <option value="en">EN</option>
+              </select>
+            </div>
           </div>
         </header>
 
