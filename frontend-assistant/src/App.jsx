@@ -190,6 +190,7 @@ function App() {
   const [passwordForm, setPasswordForm] = useState(DEFAULT_PASSWORD_FORM);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillsRole, setSkillsRole] = useState("member");
+  const [currentUserRole, setCurrentUserRole] = useState("member");
   const [userSkills, setUserSkills] = useState([]);
   const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
   const [adminUsersOpen, setAdminUsersOpen] = useState(false);
@@ -217,6 +218,7 @@ function App() {
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
+  const isAdmin = currentUserRole === "admin";
 
   function performSessionLogout(reason = "Session expired. Please sign in again.") {
     closeSocket();
@@ -231,6 +233,7 @@ function App() {
     setSkillsOpen(false);
     setUserSkills([]);
     setSkillsRole("member");
+    setCurrentUserRole("member");
     setAdminSkillsOpen(false);
     setAdminUsersOpen(false);
     setAdminOrganizationsOpen(false);
@@ -407,7 +410,9 @@ function App() {
     setIsBusy(true);
     try {
       const payload = await request("/users/me/skills", { timeoutMs: 15000 });
-      setSkillsRole(String(payload?.role || "member"));
+      const resolvedRole = String(payload?.role || "member");
+      setSkillsRole(resolvedRole);
+      setCurrentUserRole(resolvedRole);
       setUserSkills(Array.isArray(payload?.skills) ? payload.skills.map((item) => String(item || "")).filter(Boolean) : []);
       setSkillsOpen(true);
     } catch (error) {
@@ -456,7 +461,7 @@ function App() {
   }
 
   async function openAdminSkillsManager() {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isAdmin) {
       return;
     }
     setIsBusy(true);
@@ -485,7 +490,7 @@ function App() {
   }
 
   async function openAdminUsersManager() {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isAdmin) {
       return;
     }
     setIsBusy(true);
@@ -501,7 +506,7 @@ function App() {
   }
 
   async function createUserByAdmin() {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isAdmin) {
       return;
     }
     const email = String(adminCreateUserForm.email || "").trim();
@@ -549,6 +554,9 @@ function App() {
   }
 
   async function deleteUserByAdmin(targetUserId) {
+    if (!isAdmin) {
+      return;
+    }
     const normalizedUserId = Number(targetUserId || 0);
     if (!normalizedUserId) {
       return;
@@ -574,7 +582,7 @@ function App() {
   }
 
   async function openAdminOrganizationsManager() {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isAdmin) {
       return;
     }
     setIsBusy(true);
@@ -594,6 +602,9 @@ function App() {
   }
 
   async function createOrganizationByAdmin() {
+    if (!isAdmin) {
+      return;
+    }
     const orgId = String(adminCreateOrgForm.org_id || "").trim();
     const name = String(adminCreateOrgForm.name || "").trim() || orgId;
     if (!orgId) {
@@ -623,6 +634,9 @@ function App() {
   }
 
   async function assignUserToOrganization() {
+    if (!isAdmin) {
+      return;
+    }
     const targetUserId = Number(adminOrgTargetUserId || 0);
     const orgId = String(adminOrgTargetOrgId || "").trim();
     const role = String(adminOrgTargetRole || "member");
@@ -649,6 +663,9 @@ function App() {
   }
 
   async function removeUserFromOrganization() {
+    if (!isAdmin) {
+      return;
+    }
     const targetUserId = Number(adminOrgTargetUserId || 0);
     const orgId = String(adminOrgTargetOrgId || "").trim();
     if (!targetUserId || !orgId) {
@@ -673,6 +690,9 @@ function App() {
   }
 
   async function toggleAdminSkill(skillName, shouldEnable) {
+    if (!isAdmin) {
+      return;
+    }
     const selectedUserId = Number(adminTargetUserId || 0);
     const normalizedSkill = String(skillName || "").trim();
     if (!selectedUserId || !normalizedSkill) {
@@ -1063,7 +1083,18 @@ function App() {
       return undefined;
     }
 
+    const refreshCurrentRole = async () => {
+      try {
+        const payload = await request("/users/me/skills", { timeoutMs: 15000 });
+        const resolvedRole = String(payload?.role || "member");
+        setCurrentUserRole(resolvedRole);
+      } catch {
+        setCurrentUserRole("member");
+      }
+    };
+
     const bootstrap = async () => {
+      await refreshCurrentRole();
       const sessions = await fetchChatSessions(false);
       if (!sessions.length) {
         setActiveChatId(DEFAULT_CHAT_ID);
@@ -1161,6 +1192,15 @@ function App() {
       closeSocket();
     };
   }, [isAuthenticated, token, showTrash]);
+
+  useEffect(() => {
+    if (isAdmin) {
+      return;
+    }
+    setAdminUsersOpen(false);
+    setAdminOrganizationsOpen(false);
+    setAdminSkillsOpen(false);
+  }, [isAdmin]);
 
   useEffect(() => {
     activeChatIdRef.current = String(activeChatId || DEFAULT_CHAT_ID).trim() || DEFAULT_CHAT_ID;
@@ -1288,15 +1328,16 @@ function App() {
         <header className="chat-header card">
           <div>
             <h1>Personal Chat</h1>
-            <p className="subtitle">Context scope: user_id only</p>
+            <p className="subtitle">Контекст чата: ваш профиль и организации, где вы состоите</p>
             {forcePasswordChange ? <p className="subtitle">Password change required before using chat.</p> : null}
           </div>
           <div className="top-actions">
             <span className="pane-topbar-text">Realtime: {wsStatus}</span>
+            <span className="pane-topbar-text">Role: {isAdmin ? "admin" : "member"}</span>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
-            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Admin Users</button>
-            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Organizations</button>
-            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button>
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Admin Users</button> : null}
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Organizations</button> : null}
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button> : null}
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
             <button className="ghost" type="button" onClick={logout}>Logout</button>
@@ -1522,7 +1563,7 @@ function App() {
         </div>
       ) : null}
 
-      {adminUsersOpen ? (
+      {isAdmin && adminUsersOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminUsersOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin users manager" onClick={(event) => event.stopPropagation()}>
             <h2>Admin Users</h2>
@@ -1582,7 +1623,7 @@ function App() {
         </div>
       ) : null}
 
-      {adminOrganizationsOpen ? (
+      {isAdmin && adminOrganizationsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminOrganizationsOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin organizations manager" onClick={(event) => event.stopPropagation()}>
             <h2>Organizations</h2>
@@ -1661,7 +1702,7 @@ function App() {
         </div>
       ) : null}
 
-      {adminSkillsOpen ? (
+      {isAdmin && adminSkillsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminSkillsOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin skills manager" onClick={(event) => event.stopPropagation()}>
             <h2>Admin Skills Manager</h2>
