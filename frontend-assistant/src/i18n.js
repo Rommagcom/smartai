@@ -84,6 +84,8 @@ export const I18N = {
     save: "Save",
     close: "Close",
     language: "Language",
+    hideHistory: "Hide History",
+    showHistory: "Show History",
   },
   ru: {
     appName: "SmartAi",
@@ -168,6 +170,8 @@ export const I18N = {
     save: "Сохранить",
     close: "Закрыть",
     language: "Язык",
+    hideHistory: "Скрыть историю",
+    showHistory: "Показать историю",
   },
   kk: {
     appName: "SmartAi",
@@ -252,5 +256,7 @@ export const I18N = {
     save: "Сақтау",
     close: "Жабу",
     language: "Тіл",
+    hideHistory: "Тарихты жасыру",
+    showHistory: "Тарихты көрсету",
   },
 };

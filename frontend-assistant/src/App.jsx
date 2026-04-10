@@ -182,6 +182,7 @@ function App() {
   const [wsStatus, setWsStatus] = useState("offline");
 
   const [chatSessions, setChatSessions] = useState([]);
+  const [isHistoryCollapsed, setIsHistoryCollapsed] = useState(false);
   const [activeChatId, setActiveChatId] = useState(DEFAULT_CHAT_ID);
   const [showTrash, setShowTrash] = useState(false);
   const [trashCount, setTrashCount] = useState(0);
@@ -240,6 +241,7 @@ function App() {
     setChatSessions([]);
     setTrashCount(0);
     setActiveChatId(DEFAULT_CHAT_ID);
+    setIsHistoryCollapsed(false);
     setMessages([]);
     setDraft("");
     setPasswordForm(DEFAULT_PASSWORD_FORM);
@@ -1362,6 +1364,9 @@ function App() {
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>{t("adminSkills")}</button> : null}
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>{t("profile")}</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>{t("refresh")}</button>
+            <button className="secondary" type="button" onClick={() => setIsHistoryCollapsed((prev) => !prev)}>
+              {isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+            </button>
             <button className="ghost" type="button" onClick={logout}>{t("logout")}</button>
             <div className="lang-switch lang-switch-right">
               <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
@@ -1374,9 +1379,12 @@ function App() {
           </div>
         </header>
 
-        <section className="chat-layout">
+        <section className={isHistoryCollapsed ? "chat-layout chat-layout-collapsed" : "chat-layout"}>
           <aside className="chat-history card">
             <div className="chat-history-top">
+              <button className="ghost chat-action" type="button" onClick={() => setIsHistoryCollapsed(true)}>
+                {t("hideHistory")}
+              </button>
               <div className="chat-mode-tabs">
                 <button
                   type="button"
@@ -1504,6 +1512,11 @@ function App() {
           </aside>
 
           <div className="chat-main">
+            {isHistoryCollapsed ? (
+              <button className="history-curtain-toggle secondary" type="button" onClick={() => setIsHistoryCollapsed(false)}>
+                {t("showHistory")}
+              </button>
+            ) : null}
             <section className="messages-card card">
               <div className="messages-list" role="log" aria-live="polite">
                 {messages.length === 0 ? <div className="empty">{t("noMessages")}</div> : null}

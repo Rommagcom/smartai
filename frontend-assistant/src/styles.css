@@ -233,6 +233,11 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   gap: 14px;
+  position: relative;
+}
+
+.chat-layout-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 .chat-history {
@@ -245,6 +250,15 @@ button:disabled {
   gap: 8px;
   background: linear-gradient(180deg, #0f63cf 0%, #0a4da7 100%);
   border-color: rgba(255, 255, 255, 0.18);
+  transition: opacity 0.22s ease, transform 0.22s ease, padding 0.22s ease;
+}
+
+.chat-layout-collapsed .chat-history {
+  opacity: 0;
+  transform: translateX(-14px);
+  pointer-events: none;
+  padding: 0;
+  border: 0;
 }
 
 .chat-history-top {
@@ -417,6 +431,14 @@ button:disabled {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
+  position: relative;
+}
+
+.history-curtain-toggle {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 4;
 }
 
 .app-grid {
