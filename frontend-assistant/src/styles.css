@@ -269,6 +269,18 @@ button:disabled {
   gap: 6px;
 }
 
+.chat-create-row {
+  width: 100%;
+  display: flex;
+  gap: 6px;
+}
+
+.chat-create-btn {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+}
+
 .chat-mode-tabs {
   display: inline-flex;
   gap: 6px;

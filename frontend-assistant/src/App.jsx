@@ -1397,6 +1397,18 @@ function App() {
         <section className={isHistoryCollapsed ? "chat-layout chat-layout-collapsed" : "chat-layout"}>
           <aside className="chat-history card">
             <div className="chat-history-top">
+              {showTrash ? null : (
+                <div className="chat-create-row">
+                  {hasGroupMemberships ? (
+                    <button className="secondary chat-create-btn" type="button" disabled={isBusy} onClick={() => void createChatSession("group")}>
+                      + {t("groupShort")}
+                    </button>
+                  ) : null}
+                  <button className="secondary chat-create-btn" type="button" disabled={isBusy} onClick={() => void createChatSession("personal")}>
+                    + {t("personalShort")}
+                  </button>
+                </div>
+              )}
               <button
                 className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
                 type="button"
@@ -1430,18 +1442,6 @@ function App() {
                   {t("trash")} {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
                 </button>
               </div>
-              {showTrash ? null : (
-                <>
-                  {hasGroupMemberships ? (
-                    <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession("group")}>
-                      {t("newGroupChat")}
-                    </button>
-                  ) : null}
-                  <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession("personal")}>
-                    {t("newPersonalChat")}
-                  </button>
-                </>
-              )}
               {showTrash ? (
                 <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || chatSessions.length === 0} onClick={() => void purgeAllTrashedChats()}>
                   {t("purgeAll")}
