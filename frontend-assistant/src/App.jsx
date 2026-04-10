@@ -962,7 +962,7 @@ function App() {
     setMenuChatId("");
     setIsBusy(true);
     try {
-      const payload = await request("/chat/sessions/trash/purge", {
+      const payload = await request("/chat/trash/purge", {
         method: "DELETE",
         timeoutMs: 15000,
       });

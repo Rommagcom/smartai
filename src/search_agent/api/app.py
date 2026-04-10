@@ -3391,6 +3391,12 @@ def chat_sessions_purge_trash(user: CurrentUser) -> dict[str, int]:
     return {"purged": purged}
 
 
+@app.delete("/api/v1/chat/trash/purge")
+def chat_trash_purge(user: CurrentUser) -> dict[str, int]:
+    purged = service.purge_all_trashed_chats(user_id=int(user["user_id"]))
+    return {"purged": purged}
+
+
 @app.websocket("/api/v1/chat/ws")
 async def chat_websocket(websocket: WebSocket) -> None:
     auth_header = str(websocket.headers.get("authorization") or "").strip()
