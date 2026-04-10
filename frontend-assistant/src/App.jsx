@@ -11,6 +11,7 @@ const DEFAULT_CHAT_ID = "default";
 const DEFAULT_PROFILE_FORM = { email: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "", confirm_password: "" };
 const PERSONAL_CHAT_MARKER = "[personal]";
+const GROUP_CHAT_MARKER = "[group]";
 const DEFAULT_ADMIN_CREATE_USER_FORM = {
   email: "",
   password: "",
@@ -145,9 +146,22 @@ function normalizeSessions(items) {
         if (rawTitle.toLowerCase().startsWith(`${PERSONAL_CHAT_MARKER} `)) {
           return rawTitle.slice(PERSONAL_CHAT_MARKER.length).trim() || "Personal Chat";
         }
+        const groupMatch = rawTitle.match(/^\[group(?::[^\]]+)?\]\s*(.*)$/i);
+        if (groupMatch) {
+          return String(groupMatch[1] || "").trim() || "Group Chat";
+        }
         return rawTitle;
       })(),
-      chat_kind: String(item?.title || "").trim().toLowerCase().startsWith(`${PERSONAL_CHAT_MARKER} `) ? "personal" : "group",
+      chat_kind: (() => {
+        const raw = String(item?.title || "").trim().toLowerCase();
+        if (raw.startsWith(`${PERSONAL_CHAT_MARKER} `)) {
+          return "personal";
+        }
+        if (raw.startsWith("[group") || raw.startsWith(`${GROUP_CHAT_MARKER} `)) {
+          return "group";
+        }
+        return "personal";
+      })(),
       created_at: String(item?.created_at || new Date().toISOString()),
       updated_at: String(item?.updated_at || new Date().toISOString()),
       deleted_at: item?.deleted_at ? String(item.deleted_at) : null,
@@ -219,6 +233,7 @@ function App() {
   const [adminOrgTargetUserId, setAdminOrgTargetUserId] = useState(0);
   const [adminOrgTargetOrgId, setAdminOrgTargetOrgId] = useState("");
   const [adminOrgTargetRole, setAdminOrgTargetRole] = useState("member");
+  const [groupChatOrgId, setGroupChatOrgId] = useState("");
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -273,6 +288,7 @@ function App() {
     setAdminOrgTargetUserId(0);
     setAdminOrgTargetOrgId("");
     setAdminOrgTargetRole("member");
+    setGroupChatOrgId("");
     setForcePasswordChange(false);
     setWsStatus("offline");
     setStatus(reason);
@@ -386,12 +402,17 @@ function App() {
       return;
     }
     const normalizedKind = String(kind || "group").toLowerCase() === "personal" ? "personal" : "group";
-    const title = normalizedKind === "personal" ? `${PERSONAL_CHAT_MARKER} Personal Chat` : "";
+    const title = normalizedKind === "personal" ? `${PERSONAL_CHAT_MARKER} Personal Chat` : `${GROUP_CHAT_MARKER} Group Chat`;
+    const selectedOrgId = String(groupChatOrgId || "").trim();
+    if (normalizedKind === "group" && isAdmin && !selectedOrgId) {
+      setStatus("Choose organization for group chat.");
+      return;
+    }
     setIsBusy(true);
     try {
       const payload = await request("/chat/sessions", {
         method: "POST",
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({ title, org_id: normalizedKind === "group" ? selectedOrgId : null }),
         timeoutMs: 15000,
       });
       const nextChatId = String(payload?.chat_id || "").trim();
@@ -996,13 +1017,16 @@ function App() {
     }
   }
 
-  async function sendMessage(rawText) {
+  async function sendMessage(rawText, askAssistantOverride = null) {
     const text = String(rawText || "").trim();
     const selected = chatSessions.find((session) => session.chat_id === activeChatIdRef.current);
     const deletedSelected = Boolean(selected?.deleted_at);
     if (!text || !isAuthenticated || showTrash || deletedSelected || forcePasswordChange) {
       return;
     }
+
+    const activeKind = String(selected?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
+    const askAssistant = typeof askAssistantOverride === "boolean" ? askAssistantOverride : activeKind === "personal";
 
     setIsBusy(true);
     const optimistic = {
@@ -1023,18 +1047,19 @@ function App() {
             action: "send",
             chat_id: activeChatIdRef.current,
             message: text,
+            ask_assistant: askAssistant,
           })
         );
       } else {
         const payload = await request("/chat/send", {
           method: "POST",
-          body: JSON.stringify({ message: text, chat_id: activeChatIdRef.current }),
+          body: JSON.stringify({ message: text, chat_id: activeChatIdRef.current, ask_assistant: askAssistant }),
           timeoutMs: 45000,
         });
         setMessages(normalizeMessages(payload?.messages));
       }
       await fetchChatSessions();
-      setStatus("Assistant responded.");
+      setStatus(askAssistant ? "Assistant responded." : "Message sent to group chat.");
     } catch (error) {
       setStatus(`Message failed: ${error.message}`);
       await fetchMessages(activeChatIdRef.current);
@@ -1113,13 +1138,31 @@ function App() {
 
     const refreshCurrentRole = async () => {
       try {
+        const profilePayload = await request("/users/me/profile", { timeoutMs: 15000 });
+        const resolvedUserId = Number(profilePayload?.user_id || 0);
+
         const payload = await request("/users/me/skills", { timeoutMs: 15000 });
         const resolvedRole = String(payload?.role || "member");
         setCurrentUserRole(resolvedRole);
         setHasGroupMemberships(Boolean(payload?.has_group_memberships));
+        if (resolvedRole === "admin") {
+          const [users, organizations] = await Promise.all([fetchAdminUsersList(), fetchOrganizationsList()]);
+          const me = users.find((item) => Number(item?.user_id || 0) === Number(resolvedUserId || 0));
+          const myOrgIds = new Set(Array.isArray(me?.organization_ids) ? me.organization_ids.map((org) => String(org || "").trim()) : []);
+          const filteredOrganizations = organizations.filter((item) => myOrgIds.has(String(item?.org_id || "").trim()));
+          setAdminOrganizations(filteredOrganizations);
+          if (!groupChatOrgId && filteredOrganizations.length > 0) {
+            setGroupChatOrgId(String(filteredOrganizations[0].org_id || ""));
+          }
+        } else {
+          setAdminOrganizations([]);
+          setGroupChatOrgId("");
+        }
       } catch {
         setCurrentUserRole("member");
         setHasGroupMemberships(false);
+        setAdminOrganizations([]);
+        setGroupChatOrgId("");
       }
     };
 
@@ -1321,6 +1364,7 @@ function App() {
 
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
   const activeChatKind = String(activeSession?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
+  const isGroupChatMode = activeChatKind === "group";
   const resolvedChatTitle = activeChatKind === "personal" ? t("personalChat") : hasGroupMemberships ? t("groupChat") : t("personalChat");
   const resolvedContextSubtitle = activeChatKind === "personal" ? t("personalContextSubtitle") : t("contextSubtitle");
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
@@ -1406,7 +1450,7 @@ function App() {
             <div className="chat-history-top">
               {showTrash ? null : (
                 <div className="chat-create-row">
-                  {hasGroupMemberships ? (
+                  {isAdmin && hasGroupMemberships ? (
                     <button className="secondary chat-create-btn" type="button" disabled={isBusy} onClick={() => void createChatSession("group")}>
                       <span className="chat-create-icon" aria-hidden="true" />
                       <span>{t("groupShort")}</span>
@@ -1418,6 +1462,17 @@ function App() {
                   </button>
                 </div>
               )}
+              {isAdmin && hasGroupMemberships && !showTrash ? (
+                <div className="chat-group-select-wrap">
+                  <label className="pane-topbar-text" htmlFor="group-chat-org-select">{t("groupChatOrgLabel")}</label>
+                  <select id="group-chat-org-select" className="chat-group-select" value={groupChatOrgId} onChange={(event) => setGroupChatOrgId(event.target.value)}>
+                    {adminOrganizations.length === 0 ? <option value="">{t("noOrganizations")}</option> : null}
+                    {adminOrganizations.map((item) => (
+                      <option key={item.org_id} value={item.org_id}>{item.org_id} - {item.name}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               <button
                 className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
                 type="button"
@@ -1614,8 +1669,13 @@ function App() {
               {forcePasswordChange ? <div className="compose-hint">{t("changePasswordHint")}</div> : null}
               <div className="composer-row">
                 <div className="compose-hint">{t("enterToSend")}</div>
-                <div className="composer-actions">
-                  <button className="primary" type="button" disabled={isComposeDisabled} onClick={() => void sendMessage(draft)}>
+                <div className={isGroupChatMode ? "composer-actions composer-actions-split" : "composer-actions"}>
+                  {isGroupChatMode ? (
+                    <button className="secondary" type="button" disabled={isComposeDisabled} onClick={() => void sendMessage(draft, true)}>
+                      {t("invokeSmartAi")}
+                    </button>
+                  ) : null}
+                  <button className="primary" type="button" disabled={isComposeDisabled} onClick={() => void sendMessage(draft, isGroupChatMode ? false : true)}>
                     {isBusy ? t("sending") : t("send")}
                   </button>
                 </div>

@@ -287,6 +287,19 @@ button:disabled {
   box-shadow: 0 4px 9px rgba(7, 53, 104, 0.2);
 }
 
+.chat-group-select {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  border-radius: 10px;
+}
+
+.chat-group-select-wrap {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+}
+
 .chat-create-icon {
   width: 14px;
   height: 14px;
@@ -932,6 +945,12 @@ input[type="checkbox"] {
   margin-left: auto;
   flex-shrink: 0;
 }
+
+.composer-actions-split {
+  width: 100%;
+  margin-left: 0;
+  justify-content: space-between;
+}
 .status-running {
   background: #eef5ff;
   color: #0b5cc6;
@@ -1362,6 +1381,11 @@ input[type="checkbox"] {
 
   .composer-actions {
     width: 100%;
+  }
+
+  .composer-actions-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
 
   .composer-actions button {

@@ -288,7 +288,7 @@ class _FakeApiService:
         sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return sessions
 
-    def create_chat_session(self, *, user_id: int, title: str = "") -> Any:
+    def create_chat_session(self, *, user_id: int, title: str = "", org_id: str | None = None) -> Any:
         store = self._ensure_user_session_store(int(user_id))
         now = self._now_iso()
         chat_id = f"chat-{uuid.uuid4().hex[:10]}"

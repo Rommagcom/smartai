@@ -34,6 +34,8 @@ PASSWORD_MAX_AGE_DAYS = 90
 PASSWORD_HISTORY_SIZE = 3
 _SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
 _PERSONAL_CHAT_MARKER = "[personal]"
+_GROUP_CHAT_MARKER = "[group]"
+_GROUP_CHAT_MARKER_RE = re.compile(r"^\[group(?::(?P<org_id>[^\]]+))?\]\s*(?P<title>.*)$", re.IGNORECASE)
 
 
 def _resolve_db_url(explicit: str | None = None) -> str:
@@ -357,6 +359,7 @@ class MembershipUpsertRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     chat_id: str | None = Field(default=None, max_length=128)
+    ask_assistant: bool = True
 
 
 class ChatMessage(BaseModel):
@@ -368,6 +371,7 @@ class ChatMessage(BaseModel):
 
 class ChatSessionCreateRequest(BaseModel):
     title: str = Field(default="", max_length=160)
+    org_id: str | None = Field(default=None, max_length=128)
 
 
 class ChatSessionUpdateRequest(BaseModel):
@@ -398,6 +402,7 @@ class WsSendMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
     client_message_id: str | None = Field(default=None, max_length=128)
     chat_id: str | None = Field(default=None, max_length=128)
+    ask_assistant: bool = True
 
 
 class OrganizationSummary(BaseModel):
@@ -2359,27 +2364,75 @@ class RealtimeChatHub:
             )
         return sessions
 
-    def create_chat_session(self, *, user_id: int, title: str = "") -> ChatSessionSummary:
+    def create_chat_session(self, *, user_id: int, title: str = "", org_id: str | None = None) -> ChatSessionSummary:
         now = datetime.now(UTC)
-        chat_id = f"chat_{secrets.token_hex(8)}"
-        clean_title = str(title or "").strip()[:160] or "New Chat"
-        with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
-                    VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
-                    """
-                ),
-                {
-                    "scope_user_id": int(user_id),
-                    "chat_id": chat_id,
-                    "title": clean_title,
-                    "created_at": now,
-                    "updated_at": now,
-                    "last_message_preview": "",
-                },
-            )
+        role = self.rbac.get_role(org_id=USER_SCOPE_ORG_ID, user_id=int(user_id), fallback_role="member")
+        raw_title = str(title or "").strip()
+        requested_group = raw_title.lower().startswith(_GROUP_CHAT_MARKER)
+        group_org_id: str | None = None
+
+        if requested_group:
+            if role != "admin":
+                raise HTTPException(status_code=403, detail="Only admins can create shared group chats")
+            marker_org_id, marker_title = self._parse_group_marker(raw_title)
+            requested_org = str(org_id or "").strip()
+            group_org_id = requested_org or marker_org_id or self._first_non_user_org_for_user(user_id=int(user_id))
+            if not group_org_id:
+                raise HTTPException(status_code=400, detail="Admin user has no organization memberships for shared chat")
+            if group_org_id == USER_SCOPE_ORG_ID:
+                raise HTTPException(status_code=400, detail="Invalid shared group organization")
+            member_ids = self._resolve_group_org_members(org_id=group_org_id)
+            if not member_ids:
+                raise HTTPException(status_code=400, detail="Organization has no members for shared chat")
+
+            chat_id = f"chat_{secrets.token_hex(8)}"
+            clean_group_title = marker_title[:120] or "Group Chat"
+            stored_title = f"[group:{group_org_id}] {clean_group_title}"[:160]
+            with self.engine.begin() as conn:
+                for member_id in member_ids:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
+                            VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
+                            ON CONFLICT (scope_user_id, chat_id) DO UPDATE
+                            SET title = EXCLUDED.title,
+                                updated_at = EXCLUDED.updated_at,
+                                deleted_at = NULL
+                            """
+                        ),
+                        {
+                            "scope_user_id": int(member_id),
+                            "chat_id": chat_id,
+                            "title": stored_title,
+                            "created_at": now,
+                            "updated_at": now,
+                            "last_message_preview": "",
+                        },
+                    )
+            clean_title = stored_title
+        else:
+            if role != "admin" and not raw_title.lower().startswith(_PERSONAL_CHAT_MARKER):
+                raw_title = f"{_PERSONAL_CHAT_MARKER} {raw_title or 'Personal Chat'}".strip()
+            chat_id = f"chat_{secrets.token_hex(8)}"
+            clean_title = raw_title[:160] or "New Chat"
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
+                        VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
+                        """
+                    ),
+                    {
+                        "scope_user_id": int(user_id),
+                        "chat_id": chat_id,
+                        "title": clean_title,
+                        "created_at": now,
+                        "updated_at": now,
+                        "last_message_preview": "",
+                    },
+                )
         return ChatSessionSummary(
             chat_id=chat_id,
             title=clean_title,
@@ -2657,6 +2710,15 @@ class RealtimeChatHub:
         org_id = USER_SCOPE_ORG_ID
         team_id = _user_scope_id(user_id)
         is_personal_chat = self._is_personal_chat_session(user_id=user_id, chat_id=scope_chat_id)
+        group_org_id = self._resolve_group_chat_org_id_for_session(user_id=user_id, chat_id=scope_chat_id)
+        is_shared_group_chat = bool(group_org_id)
+        ask_assistant = bool(payload.ask_assistant)
+
+        group_member_ids: list[int] = []
+        if is_shared_group_chat:
+            group_member_ids = self._resolve_group_org_members(org_id=str(group_org_id))
+            if int(user_id) not in group_member_ids:
+                raise HTTPException(status_code=403, detail="User is not a member of this group chat")
 
         role = self.rbac.get_role(org_id=org_id, user_id=user_id, fallback_role="member")
         if self.settings.enable_dynamic_tools:
@@ -2686,60 +2748,86 @@ class RealtimeChatHub:
             history = [{"role": "system", "content": memory_context}, *history]
 
         try:
-            answer_result = self.agent.run(
-                payload.message,
-                history,
-                runtime_chat_id,
-                org_id,
-                team_id,
-                user_id,
-                role,
-                allowed_dynamic,
-            )
-            answer = answer_result.answer or "I could not generate a response."
-            file_payload = _extract_file_payload_from_tool_messages(answer_result.messages)
-            if file_payload is not None:
-                answer = json.dumps(file_payload, ensure_ascii=True)
-        except Exception:
-            answer = "Assistant is temporarily unavailable. Please try again in a moment."
-
-        try:
-            self._append_group_message(
-                user_id=user_id,
-                chat_id=scope_chat_id,
-                sender_user_id=user_id,
-                sender_type="user",
-                content=payload.message,
-            )
-            self._maybe_autotitle_chat_session(user_id=user_id, chat_id=scope_chat_id, user_message=payload.message)
-            self._append_group_message(
-                user_id=user_id,
-                chat_id=scope_chat_id,
-                sender_user_id=None,
-                sender_type="assistant",
-                content=answer,
-            )
+            if is_shared_group_chat:
+                self._fanout_group_message(
+                    user_ids=group_member_ids,
+                    chat_id=scope_chat_id,
+                    sender_user_id=user_id,
+                    sender_type="user",
+                    content=payload.message,
+                )
+            else:
+                self._append_group_message(
+                    user_id=user_id,
+                    chat_id=scope_chat_id,
+                    sender_user_id=user_id,
+                    sender_type="user",
+                    content=payload.message,
+                )
+                self._maybe_autotitle_chat_session(user_id=user_id, chat_id=scope_chat_id, user_message=payload.message)
         except Exception:
             pass
 
+        answer = ""
+        should_call_assistant = (not is_shared_group_chat) or ask_assistant
+        if should_call_assistant:
+            try:
+                answer_result = self.agent.run(
+                    payload.message,
+                    history,
+                    runtime_chat_id,
+                    org_id,
+                    team_id,
+                    user_id,
+                    role,
+                    allowed_dynamic,
+                )
+                answer = answer_result.answer or "I could not generate a response."
+                file_payload = _extract_file_payload_from_tool_messages(answer_result.messages)
+                if file_payload is not None:
+                    answer = json.dumps(file_payload, ensure_ascii=True)
+            except Exception:
+                answer = "Assistant is temporarily unavailable. Please try again in a moment."
+
+            try:
+                if is_shared_group_chat:
+                    self._fanout_group_message(
+                        user_ids=group_member_ids,
+                        chat_id=scope_chat_id,
+                        sender_user_id=None,
+                        sender_type="assistant",
+                        content=answer,
+                    )
+                else:
+                    self._append_group_message(
+                        user_id=user_id,
+                        chat_id=scope_chat_id,
+                        sender_user_id=None,
+                        sender_type="assistant",
+                        content=answer,
+                    )
+            except Exception:
+                pass
+
         if self.long_term is not None:
             try:
-                self.long_term.remember(
-                    org_id=org_id,
-                    user_id=user_id,
-                    chat_id=runtime_chat_id,
-                    user_text=payload.message,
-                    assistant_text=answer,
-                    source="api-chat",
-                )
-                self.long_term.remember(
-                    org_id=org_id,
-                    user_id=0,
-                    chat_id=runtime_chat_id,
-                    user_text=payload.message,
-                    assistant_text=answer,
-                    source="api-group",
-                )
+                if should_call_assistant:
+                    self.long_term.remember(
+                        org_id=org_id,
+                        user_id=user_id,
+                        chat_id=runtime_chat_id,
+                        user_text=payload.message,
+                        assistant_text=answer,
+                        source="api-chat",
+                    )
+                    self.long_term.remember(
+                        org_id=org_id,
+                        user_id=0,
+                        chat_id=runtime_chat_id,
+                        user_text=payload.message,
+                        assistant_text=answer,
+                        source="api-group",
+                    )
             except Exception:
                 pass
 
@@ -2747,20 +2835,16 @@ class RealtimeChatHub:
             messages = self._read_group_messages(user_id=user_id, chat_id=scope_chat_id)
         except Exception:
             now_iso = datetime.now(UTC).isoformat()
-            messages = [
-                ChatMessage(
-                    sender_type="user",
-                    sender_user_id=user_id,
-                    content=payload.message,
-                    created_at=now_iso,
-                ),
-                ChatMessage(
-                    sender_type="assistant",
-                    sender_user_id=None,
-                    content=answer,
-                    created_at=now_iso,
-                ),
-            ]
+            messages = [ChatMessage(sender_type="user", sender_user_id=user_id, content=payload.message, created_at=now_iso)]
+            if should_call_assistant:
+                messages.append(
+                    ChatMessage(
+                        sender_type="assistant",
+                        sender_user_id=None,
+                        content=answer,
+                        created_at=now_iso,
+                    )
+                )
         return ChatResponse(answer=answer, messages=messages, chat_id=scope_chat_id)
 
     def _format_org_member_line(self, *, row: dict[str, Any], user_id: int, max_bio_len: int) -> str:
@@ -2807,6 +2891,119 @@ class RealtimeChatHub:
                 collected.append(org_id)
                 seen.add(org_id)
         return collected
+
+    @staticmethod
+    def _parse_group_marker(raw_title: str) -> tuple[str | None, str]:
+        match = _GROUP_CHAT_MARKER_RE.match(str(raw_title or "").strip())
+        if match is None:
+            return None, str(raw_title or "").strip()
+        org_id = str(match.group("org_id") or "").strip() or None
+        clean_title = str(match.group("title") or "").strip() or "Group Chat"
+        return org_id, clean_title
+
+    def _first_non_user_org_for_user(self, *, user_id: int) -> str | None:
+        if not self._table_exists("org_memberships"):
+            return None
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT org_id
+                    FROM org_memberships
+                    WHERE user_id = :user_id
+                      AND org_id <> :user_scope_org_id
+                    ORDER BY org_id ASC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "user_id": int(user_id),
+                    "user_scope_org_id": USER_SCOPE_ORG_ID,
+                },
+            ).mappings().first()
+        if row is None:
+            return None
+        resolved = str(row.get("org_id") or "").strip()
+        return resolved or None
+
+    def _resolve_group_org_members(self, *, org_id: str) -> list[int]:
+        if not self._table_exists("org_memberships"):
+            return []
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT user_id
+                    FROM org_memberships
+                    WHERE org_id = :org_id
+                    ORDER BY user_id ASC
+                    """
+                ),
+                {"org_id": str(org_id).strip()},
+            ).mappings().all()
+        members: list[int] = []
+        for row in rows:
+            uid = int(row.get("user_id") or 0)
+            if uid > 0:
+                members.append(uid)
+        return members
+
+    def _resolve_group_chat_org_id_for_session(self, *, user_id: int, chat_id: str) -> str | None:
+        if not hasattr(self, "engine"):
+            return None
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT title
+                    FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+        if row is None:
+            return None
+        org_id, _ = self._parse_group_marker(str(row.get("title") or ""))
+        return org_id
+
+    def _fanout_group_message(
+        self,
+        *,
+        user_ids: Sequence[int],
+        chat_id: str,
+        sender_user_id: int | None,
+        sender_type: str,
+        content: str,
+    ) -> None:
+        seen: set[int] = set()
+        for user_id in user_ids:
+            uid = int(user_id)
+            if uid <= 0 or uid in seen:
+                continue
+            seen.add(uid)
+            self._append_group_message(
+                user_id=uid,
+                chat_id=chat_id,
+                sender_user_id=sender_user_id,
+                sender_type=sender_type,
+                content=content,
+            )
+
+    def resolve_chat_snapshot_recipients(self, *, user_id: int, chat_id: str) -> list[int]:
+        group_org_id = self._resolve_group_chat_org_id_for_session(user_id=int(user_id), chat_id=chat_id)
+        if not group_org_id:
+            return [int(user_id)]
+        members = self._resolve_group_org_members(org_id=group_org_id)
+        if not members:
+            return [int(user_id)]
+        return members
 
     def _load_org_member_rows(self, conn: Any, *, org_ids: list[str]) -> list[dict[str, Any]]:
         return list(
@@ -3328,12 +3525,17 @@ def delete_dynamic_skill(skill_name: str, user: CurrentUser) -> DynamicSkillDele
 async def chat_send(payload: ChatRequest, user: CurrentUser) -> ChatResponse:
     current_user_id = int(user["user_id"])
     response = service.send_group_chat(user_id=current_user_id, payload=payload)
-    snapshot_payload = _build_chat_snapshot_payload(
-        user_id=current_user_id,
-        chat_id=response.chat_id,
-        messages=response.messages,
-    )
-    await chat_hub.publish_snapshot(snapshot_payload)
+    if hasattr(service, "resolve_chat_snapshot_recipients"):
+        recipient_ids = service.resolve_chat_snapshot_recipients(user_id=current_user_id, chat_id=response.chat_id)
+    else:
+        recipient_ids = [current_user_id]
+    for recipient_id in recipient_ids:
+        snapshot_payload = _build_chat_snapshot_payload(
+            user_id=recipient_id,
+            chat_id=response.chat_id,
+            messages=service._read_group_messages(user_id=recipient_id, chat_id=response.chat_id),
+        )
+        await chat_hub.publish_snapshot(snapshot_payload)
     return response
 
 
@@ -3350,7 +3552,7 @@ def chat_sessions(user: CurrentUser, include_deleted: bool = False) -> ChatSessi
 
 @app.post("/api/v1/chat/sessions")
 def chat_session_create(payload: ChatSessionCreateRequest, user: CurrentUser) -> ChatSessionSummary:
-    return service.create_chat_session(user_id=int(user["user_id"]), title=payload.title)
+    return service.create_chat_session(user_id=int(user["user_id"]), title=payload.title, org_id=payload.org_id)
 
 
 @app.patch("/api/v1/chat/sessions/{chat_id}")
@@ -3438,19 +3640,25 @@ async def chat_websocket(websocket: WebSocket) -> None:
                         payload=ChatRequest(
                             message=request.message,
                             chat_id=request.chat_id,
+                            ask_assistant=request.ask_assistant,
                         ),
                     )
                 except HTTPException:
                     await websocket.send_json({"type": "error", "detail": "forbidden"})
                     continue
 
-                snapshot = _build_chat_snapshot_payload(
-                    user_id=current_user_id,
-                    chat_id=response.chat_id,
-                    messages=response.messages,
-                    client_message_id=request.client_message_id,
-                )
-                await chat_hub.publish_snapshot(snapshot)
+                if hasattr(service, "resolve_chat_snapshot_recipients"):
+                    recipient_ids = service.resolve_chat_snapshot_recipients(user_id=current_user_id, chat_id=response.chat_id)
+                else:
+                    recipient_ids = [current_user_id]
+                for recipient_id in recipient_ids:
+                    snapshot = _build_chat_snapshot_payload(
+                        user_id=recipient_id,
+                        chat_id=response.chat_id,
+                        messages=service._read_group_messages(user_id=recipient_id, chat_id=response.chat_id),
+                        client_message_id=request.client_message_id if int(recipient_id) == int(current_user_id) else None,
+                    )
+                    await chat_hub.publish_snapshot(snapshot)
                 continue
 
             await websocket.send_json({"type": "error", "detail": "unknown action"})
