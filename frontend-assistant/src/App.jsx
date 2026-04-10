@@ -10,6 +10,7 @@ const DEFAULT_LOGIN_FORM = { email: "", password: "" };
 const DEFAULT_CHAT_ID = "default";
 const DEFAULT_PROFILE_FORM = { email: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_PASSWORD_FORM = { current_password: "", new_password: "", confirm_password: "" };
+const PERSONAL_CHAT_MARKER = "[personal]";
 const DEFAULT_ADMIN_CREATE_USER_FORM = {
   email: "",
   password: "",
@@ -139,7 +140,14 @@ function normalizeSessions(items) {
   return items
     .map((item) => ({
       chat_id: String(item?.chat_id || "").trim(),
-      title: String(item?.title || "New Chat").trim() || "New Chat",
+      title: (() => {
+        const rawTitle = String(item?.title || "New Chat").trim() || "New Chat";
+        if (rawTitle.toLowerCase().startsWith(`${PERSONAL_CHAT_MARKER} `)) {
+          return rawTitle.slice(PERSONAL_CHAT_MARKER.length).trim() || "Personal Chat";
+        }
+        return rawTitle;
+      })(),
+      chat_kind: String(item?.title || "").trim().toLowerCase().startsWith(`${PERSONAL_CHAT_MARKER} `) ? "personal" : "group",
       created_at: String(item?.created_at || new Date().toISOString()),
       updated_at: String(item?.updated_at || new Date().toISOString()),
       deleted_at: item?.deleted_at ? String(item.deleted_at) : null,
@@ -194,6 +202,7 @@ function App() {
   const [passwordForm, setPasswordForm] = useState(DEFAULT_PASSWORD_FORM);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillsRole, setSkillsRole] = useState("member");
+  const [hasGroupMemberships, setHasGroupMemberships] = useState(false);
   const [currentUserRole, setCurrentUserRole] = useState("member");
   const [userSkills, setUserSkills] = useState([]);
   const [adminSkillsOpen, setAdminSkillsOpen] = useState(false);
@@ -248,6 +257,7 @@ function App() {
     setSkillsOpen(false);
     setUserSkills([]);
     setSkillsRole("member");
+    setHasGroupMemberships(false);
     setCurrentUserRole("member");
     setAdminSkillsOpen(false);
     setAdminUsersOpen(false);
@@ -371,15 +381,17 @@ function App() {
     }
   }
 
-  async function createChatSession() {
+  async function createChatSession(kind = "group") {
     if (!isAuthenticated) {
       return;
     }
+    const normalizedKind = String(kind || "group").toLowerCase() === "personal" ? "personal" : "group";
+    const title = normalizedKind === "personal" ? `${PERSONAL_CHAT_MARKER} Personal Chat` : "";
     setIsBusy(true);
     try {
       const payload = await request("/chat/sessions", {
         method: "POST",
-        body: JSON.stringify({ title: "" }),
+        body: JSON.stringify({ title }),
         timeoutMs: 15000,
       });
       const nextChatId = String(payload?.chat_id || "").trim();
@@ -428,6 +440,7 @@ function App() {
       const resolvedRole = String(payload?.role || "member");
       setSkillsRole(resolvedRole);
       setCurrentUserRole(resolvedRole);
+      setHasGroupMemberships(Boolean(payload?.has_group_memberships));
       setUserSkills(Array.isArray(payload?.skills) ? payload.skills.map((item) => String(item || "")).filter(Boolean) : []);
       setSkillsOpen(true);
     } catch (error) {
@@ -1103,8 +1116,10 @@ function App() {
         const payload = await request("/users/me/skills", { timeoutMs: 15000 });
         const resolvedRole = String(payload?.role || "member");
         setCurrentUserRole(resolvedRole);
+        setHasGroupMemberships(Boolean(payload?.has_group_memberships));
       } catch {
         setCurrentUserRole("member");
+        setHasGroupMemberships(false);
       }
     };
 
@@ -1298,6 +1313,8 @@ function App() {
   }
 
   const activeSession = chatSessions.find((session) => session.chat_id === activeChatId) || null;
+  const activeChatKind = String(activeSession?.chat_kind || "").toLowerCase() === "personal" ? "personal" : "group";
+  const resolvedChatTitle = activeChatKind === "personal" ? t("personalChat") : hasGroupMemberships ? t("groupChat") : t("personalChat");
   const isActiveDeleted = Boolean(activeSession?.deleted_at);
   const isComposeDisabled = isBusy || !draft.trim() || showTrash || isActiveDeleted || forcePasswordChange;
   const sessionGroups = groupSessionsByPeriod(chatSessions);
@@ -1351,22 +1368,30 @@ function App() {
       <div className="shell">
         <header className="chat-header card">
           <div>
-            <h1>{t("personalChat")}</h1>
+            <h1>{resolvedChatTitle}</h1>
             <p className="subtitle">{t("contextSubtitle")}</p>
             {forcePasswordChange ? <p className="subtitle">{t("passwordChangeRequired")}</p> : null}
           </div>
           <div className="top-actions">
             <span className="pane-topbar-text">{t("realtime")}: {wsStatus}</span>
             <span className="pane-topbar-text">{t("role")}: {isAdmin ? t("roleAdmin") : t("roleMember")}</span>
+            <button
+              className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
+              type="button"
+              onClick={() => setIsHistoryCollapsed((prev) => !prev)}
+              aria-label={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+              title={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+            >
+              <span />
+              <span />
+              <span />
+            </button>
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>{t("skills")}</button>
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>{t("adminUsers")}</button> : null}
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>{t("organizations")}</button> : null}
             {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>{t("adminSkills")}</button> : null}
             <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>{t("profile")}</button>
             <button className="secondary" type="button" onClick={() => void fetchMessages()}>{t("refresh")}</button>
-            <button className="secondary" type="button" onClick={() => setIsHistoryCollapsed((prev) => !prev)}>
-              {isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
-            </button>
             <button className="ghost" type="button" onClick={logout}>{t("logout")}</button>
             <div className="lang-switch lang-switch-right">
               <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
@@ -1382,9 +1407,6 @@ function App() {
         <section className={isHistoryCollapsed ? "chat-layout chat-layout-collapsed" : "chat-layout"}>
           <aside className="chat-history card">
             <div className="chat-history-top">
-              <button className="ghost chat-action" type="button" onClick={() => setIsHistoryCollapsed(true)}>
-                {t("hideHistory")}
-              </button>
               <div className="chat-mode-tabs">
                 <button
                   type="button"
@@ -1408,9 +1430,16 @@ function App() {
                 </button>
               </div>
               {showTrash ? null : (
-                <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession()}>
-                  {t("newChat")}
-                </button>
+                <>
+                  {hasGroupMemberships ? (
+                    <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession("group")}>
+                      {t("newGroupChat")}
+                    </button>
+                  ) : null}
+                  <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession("personal")}>
+                    {t("newPersonalChat")}
+                  </button>
+                </>
               )}
               {showTrash ? (
                 <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || chatSessions.length === 0} onClick={() => void purgeAllTrashedChats()}>
@@ -1512,11 +1541,6 @@ function App() {
           </aside>
 
           <div className="chat-main">
-            {isHistoryCollapsed ? (
-              <button className="history-curtain-toggle secondary" type="button" onClick={() => setIsHistoryCollapsed(false)}>
-                {t("showHistory")}
-              </button>
-            ) : null}
             <section className="messages-card card">
               <div className="messages-list" role="log" aria-live="polite">
                 {messages.length === 0 ? <div className="empty">{t("noMessages")}</div> : null}

@@ -33,6 +33,7 @@ USER_SCOPE_ORG_ID = "user"
 PASSWORD_MAX_AGE_DAYS = 90
 PASSWORD_HISTORY_SIZE = 3
 _SKILL_NAME_RE = re.compile(r"[^a-z0-9_]+")
+_PERSONAL_CHAT_MARKER = "[personal]"
 
 
 def _resolve_db_url(explicit: str | None = None) -> str:
@@ -461,6 +462,7 @@ class DynamicSkillListResponse(BaseModel):
 class UserSkillListResponse(BaseModel):
     role: str
     skills: list[str]
+    has_group_memberships: bool = False
 
 
 class BulkClaudeConvertItem(BaseModel):
@@ -1952,7 +1954,55 @@ class RealtimeChatHub:
             role=role,
             all_dynamic_tools=all_dynamic,
         )
-        return UserSkillListResponse(role=role, skills=sorted(allowed_dynamic))
+        has_group_memberships = False
+        if self._table_exists("org_memberships"):
+            with self.engine.begin() as conn:
+                member_row = conn.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM org_memberships
+                        WHERE user_id = :user_id
+                          AND org_id <> :user_scope_org_id
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "user_id": int(user_id),
+                        "user_scope_org_id": USER_SCOPE_ORG_ID,
+                    },
+                ).first()
+            has_group_memberships = member_row is not None
+
+        return UserSkillListResponse(
+            role=role,
+            skills=sorted(allowed_dynamic),
+            has_group_memberships=has_group_memberships,
+        )
+
+    def _is_personal_chat_session(self, *, user_id: int, chat_id: str) -> bool:
+        if not hasattr(self, "engine"):
+            return False
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT title
+                    FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+
+        title = str((row or {}).get("title") or "").strip().lower()
+        return title.startswith(_PERSONAL_CHAT_MARKER)
 
     def convert_claude_markdown_to_skill(
         self,
@@ -2606,6 +2656,7 @@ class RealtimeChatHub:
         runtime_chat_id = _scoped_runtime_chat_id(user_id, scope_chat_id)
         org_id = USER_SCOPE_ORG_ID
         team_id = _user_scope_id(user_id)
+        is_personal_chat = self._is_personal_chat_session(user_id=user_id, chat_id=scope_chat_id)
 
         role = self.rbac.get_role(org_id=org_id, user_id=user_id, fallback_role="member")
         if self.settings.enable_dynamic_tools:
@@ -2621,7 +2672,7 @@ class RealtimeChatHub:
         )
 
         user_profile = self._user_profile_text(user_id=user_id)
-        org_people_context = self._organization_people_context(user_id=user_id)
+        org_people_context = "" if is_personal_chat else self._organization_people_context(user_id=user_id)
         try:
             history = self._load_group_history(user_id=user_id, chat_id=scope_chat_id)
         except Exception:
