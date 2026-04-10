@@ -390,6 +390,69 @@ body[data-theme="dark"] .chat-history {
   gap: 6px;
 }
 
+.chat-mode-tabs .chat-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-tab-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-tab-icon-chats::before,
+.chat-tab-icon-chats::after {
+  content: "";
+  position: absolute;
+  border: 1.4px solid currentColor;
+  border-radius: 4px;
+}
+
+.chat-tab-icon-chats::before {
+  width: 11px;
+  height: 8px;
+  top: 1px;
+  left: 1px;
+}
+
+.chat-tab-icon-chats::after {
+  width: 8px;
+  height: 6px;
+  bottom: 0;
+  right: 0;
+  opacity: 0.75;
+}
+
+.chat-tab-icon-trash::before,
+.chat-tab-icon-trash::after {
+  content: "";
+  position: absolute;
+}
+
+.chat-tab-icon-trash::before {
+  width: 9px;
+  height: 9px;
+  left: 2px;
+  top: 3px;
+  border: 1.4px solid currentColor;
+  border-top: 0;
+  border-radius: 1px 1px 3px 3px;
+}
+
+.chat-tab-icon-trash::after {
+  width: 11px;
+  height: 2px;
+  left: 1px;
+  top: 1px;
+  background: currentColor;
+  border-radius: 2px;
+  box-shadow: 3px 3px 0 -1px currentColor;
+}
+
 .chat-density-toggle {
   display: inline-flex;
   gap: 6px;

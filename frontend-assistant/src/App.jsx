@@ -1538,6 +1538,31 @@ function App() {
                 <span />
                 <span />
               </button>
+              <div className="chat-mode-tabs">
+                <button
+                  type="button"
+                  className={showTrash ? "ghost chat-action" : "secondary chat-action"}
+                  onClick={() => {
+                    setShowTrash(false);
+                    setMenuChatId("");
+                  }}
+                >
+                  <span className="chat-tab-icon chat-tab-icon-chats" aria-hidden="true" />
+                  <span>{t("chats")}</span>
+                </button>
+                <button
+                  type="button"
+                  className={showTrash ? "secondary chat-action" : "ghost chat-action"}
+                  onClick={() => {
+                    setShowTrash(true);
+                    setMenuChatId("");
+                  }}
+                >
+                  <span className="chat-tab-icon chat-tab-icon-trash" aria-hidden="true" />
+                  <span>{t("trash")}</span>
+                  {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
+                </button>
+              </div>
               {isAdmin && hasGroupMemberships && !showTrash ? (
                 <div className="chat-group-select-wrap">
                   <label className="pane-topbar-text" htmlFor="group-chat-org-select">{t("groupChatOrgLabel")}</label>
@@ -1565,28 +1590,6 @@ function App() {
                   </button>
                 </div>
               )}
-              <div className="chat-mode-tabs">
-                <button
-                  type="button"
-                  className={showTrash ? "ghost chat-action" : "secondary chat-action"}
-                  onClick={() => {
-                    setShowTrash(false);
-                    setMenuChatId("");
-                  }}
-                >
-                  {t("chats")}
-                </button>
-                <button
-                  type="button"
-                  className={showTrash ? "secondary chat-action" : "ghost chat-action"}
-                  onClick={() => {
-                    setShowTrash(true);
-                    setMenuChatId("");
-                  }}
-                >
-                  {t("trash")} {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
-                </button>
-              </div>
               {showTrash ? (
                 <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || trashCount === 0} onClick={() => void purgeAllTrashedChats()}>
                   {t("purgeAll")}
