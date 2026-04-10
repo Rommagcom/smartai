@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 
 Role = Literal["admin", "manager", "member"]
 ORG_ID_EMPTY_TEXT = "org_id must not be empty"
+DEFAULT_SYSTEM_SKILLS: set[str] = {"utc_system_time"}
 
 
 @dataclass(slots=True)
@@ -204,13 +205,14 @@ class RbacStore:
         role: Role,
         all_dynamic_tools: set[str],
     ) -> set[str]:
+        default_system = set(all_dynamic_tools).intersection(DEFAULT_SYSTEM_SKILLS)
         if role == "admin":
             return set(all_dynamic_tools)
 
         assigned = set(self.list_user_skills(org_id=org_id, user_id=user_id))
         if role == "manager":
-            return assigned.intersection(all_dynamic_tools)
-        return assigned.intersection(all_dynamic_tools)
+            return assigned.intersection(all_dynamic_tools).union(default_system)
+        return assigned.intersection(all_dynamic_tools).union(default_system)
 
     def audit(
         self,

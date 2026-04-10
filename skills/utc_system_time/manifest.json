@@ -1,0 +1,19 @@
+{
+  "name": "utc_system_time",
+  "package_version": "1.0.0",
+  "description": "Returns current system date and time in UTC",
+  "entrypoint": "tool.py",
+  "function": "utc_system_time",
+  "schema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "package_files_sha256": {
+    "skill.md": "66e51db95b8889ceb8c432192f94a425b0daf75a66e1ad687623dcd75335abc4",
+    "tool.py": "f34f1bf060d9f552a0999585067b5a9f0775bb79deac3e0d67416a9a6dceaf34"
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "0f77b8d0c1f0f1da5adddef81d1c194a4fdcf854965c2b78d4bc2cb4e7f8adf0"
+}
