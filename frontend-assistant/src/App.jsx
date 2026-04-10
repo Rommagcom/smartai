@@ -1401,11 +1401,13 @@ function App() {
                 <div className="chat-create-row">
                   {hasGroupMemberships ? (
                     <button className="secondary chat-create-btn" type="button" disabled={isBusy} onClick={() => void createChatSession("group")}>
-                      + {t("groupShort")}
+                      <span className="chat-create-icon" aria-hidden="true" />
+                      <span>{t("groupShort")}</span>
                     </button>
                   ) : null}
                   <button className="secondary chat-create-btn" type="button" disabled={isBusy} onClick={() => void createChatSession("personal")}>
-                    + {t("personalShort")}
+                    <span className="chat-create-icon" aria-hidden="true" />
+                    <span>{t("personalShort")}</span>
                   </button>
                 </div>
               )}

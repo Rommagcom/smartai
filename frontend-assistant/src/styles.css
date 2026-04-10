@@ -273,12 +273,50 @@ button:disabled {
   width: 100%;
   display: flex;
   gap: 6px;
+  justify-content: flex-start;
 }
 
 .chat-create-btn {
-  flex: 1;
-  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  line-height: 1;
   font-weight: 700;
+  box-shadow: 0 4px 9px rgba(7, 53, 104, 0.2);
+}
+
+.chat-create-icon {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  position: relative;
+  background: linear-gradient(180deg, #f7fbff, #d9ebff);
+  border: 1px solid rgba(8, 71, 136, 0.35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  flex-shrink: 0;
+}
+
+.chat-create-icon::before,
+.chat-create-icon::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: #0a4ea8;
+  transform: translate(-50%, -50%);
+  border-radius: 2px;
+}
+
+.chat-create-icon::before {
+  width: 8px;
+  height: 1.8px;
+}
+
+.chat-create-icon::after {
+  width: 1.8px;
+  height: 8px;
 }
 
 .chat-mode-tabs {
