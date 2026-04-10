@@ -2933,10 +2933,11 @@ class RealtimeChatHub:
             rows = conn.execute(
                 text(
                     """
-                    SELECT user_id
-                    FROM org_memberships
-                    WHERE org_id = :org_id
-                    ORDER BY user_id ASC
+                    SELECT om.user_id
+                    FROM org_memberships om
+                    JOIN auth_users u ON u.user_id = om.user_id
+                    WHERE om.org_id = :org_id
+                    ORDER BY om.user_id ASC
                     """
                 ),
                 {"org_id": str(org_id).strip()},
@@ -2988,13 +2989,16 @@ class RealtimeChatHub:
             if uid <= 0 or uid in seen:
                 continue
             seen.add(uid)
-            self._append_group_message(
-                user_id=uid,
-                chat_id=chat_id,
-                sender_user_id=sender_user_id,
-                sender_type=sender_type,
-                content=content,
-            )
+            try:
+                self._append_group_message(
+                    user_id=uid,
+                    chat_id=chat_id,
+                    sender_user_id=sender_user_id,
+                    sender_type=sender_type,
+                    content=content,
+                )
+            except Exception:
+                continue
 
     def resolve_chat_snapshot_recipients(self, *, user_id: int, chat_id: str) -> list[int]:
         group_org_id = self._resolve_group_chat_org_id_for_session(user_id=int(user_id), chat_id=chat_id)

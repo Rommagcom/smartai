@@ -1448,6 +1448,17 @@ function App() {
         <section className={isHistoryCollapsed ? "chat-layout chat-layout-collapsed" : "chat-layout"}>
           <aside className="chat-history card">
             <div className="chat-history-top">
+              <button
+                className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
+                type="button"
+                onClick={() => setIsHistoryCollapsed((prev) => !prev)}
+                aria-label={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+                title={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
               {showTrash ? null : (
                 <div className="chat-create-row">
                   {isAdmin && hasGroupMemberships ? (
@@ -1473,17 +1484,6 @@ function App() {
                   </select>
                 </div>
               ) : null}
-              <button
-                className={isHistoryCollapsed ? "ghost history-toggle-btn is-collapsed" : "ghost history-toggle-btn"}
-                type="button"
-                onClick={() => setIsHistoryCollapsed((prev) => !prev)}
-                aria-label={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
-                title={isHistoryCollapsed ? t("showHistory") : t("hideHistory")}
-              >
-                <span />
-                <span />
-                <span />
-              </button>
               <div className="chat-mode-tabs">
                 <button
                   type="button"
