@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { I18N, SUPPORTED_LANGUAGES } from "./i18n";
+import { readStoredLanguage, writeStoredLanguage } from "./languageStorage";
 
 const DEFAULT_REGISTER_FORM = { email: "", password: "", full_name: "", title: "", profile_bio: "" };
 const DEFAULT_LOGIN_FORM = { email: "", password: "" };
@@ -169,6 +171,7 @@ function groupSessionsByPeriod(items) {
 }
 
 function App() {
+  const [language, setLanguage] = useState(readStoredLanguage);
   const [mode, setMode] = useState("login");
   const [registerForm, setRegisterForm] = useState(DEFAULT_REGISTER_FORM);
   const [loginForm, setLoginForm] = useState(DEFAULT_LOGIN_FORM);
@@ -219,6 +222,16 @@ function App() {
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
   const isAdmin = currentUserRole === "admin";
+  const t = (key) => I18N[language]?.[key] || I18N.en[key] || key;
+
+  function onChangeLanguage(nextLanguage) {
+    const normalized = String(nextLanguage || "").trim().toLowerCase();
+    if (!SUPPORTED_LANGUAGES.includes(normalized)) {
+      return;
+    }
+    setLanguage(normalized);
+    writeStoredLanguage(normalized);
+  }
 
   function performSessionLogout(reason = "Session expired. Please sign in again.") {
     closeSocket();
@@ -1291,28 +1304,37 @@ function App() {
     return (
       <div className="page auth-page">
         <main className="auth-card card">
-          <h1>SmartAi</h1>
-          <p className="subtitle">User-only mode: personal assistant chat</p>
+          <h1>{t("appName")}</h1>
+          <p className="subtitle">{t("userOnlyMode")}</p>
+
+          <div className="top-actions" style={{ justifyContent: "flex-end" }}>
+            <label className="pane-topbar-text" htmlFor="lang-switch-auth">{t("language")}:</label>
+            <select id="lang-switch-auth" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
+              <option value="kk">KK</option>
+              <option value="ru">RU</option>
+              <option value="en">EN</option>
+            </select>
+          </div>
 
           <div className="workspace-tabs">
-            <button type="button" className={mode === "login" ? "team-item team-item-active" : "team-item"} onClick={() => setMode("login")}>Login</button>
-            <button type="button" className={mode === "register" ? "team-item team-item-active" : "team-item"} onClick={() => setMode("register")}>Register</button>
+            <button type="button" className={mode === "login" ? "team-item team-item-active" : "team-item"} onClick={() => setMode("login")}>{t("login")}</button>
+            <button type="button" className={mode === "register" ? "team-item team-item-active" : "team-item"} onClick={() => setMode("register")}>{t("register")}</button>
           </div>
 
           {mode === "login" ? (
             <form onSubmit={onLoginSubmit} className="context-grid">
-              <label>Email<input value={loginForm.email} onChange={(e) => setLoginForm((p) => ({ ...p, email: e.target.value }))} /></label>
-              <label>Password<input type="password" value={loginForm.password} onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))} /></label>
-              <button className="primary" type="submit" disabled={isBusy}>Sign In</button>
+              <label>{t("email")}<input value={loginForm.email} onChange={(e) => setLoginForm((p) => ({ ...p, email: e.target.value }))} /></label>
+              <label>{t("password")}<input type="password" value={loginForm.password} onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))} /></label>
+              <button className="primary" type="submit" disabled={isBusy}>{t("signIn")}</button>
             </form>
           ) : (
             <form onSubmit={onRegisterSubmit} className="context-grid">
-              <label>Email<input value={registerForm.email} onChange={(e) => setRegisterForm((p) => ({ ...p, email: e.target.value }))} /></label>
-              <label>Password<input type="password" value={registerForm.password} onChange={(e) => setRegisterForm((p) => ({ ...p, password: e.target.value }))} /></label>
-              <label>Full Name<input value={registerForm.full_name} onChange={(e) => setRegisterForm((p) => ({ ...p, full_name: e.target.value }))} /></label>
-              <label>Title<input value={registerForm.title} onChange={(e) => setRegisterForm((p) => ({ ...p, title: e.target.value }))} /></label>
-              <label>Bio<textarea rows={3} value={registerForm.profile_bio} onChange={(e) => setRegisterForm((p) => ({ ...p, profile_bio: e.target.value }))} /></label>
-              <button className="primary" type="submit" disabled={isBusy}>Create Account</button>
+              <label>{t("email")}<input value={registerForm.email} onChange={(e) => setRegisterForm((p) => ({ ...p, email: e.target.value }))} /></label>
+              <label>{t("password")}<input type="password" value={registerForm.password} onChange={(e) => setRegisterForm((p) => ({ ...p, password: e.target.value }))} /></label>
+              <label>{t("fullName")}<input value={registerForm.full_name} onChange={(e) => setRegisterForm((p) => ({ ...p, full_name: e.target.value }))} /></label>
+              <label>{t("title")}<input value={registerForm.title} onChange={(e) => setRegisterForm((p) => ({ ...p, title: e.target.value }))} /></label>
+              <label>{t("bio")}<textarea rows={3} value={registerForm.profile_bio} onChange={(e) => setRegisterForm((p) => ({ ...p, profile_bio: e.target.value }))} /></label>
+              <button className="primary" type="submit" disabled={isBusy}>{t("createAccount")}</button>
             </form>
           )}
 
@@ -1327,20 +1349,26 @@ function App() {
       <div className="shell">
         <header className="chat-header card">
           <div>
-            <h1>Personal Chat</h1>
-            <p className="subtitle">Контекст чата: ваш профиль и организации, где вы состоите</p>
-            {forcePasswordChange ? <p className="subtitle">Password change required before using chat.</p> : null}
+            <h1>{t("personalChat")}</h1>
+            <p className="subtitle">{t("contextSubtitle")}</p>
+            {forcePasswordChange ? <p className="subtitle">{t("passwordChangeRequired")}</p> : null}
           </div>
           <div className="top-actions">
-            <span className="pane-topbar-text">Realtime: {wsStatus}</span>
-            <span className="pane-topbar-text">Role: {isAdmin ? "admin" : "member"}</span>
-            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Skills</button>
-            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Admin Users</button> : null}
-            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Organizations</button> : null}
-            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Admin Skills</button> : null}
-            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>Profile</button>
-            <button className="secondary" type="button" onClick={() => void fetchMessages()}>Refresh</button>
-            <button className="ghost" type="button" onClick={logout}>Logout</button>
+            <label className="pane-topbar-text" htmlFor="lang-switch-chat">{t("language")}:</label>
+            <select id="lang-switch-chat" value={language} onChange={(event) => onChangeLanguage(event.target.value)}>
+              <option value="kk">KK</option>
+              <option value="ru">RU</option>
+              <option value="en">EN</option>
+            </select>
+            <span className="pane-topbar-text">{t("realtime")}: {wsStatus}</span>
+            <span className="pane-topbar-text">{t("role")}: {isAdmin ? t("roleAdmin") : t("roleMember")}</span>
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>{t("skills")}</button>
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>{t("adminUsers")}</button> : null}
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>{t("organizations")}</button> : null}
+            {isAdmin ? <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>{t("adminSkills")}</button> : null}
+            <button className="secondary" type="button" disabled={isBusy} onClick={() => void openProfileEditor()}>{t("profile")}</button>
+            <button className="secondary" type="button" onClick={() => void fetchMessages()}>{t("refresh")}</button>
+            <button className="ghost" type="button" onClick={logout}>{t("logout")}</button>
           </div>
         </header>
 
@@ -1356,7 +1384,7 @@ function App() {
                     setMenuChatId("");
                   }}
                 >
-                  Chats
+                  {t("chats")}
                 </button>
                 <button
                   type="button"
@@ -1366,23 +1394,23 @@ function App() {
                     setMenuChatId("");
                   }}
                 >
-                  Trash {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
+                  {t("trash")} {trashCount > 0 ? <span className="chat-tab-badge">{trashCount}</span> : null}
                 </button>
               </div>
               {showTrash ? null : (
                 <button className="secondary" type="button" disabled={isBusy} onClick={() => void createChatSession()}>
-                  New
+                  {t("newChat")}
                 </button>
               )}
               {showTrash ? (
                 <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy || chatSessions.length === 0} onClick={() => void purgeAllTrashedChats()}>
-                  Purge All
+                  {t("purgeAll")}
                 </button>
               ) : null}
             </div>
 
             <div className="chat-history-list density-compact" aria-label="Chat sessions">
-              {chatSessions.length === 0 ? <div className="empty">No chats yet.</div> : null}
+              {chatSessions.length === 0 ? <div className="empty">{t("noChats")}</div> : null}
               {sessionGroups.map((group) =>
                 group.items.length > 0 ? (
                   <div key={group.title} className="chat-group">
@@ -1443,20 +1471,20 @@ function App() {
                                 {isDeleted ? (
                                   <>
                                     <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => void restoreChatSession(session.chat_id)}>
-                                      Restore
+                                      {t("restore")}
                                     </button>
                                     <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void purgeChatSession(session.chat_id)}>
-                                      Purge
+                                      {t("purge")}
                                     </button>
                                   </>
                                 ) : (
                                   <>
                                     <button className="ghost chat-action" type="button" disabled={isBusy} onClick={() => startInlineRename(session.chat_id, session.title)}>
-                                      Rename
+                                      {t("rename")}
                                     </button>
                                     {canDelete ? (
                                       <button className="ghost chat-action chat-action-danger" type="button" disabled={isBusy} onClick={() => void deleteChatSession(session.chat_id)}>
-                                        Move to Trash
+                                        {t("moveToTrash")}
                                       </button>
                                     ) : null}
                                   </>
@@ -1476,7 +1504,7 @@ function App() {
           <div className="chat-main">
             <section className="messages-card card">
               <div className="messages-list" role="log" aria-live="polite">
-                {messages.length === 0 ? <div className="empty">No messages yet.</div> : null}
+                {messages.length === 0 ? <div className="empty">{t("noMessages")}</div> : null}
                 {messages.map((item, index) => (
                   <div key={`${item.created_at}-${index}`} className={`message ${item.sender_type === "assistant" ? "assistant" : "user"}`}>
                     <div className="meta">
@@ -1513,20 +1541,20 @@ function App() {
               {isBusy ? (
                 <div className="chat-busy-overlay" aria-live="polite" aria-label="Assistant is processing">
                   <div className="chat-busy-spinner" />
-                  <div className="chat-busy-text">Assistant is working...</div>
+                  <div className="chat-busy-text">{t("assistantWorking")}</div>
                 </div>
               ) : null}
             </section>
 
             <section className="composer card">
-              <textarea rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onComposerKeyDown} placeholder="Write a task for your assistant" />
-              {showTrash || isActiveDeleted ? <div className="compose-hint">Messaging is disabled in Trash view. Restore a chat or switch to active chats.</div> : null}
-              {forcePasswordChange ? <div className="compose-hint">Change your password in Profile to continue chatting.</div> : null}
+              <textarea rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onComposerKeyDown} placeholder={t("writeTask")} />
+              {showTrash || isActiveDeleted ? <div className="compose-hint">{t("messagingDisabledTrash")}</div> : null}
+              {forcePasswordChange ? <div className="compose-hint">{t("changePasswordHint")}</div> : null}
               <div className="composer-row">
-                <div className="compose-hint">Enter - send, Shift+Enter - new line</div>
+                <div className="compose-hint">{t("enterToSend")}</div>
                 <div className="composer-actions">
                   <button className="primary" type="button" disabled={isComposeDisabled} onClick={() => void sendMessage(draft)}>
-                    {isBusy ? "Sending..." : "Send"}
+                    {isBusy ? t("sending") : t("send")}
                   </button>
                 </div>
               </div>
@@ -1540,14 +1568,14 @@ function App() {
       {skillsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setSkillsOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Available skills" onClick={(event) => event.stopPropagation()}>
-            <h2>Available Skills</h2>
+            <h2>{t("availableSkills")}</h2>
             <div className="skills-panel">
               <div className="skills-summary">
-                <span>Your role: {skillsRole}</span>
-                <span>Total: {userSkills.length}</span>
+                <span>{t("yourRole")}: {skillsRole}</span>
+                <span>{t("total")}: {userSkills.length}</span>
               </div>
               <div className="skills-grid">
-                {userSkills.length === 0 ? <div className="empty">No skills assigned.</div> : null}
+                {userSkills.length === 0 ? <div className="empty">{t("noSkillsAssigned")}</div> : null}
                 {userSkills.map((skillName) => (
                   <div key={skillName} className="skill-item">
                     <span>{skillName}</span>
@@ -1556,8 +1584,8 @@ function App() {
               </div>
             </div>
             <div className="top-actions">
-              <button className="ghost" type="button" onClick={() => setSkillsOpen(false)}>Close</button>
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>Refresh</button>
+              <button className="ghost" type="button" onClick={() => setSkillsOpen(false)}>{t("close")}</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openSkillsViewer()}>{t("refresh")}</button>
             </div>
           </div>
         </div>
@@ -1566,42 +1594,42 @@ function App() {
       {isAdmin && adminUsersOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminUsersOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin users manager" onClick={(event) => event.stopPropagation()}>
-            <h2>Admin Users</h2>
+            <h2>{t("adminUsersTitle")}</h2>
             <div className="context-grid profile-grid">
-              <label>Email<input value={adminCreateUserForm.email} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
-              <label>Full Name<input value={adminCreateUserForm.full_name} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
-              <label>Password (optional)<input type="password" value={adminCreateUserForm.password} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
-              <label>Role
+              <label>{t("email")}<input value={adminCreateUserForm.email} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+              <label>{t("fullName")}<input value={adminCreateUserForm.full_name} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+              <label>{t("passwordOptional")}<input type="password" value={adminCreateUserForm.password} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+              <label>{t("role")}
                 <select value={adminCreateUserForm.role} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, role: event.target.value }))}>
                   <option value="member">member</option>
                   <option value="manager">manager</option>
                   <option value="admin">admin</option>
                 </select>
               </label>
-              <label>Title<input value={adminCreateUserForm.title} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
-              <label className="profile-bio-field">Bio<textarea rows={3} value={adminCreateUserForm.profile_bio} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, profile_bio: event.target.value }))} /></label>
+              <label>{t("title")}<input value={adminCreateUserForm.title} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
+              <label className="profile-bio-field">{t("bio")}<textarea rows={3} value={adminCreateUserForm.profile_bio} onChange={(event) => setAdminCreateUserForm((prev) => ({ ...prev, profile_bio: event.target.value }))} /></label>
             </div>
             <div className="top-actions">
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createUserByAdmin()}>Create User</button>
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>Reload</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createUserByAdmin()}>{t("createUser")}</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminUsersManager()}>{t("refresh")}</button>
             </div>
             <div className="skills-panel">
               <div className="skills-summary">
-                <span>Users: {adminUsers.length}</span>
+                <span>{t("usersCount")}: {adminUsers.length}</span>
               </div>
               <div className="list-table">
-                {adminUsers.length === 0 ? <div className="empty">No users found.</div> : null}
+                {adminUsers.length === 0 ? <div className="empty">{t("noUsersFound")}</div> : null}
                 {adminUsers.length > 0 ? (
                   <div className="list-row list-header">
-                    <span>User</span>
-                    <span>Organizations</span>
-                    <span>Actions</span>
+                    <span>{t("user")}</span>
+                    <span>{t("organizationsCol")}</span>
+                    <span>{t("actions")}</span>
                   </div>
                 ) : null}
                 {adminUsers.map((item) => (
                   <div key={item.user_id} className="list-row">
                     <span>{item.full_name} ({item.email})</span>
-                    <span className="admin-org-list">{item.organization_ids?.length ? item.organization_ids.join(", ") : "none"}</span>
+                    <span className="admin-org-list">{item.organization_ids?.length ? item.organization_ids.join(", ") : t("none")}</span>
                     <span>
                       <button
                         className="ghost"
@@ -1609,7 +1637,7 @@ function App() {
                         disabled={isBusy}
                         onClick={() => void deleteUserByAdmin(item.user_id)}
                       >
-                        Delete
+                        {t("delete")}
                       </button>
                     </span>
                   </div>
@@ -1617,7 +1645,7 @@ function App() {
               </div>
             </div>
             <div className="top-actions">
-              <button className="ghost" type="button" onClick={() => setAdminUsersOpen(false)}>Close</button>
+              <button className="ghost" type="button" onClick={() => setAdminUsersOpen(false)}>{t("close")}</button>
             </div>
           </div>
         </div>
@@ -1626,37 +1654,37 @@ function App() {
       {isAdmin && adminOrganizationsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminOrganizationsOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin organizations manager" onClick={(event) => event.stopPropagation()}>
-            <h2>Organizations</h2>
+            <h2>{t("organizationsTitle")}</h2>
             <div className="context-grid profile-grid">
-              <label>Organization ID<input value={adminCreateOrgForm.org_id} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, org_id: event.target.value }))} /></label>
-              <label>Name<input value={adminCreateOrgForm.name} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, name: event.target.value }))} /></label>
+              <label>{t("organizationId")}<input value={adminCreateOrgForm.org_id} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, org_id: event.target.value }))} /></label>
+              <label>{t("name")}<input value={adminCreateOrgForm.name} onChange={(event) => setAdminCreateOrgForm((prev) => ({ ...prev, name: event.target.value }))} /></label>
             </div>
             <div className="top-actions">
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createOrganizationByAdmin()}>Create Organization</button>
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>Reload</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void createOrganizationByAdmin()}>{t("createOrganization")}</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminOrganizationsManager()}>{t("refresh")}</button>
             </div>
 
             <div className="context-grid profile-grid">
               <label>
-                User
+                {t("user")}
                 <select value={adminOrgTargetUserId || 0} onChange={(event) => setAdminOrgTargetUserId(Number(event.target.value || 0))}>
-                  {adminUsers.length === 0 ? <option value={0}>No users</option> : null}
+                  {adminUsers.length === 0 ? <option value={0}>{t("noUsers")}</option> : null}
                   {adminUsers.map((item) => (
                     <option key={item.user_id} value={item.user_id}>{item.full_name} ({item.email})</option>
                   ))}
                 </select>
               </label>
               <label>
-                Organization
+                {t("organizationsTitle")}
                 <select value={adminOrgTargetOrgId} onChange={(event) => setAdminOrgTargetOrgId(event.target.value)}>
-                  {adminOrganizations.length === 0 ? <option value="">No organizations</option> : null}
+                  {adminOrganizations.length === 0 ? <option value="">{t("noOrganizations")}</option> : null}
                   {adminOrganizations.map((item) => (
                     <option key={item.org_id} value={item.org_id}>{item.name} ({item.org_id})</option>
                   ))}
                 </select>
               </label>
               <label>
-                Role
+                {t("role")}
                 <select value={adminOrgTargetRole} onChange={(event) => setAdminOrgTargetRole(event.target.value)}>
                   <option value="member">member</option>
                   <option value="manager">manager</option>
@@ -1665,21 +1693,21 @@ function App() {
               </label>
             </div>
             <div className="top-actions">
-              <button className="secondary" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void assignUserToOrganization()}>Assign User</button>
-              <button className="ghost" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void removeUserFromOrganization()}>Remove From Organization</button>
+              <button className="secondary" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void assignUserToOrganization()}>{t("assignUser")}</button>
+              <button className="ghost" type="button" disabled={isBusy || !adminOrgTargetUserId || !adminOrgTargetOrgId} onClick={() => void removeUserFromOrganization()}>{t("removeFromOrganization")}</button>
             </div>
 
             <div className="skills-panel">
               <div className="skills-summary">
-                <span>Organizations: {adminOrganizations.length}</span>
+                <span>{t("organizationsCount")}: {adminOrganizations.length}</span>
               </div>
               <div className="list-table">
-                {adminOrganizations.length === 0 ? <div className="empty">No organizations found.</div> : null}
+                {adminOrganizations.length === 0 ? <div className="empty">{t("noOrganizationsFound")}</div> : null}
                 {adminOrganizations.length > 0 ? (
                   <div className="list-row list-header">
-                    <span>Organization</span>
+                    <span>{t("organizationsTitle")}</span>
                     <span>ID</span>
-                    <span>Members</span>
+                    <span>{t("members")}</span>
                   </div>
                 ) : null}
                 {adminOrganizations.map((item) => {
@@ -1696,7 +1724,7 @@ function App() {
             </div>
 
             <div className="top-actions">
-              <button className="ghost" type="button" onClick={() => setAdminOrganizationsOpen(false)}>Close</button>
+              <button className="ghost" type="button" onClick={() => setAdminOrganizationsOpen(false)}>{t("close")}</button>
             </div>
           </div>
         </div>
@@ -1705,18 +1733,18 @@ function App() {
       {isAdmin && adminSkillsOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setAdminSkillsOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin skills manager" onClick={(event) => event.stopPropagation()}>
-            <h2>Admin Skills Manager</h2>
+            <h2>{t("adminSkillsManager")}</h2>
             <div className="context-grid profile-grid">
               <label>
-                Search user
+                {t("searchUser")}
                 <input
                   value={adminUserQuery}
-                  placeholder="Name or email"
+                  placeholder={t("nameOrEmail")}
                   onChange={(event) => setAdminUserQuery(event.target.value)}
                 />
               </label>
               <label>
-                User
+                {t("user")}
                 <select
                   value={adminTargetUserId || 0}
                   onChange={(event) => {
@@ -1725,7 +1753,7 @@ function App() {
                     void loadAdminUserSkills(nextUserId);
                   }}
                 >
-                  {filteredAdminUsers.length === 0 ? <option value={0}>No users found</option> : null}
+                  {filteredAdminUsers.length === 0 ? <option value={0}>{t("noUsersFound")}</option> : null}
                   {filteredAdminUsers.map((item) => (
                     <option key={item.user_id} value={item.user_id}>
                       {item.full_name} ({item.email})
@@ -1736,11 +1764,11 @@ function App() {
             </div>
             <div className="skills-panel">
               <div className="skills-summary">
-                <span>Available: {adminAllSkills.length}</span>
-                <span>Assigned: {adminAssignedSkills.length}</span>
+                <span>{t("available")}: {adminAllSkills.length}</span>
+                <span>{t("assigned")}: {adminAssignedSkills.length}</span>
               </div>
               <div className="skills-grid">
-                {adminAllSkills.length === 0 ? <div className="empty">No dynamic skills found.</div> : null}
+                {adminAllSkills.length === 0 ? <div className="empty">{t("noDynamicSkillsFound")}</div> : null}
                 {adminAllSkills.map((item) => {
                   const isChecked = adminAssignedSkills.includes(item.tool_name);
                   return (
@@ -1758,8 +1786,8 @@ function App() {
               </div>
             </div>
             <div className="top-actions">
-              <button className="ghost" type="button" onClick={() => setAdminSkillsOpen(false)}>Close</button>
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>Reload</button>
+              <button className="ghost" type="button" onClick={() => setAdminSkillsOpen(false)}>{t("close")}</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void openAdminSkillsManager()}>{t("refresh")}</button>
             </div>
           </div>
         </div>
@@ -1768,22 +1796,22 @@ function App() {
       {profileOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setProfileOpen(false)}>
           <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Edit profile" onClick={(event) => event.stopPropagation()}>
-            <h2>Edit Profile</h2>
+            <h2>{t("editProfile")}</h2>
             <div className="context-grid profile-grid">
-              <label>Email<input value={profileForm.email} disabled /></label>
-              <label>Full Name<input value={profileForm.full_name} onChange={(e) => setProfileForm((p) => ({ ...p, full_name: e.target.value }))} /></label>
-              <label>Title<input value={profileForm.title} onChange={(e) => setProfileForm((p) => ({ ...p, title: e.target.value }))} /></label>
-              <label className="profile-bio-field">Bio<textarea rows={4} value={profileForm.profile_bio} onChange={(e) => setProfileForm((p) => ({ ...p, profile_bio: e.target.value }))} /></label>
+              <label>{t("email")}<input value={profileForm.email} disabled /></label>
+              <label>{t("fullName")}<input value={profileForm.full_name} onChange={(e) => setProfileForm((p) => ({ ...p, full_name: e.target.value }))} /></label>
+              <label>{t("title")}<input value={profileForm.title} onChange={(e) => setProfileForm((p) => ({ ...p, title: e.target.value }))} /></label>
+              <label className="profile-bio-field">{t("bio")}<textarea rows={4} value={profileForm.profile_bio} onChange={(e) => setProfileForm((p) => ({ ...p, profile_bio: e.target.value }))} /></label>
             </div>
             <div className="context-grid profile-grid">
-              <label>Current Password<input type="password" value={passwordForm.current_password} onChange={(e) => setPasswordForm((p) => ({ ...p, current_password: e.target.value }))} /></label>
-              <label>New Password<input type="password" value={passwordForm.new_password} onChange={(e) => setPasswordForm((p) => ({ ...p, new_password: e.target.value }))} /></label>
-              <label>Confirm New Password<input type="password" value={passwordForm.confirm_password} onChange={(e) => setPasswordForm((p) => ({ ...p, confirm_password: e.target.value }))} /></label>
+              <label>{t("currentPassword")}<input type="password" value={passwordForm.current_password} onChange={(e) => setPasswordForm((p) => ({ ...p, current_password: e.target.value }))} /></label>
+              <label>{t("newPassword")}<input type="password" value={passwordForm.new_password} onChange={(e) => setPasswordForm((p) => ({ ...p, new_password: e.target.value }))} /></label>
+              <label>{t("confirmNewPassword")}<input type="password" value={passwordForm.confirm_password} onChange={(e) => setPasswordForm((p) => ({ ...p, confirm_password: e.target.value }))} /></label>
             </div>
             <div className="top-actions">
-              <button className="ghost" type="button" onClick={() => setProfileOpen(false)}>Cancel</button>
-              <button className="secondary" type="button" disabled={isBusy} onClick={() => void changePassword()}>Change Password</button>
-              <button className="primary" type="button" disabled={isBusy} onClick={() => void saveProfile()}>Save</button>
+              <button className="ghost" type="button" onClick={() => setProfileOpen(false)}>{t("cancel")}</button>
+              <button className="secondary" type="button" disabled={isBusy} onClick={() => void changePassword()}>{t("changePassword")}</button>
+              <button className="primary" type="button" disabled={isBusy} onClick={() => void saveProfile()}>{t("save")}</button>
             </div>
           </div>
         </div>
