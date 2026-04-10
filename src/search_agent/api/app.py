@@ -541,6 +541,66 @@ class ApiService:
                 raise HTTPException(status_code=401, detail="Token expired")
         return dict(row)
 
+    def _resolve_group_chat_title_for_session(self, *, user_id: int, chat_id: str, org_id: str) -> str:
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        fallback = f"[group:{org_id}] Group Chat"
+        if not hasattr(self, "engine"):
+            return fallback
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT title
+                    FROM user_chat_sessions
+                    WHERE scope_user_id = :scope_user_id
+                      AND chat_id = :chat_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "scope_user_id": int(user_id),
+                    "chat_id": scope_chat_id,
+                },
+            ).mappings().first()
+        raw_title = str((row or {}).get("title") or "").strip()
+        if not raw_title:
+            return fallback
+        parsed_org_id, parsed_title = self._parse_group_marker(raw_title)
+        resolved_org_id = parsed_org_id or str(org_id).strip()
+        resolved_title = parsed_title or "Group Chat"
+        return f"[group:{resolved_org_id}] {resolved_title}"[:160]
+
+    def _ensure_shared_group_chat_session_rows(self, *, user_ids: Sequence[int], chat_id: str, title: str) -> None:
+        if not hasattr(self, "engine"):
+            return
+        scope_chat_id = _normalize_scope_chat_id(chat_id)
+        now = datetime.now(UTC)
+        with self.engine.begin() as conn:
+            for raw_user_id in user_ids:
+                user_id = int(raw_user_id)
+                if user_id <= 0:
+                    continue
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO user_chat_sessions (scope_user_id, chat_id, title, created_at, updated_at, last_message_preview)
+                        VALUES (:scope_user_id, :chat_id, :title, :created_at, :updated_at, :last_message_preview)
+                        ON CONFLICT (scope_user_id, chat_id) DO UPDATE
+                        SET title = EXCLUDED.title,
+                            updated_at = EXCLUDED.updated_at,
+                            deleted_at = NULL
+                        """
+                    ),
+                    {
+                        "scope_user_id": int(user_id),
+                        "chat_id": scope_chat_id,
+                        "title": str(title or "").strip()[:160] or "Group Chat",
+                        "created_at": now,
+                        "updated_at": now,
+                        "last_message_preview": "",
+                    },
+                )
+
 
 class RealtimeChatHub:
     def __init__(self, settings: Settings) -> None:
@@ -2719,6 +2779,19 @@ class RealtimeChatHub:
             group_member_ids = self._resolve_group_org_members(org_id=str(group_org_id))
             if int(user_id) not in group_member_ids:
                 raise HTTPException(status_code=403, detail="User is not a member of this group chat")
+            try:
+                resolved_group_title = self._resolve_group_chat_title_for_session(
+                    user_id=int(user_id),
+                    chat_id=scope_chat_id,
+                    org_id=str(group_org_id),
+                )
+                self._ensure_shared_group_chat_session_rows(
+                    user_ids=group_member_ids,
+                    chat_id=scope_chat_id,
+                    title=resolved_group_title,
+                )
+            except Exception:
+                pass
 
         role = self.rbac.get_role(org_id=org_id, user_id=user_id, fallback_role="member")
         if self.settings.enable_dynamic_tools:
