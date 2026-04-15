@@ -15,6 +15,8 @@ const PERSONAL_CHAT_MARKER = "[personal]";
 const GROUP_CHAT_MARKER = "[group]";
 const GROUP_FILTER_ALL = "__all__";
 const GROUP_FILTER_PERSONAL = "__personal__";
+const USER_SCOPE_ORG_ID = "user";
+const RESET_PASSWORD_TTL_OPTIONS = [15, 30, 60];
 const DEFAULT_ADMIN_CREATE_USER_FORM = {
   email: "",
   password: "",
@@ -247,6 +249,11 @@ function App() {
   const [adminOrgTargetUserId, setAdminOrgTargetUserId] = useState(0);
   const [adminOrgTargetOrgId, setAdminOrgTargetOrgId] = useState("");
   const [adminOrgTargetRole, setAdminOrgTargetRole] = useState("member");
+  const [adminResetPasswordModalOpen, setAdminResetPasswordModalOpen] = useState(false);
+  const [adminResetTargetUser, setAdminResetTargetUser] = useState(null);
+  const [adminResetTtlMinutes, setAdminResetTtlMinutes] = useState(60);
+  const [adminResetResult, setAdminResetResult] = useState(null);
+  const [adminPasswordResetLog, setAdminPasswordResetLog] = useState([]);
   const [groupChatOrgId, setGroupChatOrgId] = useState(GROUP_FILTER_ALL);
   const [forcePasswordChange, setForcePasswordChange] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -312,6 +319,11 @@ function App() {
     setAdminOrgTargetUserId(0);
     setAdminOrgTargetOrgId("");
     setAdminOrgTargetRole("member");
+    setAdminResetPasswordModalOpen(false);
+    setAdminResetTargetUser(null);
+    setAdminResetTtlMinutes(60);
+    setAdminResetResult(null);
+    setAdminPasswordResetLog([]);
     setGroupChatOrgId(GROUP_FILTER_ALL);
     setForcePasswordChange(false);
     setWsStatus("offline");
@@ -656,6 +668,79 @@ function App() {
       setStatus(`Failed to delete user: ${error.message}`);
     } finally {
       setIsBusy(false);
+    }
+  }
+
+  function resetUserPasswordByAdmin(targetUser) {
+    if (!isAdmin) {
+      return;
+    }
+    const normalizedUserId = Number(targetUser?.user_id || 0);
+    if (!normalizedUserId) {
+      return;
+    }
+    setAdminResetTargetUser({
+      user_id: normalizedUserId,
+      full_name: String(targetUser?.full_name || "").trim(),
+      email: String(targetUser?.email || "").trim(),
+    });
+    setAdminResetTtlMinutes(60);
+    setAdminResetResult(null);
+    setAdminResetPasswordModalOpen(true);
+  }
+
+  async function submitUserPasswordResetByAdmin() {
+    if (!isAdmin || !adminResetTargetUser?.user_id) {
+      return;
+    }
+    const normalizedUserId = Number(adminResetTargetUser.user_id || 0);
+    const ttlMinutes = Number(adminResetTtlMinutes || 60);
+    if (!RESET_PASSWORD_TTL_OPTIONS.includes(ttlMinutes)) {
+      setStatus("Invalid TTL selected for password reset.");
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const payload = await request(`/admin/users/${normalizedUserId}/otp`, {
+        method: "POST",
+        body: JSON.stringify({ org_id: USER_SCOPE_ORG_ID, ttl_minutes: ttlMinutes }),
+        timeoutMs: 15000,
+      });
+      const oneTimePassword = String(payload?.one_time_password || "").trim();
+      const expiresAt = String(payload?.expires_at || "").trim();
+      const createdAt = new Date().toISOString();
+      const fallbackUserLabel = adminResetTargetUser.email || ("#" + String(normalizedUserId));
+      const userNameLabel = adminResetTargetUser.full_name || "User";
+      const resetEvent = {
+        id: createdAt + "-" + String(normalizedUserId),
+        user_id: normalizedUserId,
+        user_label: userNameLabel + " (" + fallbackUserLabel + ")",
+        ttl_minutes: ttlMinutes,
+        one_time_password: oneTimePassword,
+        expires_at: expiresAt,
+        created_at: createdAt,
+      };
+      setAdminResetResult(resetEvent);
+      setAdminPasswordResetLog((prev) => [resetEvent, ...prev].slice(0, 30));
+      setStatus(oneTimePassword ? "Temporary password generated." : "Password reset completed.");
+    } catch (error) {
+      setStatus(`Failed to reset user password: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function copyResetPasswordToClipboard() {
+    const value = String(adminResetResult?.one_time_password || "").trim();
+    if (!value) {
+      return;
+    }
+    try {
+      await globalThis.navigator.clipboard.writeText(value);
+      setStatus("Temporary password copied to clipboard.");
+    } catch (error) {
+      setStatus(`Failed to copy password: ${error.message}`);
     }
   }
 
@@ -1841,6 +1926,14 @@ function App() {
                     <span className="admin-org-list">{item.organization_ids?.length ? item.organization_ids.join(", ") : t("none")}</span>
                     <span>
                       <button
+                        className="secondary"
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => resetUserPasswordByAdmin(item)}
+                      >
+                        {t("resetPassword")}
+                      </button>
+                      <button
                         className="ghost"
                         type="button"
                         disabled={isBusy}
@@ -1853,8 +1946,66 @@ function App() {
                 ))}
               </div>
             </div>
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>{t("passwordResetLog")}</span>
+                <span>{t("total")}: {adminPasswordResetLog.length}</span>
+              </div>
+              <div className="list-table">
+                {adminPasswordResetLog.length === 0 ? <div className="empty">{t("noPasswordResetEvents")}</div> : null}
+                {adminPasswordResetLog.length > 0 ? (
+                  <div className="list-row list-header admin-reset-log-row">
+                    <span>{t("user")}</span>
+                    <span>{t("ttlMinutes")}</span>
+                    <span>{t("issuedAt")}</span>
+                  </div>
+                ) : null}
+                {adminPasswordResetLog.map((item) => (
+                  <div key={item.id} className="list-row admin-reset-log-row">
+                    <span>{item.user_label}</span>
+                    <span>{item.ttl_minutes}</span>
+                    <span>{new Date(item.created_at).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
             <div className="top-actions">
               <button className="ghost" type="button" onClick={() => setAdminUsersOpen(false)}>{t("close")}</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isAdmin && adminResetPasswordModalOpen ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setAdminResetPasswordModalOpen(false)}>
+          <div className="modal-card card" role="dialog" aria-modal="true" aria-label="Admin password reset" onClick={(event) => event.stopPropagation()}>
+            <h2>{t("resetPasswordModalTitle")}</h2>
+            <div className="skills-panel">
+              <div className="skills-summary">
+                <span>{t("user")}: {adminResetTargetUser?.full_name || "-"} ({adminResetTargetUser?.email || "-"})</span>
+              </div>
+              <label>
+                {t("ttlMinutes")}
+                <select value={adminResetTtlMinutes} onChange={(event) => setAdminResetTtlMinutes(Number(event.target.value || 60))}>
+                  {RESET_PASSWORD_TTL_OPTIONS.map((ttl) => (
+                    <option key={ttl} value={ttl}>{ttl}</option>
+                  ))}
+                </select>
+              </label>
+              {adminResetResult ? (
+                <div className="admin-reset-result">
+                  <label>
+                    {t("temporaryPassword")}
+                    <input type="text" readOnly value={adminResetResult.one_time_password || ""} />
+                  </label>
+                  <div className="admin-reset-meta">{t("expiresAt")}: {adminResetResult.expires_at || "n/a"}</div>
+                  <button className="secondary" type="button" onClick={() => void copyResetPasswordToClipboard()}>{t("copyPassword")}</button>
+                </div>
+              ) : null}
+            </div>
+            <div className="top-actions">
+              <button className="ghost" type="button" onClick={() => setAdminResetPasswordModalOpen(false)}>{t("close")}</button>
+              <button className="primary" type="button" disabled={isBusy || !adminResetTargetUser?.user_id} onClick={() => void submitUserPasswordResetByAdmin()}>{t("generateTemporaryPassword")}</button>
             </div>
           </div>
         </div>

@@ -1664,10 +1664,11 @@ class RealtimeChatHub:
         self._enforce_admin(actor_user_id)
         normalized_team_id = (team_id or "").strip()
         supports_otp = self._supports_auth_otp_fields()
+        supports_team_members = self._table_exists("team_members")
         team_join = (
             "LEFT JOIN team_members tm ON tm.org_id = om.org_id AND tm.team_id = :team_id AND tm.user_id = om.user_id"
-            if normalized_team_id
-            else "LEFT JOIN team_members tm ON 1 = 0"
+            if normalized_team_id and supports_team_members
+            else "LEFT JOIN auth_users tm ON 1 = 0"
         )
         force_password_select = "COALESCE(u.force_password_change, FALSE) AS force_password_change" if supports_otp else "FALSE AS force_password_change"
         with self.engine.begin() as conn:
@@ -1912,20 +1913,22 @@ class RealtimeChatHub:
         normalized_org = org_id.strip()
         if not normalized_org:
             raise HTTPException(status_code=400, detail="Organization ID is required")
+        supports_team_members = self._table_exists("team_members")
 
         with self.engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    DELETE FROM team_members
-                    WHERE org_id = :org_id AND user_id = :user_id
-                    """
-                ),
-                {
-                    "org_id": normalized_org,
-                    "user_id": int(target_user_id),
-                },
-            )
+            if supports_team_members:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM team_members
+                        WHERE org_id = :org_id AND user_id = :user_id
+                        """
+                    ),
+                    {
+                        "org_id": normalized_org,
+                        "user_id": int(target_user_id),
+                    },
+                )
             conn.execute(
                 text(
                     """
@@ -2198,6 +2201,8 @@ class RealtimeChatHub:
         return BulkClaudeDryRunResponse(total=len(files), valid=valid, invalid=invalid, results=results)
 
     def _assert_membership(self, *, org_id: str, team_id: str, user_id: int) -> None:
+        if not self._table_exists("team_members"):
+            raise HTTPException(status_code=400, detail="Team membership table is not available in this database schema")
         with self.engine.begin() as conn:
             member = conn.execute(
                 text(

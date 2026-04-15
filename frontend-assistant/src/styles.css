@@ -1106,6 +1106,29 @@ body[data-theme="dark"] .admin-org-list {
   color: #b8cee6;
 }
 
+.admin-reset-result {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+body[data-theme="dark"] .admin-reset-result {
+  background: rgba(18, 34, 54, 0.9);
+  border-color: rgba(84, 118, 154, 0.72);
+}
+
+.admin-reset-meta {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.admin-reset-log-row {
+  grid-template-columns: 1.3fr 0.6fr 1fr;
+}
+
 body[data-theme="dark"] select option {
   background: #14263c;
   color: #e8f3ff;
