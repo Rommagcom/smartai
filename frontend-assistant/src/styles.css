@@ -198,6 +198,7 @@ label {
   gap: 6px;
   font-size: 0.92rem;
   color: var(--text-soft);
+  min-width: 0;
 }
 
 input,
@@ -215,6 +216,16 @@ select {
   padding: 11px 12px;
   background: rgba(255, 255, 255, 0.85);
   color: var(--text-strong);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+select {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: 30px;
 }
 
 body[data-theme="dark"] input,
@@ -928,6 +939,10 @@ body[data-theme="dark"] .composer {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.context-grid > * {
+  min-width: 0;
 }
 
 .workspace-tabs {
