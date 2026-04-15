@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Annotated, Any, TypedDict
+from typing import Any
 
-from langgraph.graph import END, StateGraph
 from langsmith import traceable
-from ollama import Client
 
+from search_agent.agent.ollama_tools import web_fetch, web_search
 from search_agent.agent.prompts import SYSTEM_PROMPT
-from search_agent.agent.ollama_tools import web_search, web_fetch
 from search_agent.config import Settings
 from search_agent.dynamic_skills.registry import DynamicToolRegistry
 
 
 _MAX_INPUT_CHARS = 8000
-_MAX_TOOL_CONTENT_CHARS_FOR_MODEL = 12000
 _PROMPT_INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(all\s+)?(previous|prior)\s+instructions", re.IGNORECASE),
     re.compile(r"(system|developer)\s+prompt", re.IGNORECASE),
@@ -27,45 +23,12 @@ _PROMPT_INJECTION_PATTERNS = [
 ]
 
 
-logger = logging.getLogger(__name__)
-
-
-class AgentState(TypedDict):
-    messages: Annotated[list[dict[str, Any]], list.__add__]
-    step_count: int
-    token_usage: dict[str, int]
-    chat_id: int | None
-    org_id: str
-    team_id: str
-    user_id: int
-    role: str
-    allowed_dynamic_tools: list[str]
-
-
 @dataclass(slots=True)
 class TokenUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     request_count: int = 0
-
-    def to_dict(self) -> dict[str, int]:
-        return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "request_count": self.request_count,
-        }
-
-    @staticmethod
-    def from_dict(value: dict[str, int] | None) -> "TokenUsage":
-        value = value or {}
-        return TokenUsage(
-            prompt_tokens=int(value.get("prompt_tokens", 0)),
-            completion_tokens=int(value.get("completion_tokens", 0)),
-            total_tokens=int(value.get("total_tokens", 0)),
-            request_count=int(value.get("request_count", 0)),
-        )
 
 
 @dataclass(slots=True)
@@ -76,25 +39,24 @@ class AgentRunResult:
     token_usage: TokenUsage
 
 
+@dataclass(slots=True)
+class _RunContext:
+    chat_id: int | None
+    org_id: str
+    user_id: int
+    allowed_dynamic_tools: set[str]
+    reminder_create_requested: bool = False
+
+
 class OllamaLangGraphAgent:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.registry = DynamicToolRegistry(settings.dynamic_skills_dir)
-        
-        # Initialize Ollama client with API key authentication
-        api_key = os.getenv("OLLAMA_API_KEY", "").strip()
-        headers = {
-            "Authorization": f"Bearer {api_key}"
-        } if api_key else {}
-        
-        ollama_url = settings.ollama_base_url or "http://localhost:11434"
-        self.client = Client(host=ollama_url, headers=headers)
-        self._graph = self._build_graph()
 
     def refresh_dynamic_tools(self) -> None:
         self.registry.refresh()
 
-    @traceable(name="ollama_langgraph_agent_run")
+    @traceable(name="deepagents_agent_run")
     def run(
         self,
         user_message: str,
@@ -106,38 +68,69 @@ class OllamaLangGraphAgent:
         role: str = "member",
         allowed_dynamic_tools: set[str] | None = None,
     ) -> AgentRunResult:
+        del team_id, role
+
         if self.settings.enable_dynamic_tools:
             self.refresh_dynamic_tools()
         self._configure_langsmith_env()
 
-        initial_messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-        ]
-        if history_messages:
-            initial_messages.extend(history_messages)
-        initial_messages.append({"role": "user", "content": user_message})
+        guardrail_text = self._guardrail_message(user_message)
+        if guardrail_text:
+            return AgentRunResult(
+                answer=guardrail_text,
+                thinking=None,
+                messages=[{"role": "assistant", "content": guardrail_text}],
+                token_usage=TokenUsage(),
+            )
 
-        result_state = self._graph.invoke(
-            {
-                "messages": initial_messages,
-                "step_count": 0,
-                "token_usage": TokenUsage().to_dict(),
-                "chat_id": chat_id,
-                "org_id": org_id,
-                "team_id": team_id,
-                "user_id": int(user_id),
-                "role": role,
-                "allowed_dynamic_tools": sorted(allowed_dynamic_tools or set()),
-            }
+        run_ctx = _RunContext(
+            chat_id=chat_id,
+            org_id=org_id,
+            user_id=int(user_id),
+            allowed_dynamic_tools=set(allowed_dynamic_tools or set()),
         )
-        messages = result_state["messages"]
-        last_assistant = self._last_assistant_message(messages)
-        usage = TokenUsage.from_dict(result_state.get("token_usage"))
+
+        # Import lazily so module import and unit test collection do not require
+        # full runtime LLM dependencies unless run() is actually executed.
+        from deepagents import create_deep_agent
+        from langchain_ollama import ChatOllama
+
+        model = ChatOllama(
+            model=self.settings.ollama_model,
+            base_url=self.settings.ollama_base_url or "http://localhost:11434",
+            temperature=0,
+        )
+        agent = create_deep_agent(
+            model=model,
+            tools=self._build_tools(run_ctx),
+            system_prompt=SYSTEM_PROMPT,
+        )
+
+        input_messages = self._build_input_messages(history_messages or [], user_message)
+        try:
+            raw_result = agent.invoke({"messages": input_messages})
+        except Exception as exc:
+            message = (
+                "Model provider is temporarily unavailable (HTTP 500). "
+                "Please retry in 10-30 seconds. "
+                f"Details: {exc}"
+            )
+            return AgentRunResult(
+                answer=message,
+                thinking=None,
+                messages=[{"role": "assistant", "content": message}],
+                token_usage=TokenUsage(),
+            )
+
+        raw_messages = self._extract_raw_messages(raw_result)
+        normalized_messages = self._normalize_messages(raw_messages)
+        last_assistant = self._last_assistant_message(normalized_messages)
+        usage = self._extract_token_usage(raw_messages)
 
         return AgentRunResult(
             answer=str(last_assistant.get("content") or ""),
             thinking=last_assistant.get("thinking"),
-            messages=messages,
+            messages=normalized_messages,
             token_usage=usage,
         )
 
@@ -147,190 +140,119 @@ class OllamaLangGraphAgent:
         os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
         os.environ.setdefault("LANGSMITH_PROJECT", self.settings.langsmith_project)
 
-    def _build_graph(self):
-        graph = StateGraph(AgentState)
-        graph.add_node("guardrail", self._guardrail_node)
-        graph.add_node("agent", self._agent_node)
-        graph.add_node("tools", self._tools_node)
-        graph.set_entry_point("guardrail")
-        graph.add_conditional_edges("guardrail", self._route_after_guardrail, {"agent": "agent", "end": END})
-        graph.add_conditional_edges("agent", self._route_after_agent, {"tools": "tools", "end": END})
-        graph.add_edge("tools", "agent")
-        return graph.compile()
-
-    def _guardrail_node(self, state: AgentState) -> dict[str, Any]:
-        messages = state.get("messages") or []
-        user_message = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                user_message = str(msg.get("content") or "")
-                break
-
-        if len(user_message) > _MAX_INPUT_CHARS:
-            return {
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": "Запрос слишком длинный. Пожалуйста, сократите текст и попробуйте снова.",
-                    }
-                ]
-            }
+    @staticmethod
+    def _guardrail_message(user_message: str) -> str:
+        text = str(user_message or "")
+        if len(text) > _MAX_INPUT_CHARS:
+            return "Запрос слишком длинный. Пожалуйста, сократите текст и попробуйте снова."
 
         for pattern in _PROMPT_INJECTION_PATTERNS:
-            if pattern.search(user_message):
-                return {
-                    "messages": [
-                        {
-                            "role": "assistant",
-                            "content": "Запрос отклонен системой безопасности. Переформулируйте его без попыток обхода инструкций.",
-                        }
-                    ]
-                }
+            if pattern.search(text):
+                return "Запрос отклонен системой безопасности. Переформулируйте его без попыток обхода инструкций."
+        return ""
 
-        return {"messages": []}
+    def _build_tools(self, run_ctx: _RunContext) -> list[Any]:
+        from langchain_core.tools import tool
 
-    def _route_after_guardrail(self, state: AgentState) -> str:
-        last_message = state["messages"][-1]
-        if last_message.get("role") == "assistant":
-            return "end"
-        return "agent"
+        @tool("web_search")
+        def web_search_tool(query: str) -> str:
+            """Search the web for the given query."""
+            return str(web_search(query))
 
-    def _agent_node(self, state: AgentState) -> dict[str, Any]:
-        allowed_dynamic_tools = set(state.get("allowed_dynamic_tools") or [])
-        dynamic_schemas = (
-            self.registry.get_ollama_tool_schemas(allowed_names=allowed_dynamic_tools)
-            if self.settings.enable_dynamic_tools
-            else []
-        )
-        response = None
-        attempts = [
-            {
-                "tools": [web_search, web_fetch, *dynamic_schemas],
-                "think": self.settings.ollama_think,
-                "label": "primary",
-            },
-            {
-                "tools": [web_search, web_fetch, *dynamic_schemas],
-                "think": False,
-                "label": "retry_no_think",
-            },
-            {
-                "tools": [],
-                "think": False,
-                "label": "retry_minimal",
-            },
-        ]
+        @tool("web_fetch")
+        def web_fetch_tool(url: str) -> str:
+            """Fetch webpage content for a URL."""
+            return str(web_fetch(url))
 
-        last_error: Exception | None = None
-        for attempt in attempts:
-            try:
-                response = self.client.chat(
-                    model=self.settings.ollama_model,
-                    messages=state["messages"],
-                    tools=attempt["tools"],
-                    think=bool(attempt["think"]),
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.warning("Ollama chat attempt failed (%s): %s", attempt["label"], exc)
+        @tool("list_dynamic_skills")
+        def list_dynamic_skills_tool() -> str:
+            """List dynamic skills currently available for this user session."""
+            if not self.settings.enable_dynamic_tools:
+                return json.dumps({"count": 0, "skills": []}, ensure_ascii=True)
 
-        if response is None:
-            details = str(last_error) if last_error is not None else "unknown error"
-            message = (
-                "Model provider is temporarily unavailable (HTTP 500). "
-                "Please retry in 10-30 seconds. "
-                f"Details: {details}"
-            )
-            return {
-                "messages": [
+            visible = self._visible_dynamic_tools(run_ctx)
+            payload = {
+                "count": len(visible),
+                "skills": [
                     {
-                        "role": "assistant",
-                        "content": message,
+                        "name": name,
+                        "description": tool_item.description,
                     }
-                ]
+                    for name, tool_item in visible
+                ],
             }
+            return json.dumps(payload, ensure_ascii=True)
 
-        assistant_message = self._normalize_assistant_message(response.message)
-        usage = self._extract_token_usage(response)
-        accumulated = TokenUsage.from_dict(state.get("token_usage"))
-        accumulated.prompt_tokens += usage.prompt_tokens
-        accumulated.completion_tokens += usage.completion_tokens
-        accumulated.total_tokens += usage.total_tokens
-        accumulated.request_count += 1
+        @tool("run_dynamic_skill")
+        def run_dynamic_skill_tool(tool_name: str, arguments_json: str = "{}") -> str:
+            """Run one dynamic skill by name with JSON object arguments."""
+            normalized_name = str(tool_name or "").strip()
+            if not normalized_name:
+                raise ValueError("tool_name is required")
 
-        return {
-            "messages": [assistant_message],
-            "token_usage": accumulated.to_dict(),
-        }
+            callables = dict(self._visible_dynamic_tools(run_ctx, callable_map=True))
+            tool_fn = callables.get(normalized_name)
+            if tool_fn is None:
+                allowed = sorted(callables.keys())
+                raise ValueError(f"Unknown or forbidden tool: {normalized_name}. Allowed: {', '.join(allowed)}")
 
-    def _tools_node(self, state: AgentState) -> dict[str, Any]:
-        tool_messages: list[dict[str, Any]] = []
-        allowed_dynamic_tools = set(state.get("allowed_dynamic_tools") or [])
-        dynamic_callables = (
-            self.registry.get_callable_map(allowed_names=allowed_dynamic_tools)
-            if self.settings.enable_dynamic_tools
-            else {}
-        )
-        callables = {
-            "web_search": web_search,
-            "web_fetch": web_fetch,
-            **dynamic_callables,
-        }
+            args = self._parse_arguments_json(arguments_json)
+            args = self._inject_reminder_context(tool_name=normalized_name, arguments=args, run_ctx=run_ctx)
 
-        last_message = state["messages"][-1]
-        tool_calls = last_message.get("tool_calls") or []
-        reminder_create_requested = self._has_reminder_create_call(tool_calls)
-
-        for tool_call in tool_calls:
-            function = tool_call.get("function") or {}
-            tool_name = function.get("name", "unknown_tool")
-            arguments = self._resolve_tool_arguments(
-                tool_name=tool_name,
-                raw_arguments=function.get("arguments"),
-                state=state,
-            )
-            if reminder_create_requested and not self._is_reminder_create_execution(tool_name, arguments):
-                content = (
+            # Preserve deferred reminder policy: after reminder create, skip non-create tool execution.
+            if run_ctx.reminder_create_requested and not self._is_reminder_create_execution(normalized_name, args):
+                return (
                     "Skipped deferred-policy execution: reminder creation requests must only schedule work. "
                     "Generate no immediate report/file; the reminder worker will invoke LLM at trigger time."
                 )
-            else:
-                content = self._execute_tool_call(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    callables=callables,
-                )
 
-            file_payload = self._extract_file_payload_for_transport(content)
-            content = self._sanitize_tool_content_for_model(content)
-            model_limit = min(self.settings.max_tool_result_chars, _MAX_TOOL_CONTENT_CHARS_FOR_MODEL)
-            content = content[:model_limit]
-            tool_message = {
-                "role": "tool",
-                "tool_name": tool_name,
-                "content": content,
-            }
-            if file_payload is not None:
-                tool_message["file_payload"] = file_payload
-            tool_messages.append(tool_message)
+            result = tool_fn(**args)
+            if self._is_reminder_create_execution(normalized_name, args):
+                run_ctx.reminder_create_requested = True
+            return str(result)
 
-        return {
-            "messages": tool_messages,
-            "step_count": state["step_count"] + 1,
-        }
+        return [web_search_tool, web_fetch_tool, list_dynamic_skills_tool, run_dynamic_skill_tool]
+
+    def _visible_dynamic_tools(self, run_ctx: _RunContext, callable_map: bool = False) -> list[tuple[str, Any]]:
+        if not self.settings.enable_dynamic_tools:
+            return []
+
+        if not self.registry.tools:
+            self.refresh_dynamic_tools()
+
+        if run_ctx.allowed_dynamic_tools:
+            names = sorted(name for name in self.registry.tools if name in run_ctx.allowed_dynamic_tools)
+        else:
+            names = sorted(self.registry.tools.keys())
+
+        if callable_map:
+            callables = self.registry.get_callable_map(allowed_names=set(names))
+            return [(name, callables[name]) for name in names if name in callables]
+
+        return [(name, self.registry.tools[name]) for name in names]
 
     @staticmethod
-    def _has_reminder_create_call(tool_calls: list[dict[str, Any]]) -> bool:
-        for tool_call in tool_calls:
-            function = tool_call.get("function") or {}
-            tool_name = str(function.get("name") or "")
-            if tool_name != "reminder_scheduler":
-                continue
-            arguments = OllamaLangGraphAgent._normalize_arguments(function.get("arguments"))
-            if OllamaLangGraphAgent._extract_reminder_action(arguments) == "create":
-                return True
-        return False
+    def _parse_arguments_json(arguments_json: str) -> dict[str, Any]:
+        raw = str(arguments_json or "{}").strip() or "{}"
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"arguments_json must be valid JSON object: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("arguments_json must decode to JSON object")
+        return parsed
+
+    @staticmethod
+    def _inject_reminder_context(*, tool_name: str, arguments: dict[str, Any], run_ctx: _RunContext) -> dict[str, Any]:
+        if tool_name != "reminder_scheduler":
+            return arguments
+
+        updated = dict(arguments)
+        updated.setdefault("org_id", run_ctx.org_id or "default-org")
+        updated.setdefault("user_id", int(run_ctx.user_id))
+        if run_ctx.chat_id is not None:
+            updated.setdefault("chat_id", int(run_ctx.chat_id))
+        return updated
 
     @staticmethod
     def _extract_reminder_action(arguments: dict[str, Any]) -> str:
@@ -343,7 +265,6 @@ class OllamaLangGraphAgent:
             nested_action = nested.get("action")
             if isinstance(nested_action, str) and nested_action.strip():
                 return nested_action.strip().lower()
-
         return ""
 
     @staticmethod
@@ -352,149 +273,181 @@ class OllamaLangGraphAgent:
             return False
         return OllamaLangGraphAgent._extract_reminder_action(arguments) == "create"
 
+    def _tools_node(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible tool executor used by existing reminder policy tests."""
+        tool_messages: list[dict[str, Any]] = []
+        allowed_dynamic_tools = set(state.get("allowed_dynamic_tools") or [])
+        dynamic_callables = (
+            self.registry.get_callable_map(allowed_names=allowed_dynamic_tools)
+            if getattr(self.settings, "enable_dynamic_tools", False)
+            else {}
+        )
+        callables = {
+            "web_search": web_search,
+            "web_fetch": web_fetch,
+            **dynamic_callables,
+        }
+
+        messages = state.get("messages") or []
+        last_message = messages[-1] if messages else {}
+        tool_calls = last_message.get("tool_calls") or []
+        reminder_create_requested = any(
+            self._is_reminder_create_execution(
+                str((tool_call.get("function") or {}).get("name") or ""),
+                self._normalize_arguments((tool_call.get("function") or {}).get("arguments")),
+            )
+            for tool_call in tool_calls
+        )
+
+        for tool_call in tool_calls:
+            function = tool_call.get("function") or {}
+            tool_name = str(function.get("name") or "unknown_tool")
+            arguments = self._normalize_arguments(function.get("arguments"))
+
+            if tool_name == "reminder_scheduler":
+                chat_id = state.get("chat_id")
+                org_id = str(state.get("org_id") or "default-org")
+                user_id = state.get("user_id")
+                if chat_id is not None:
+                    arguments.setdefault("chat_id", int(chat_id))
+                arguments.setdefault("org_id", org_id)
+                if isinstance(user_id, int):
+                    arguments.setdefault("user_id", user_id)
+
+            if reminder_create_requested and not self._is_reminder_create_execution(tool_name, arguments):
+                content = (
+                    "Skipped deferred-policy execution: reminder creation requests must only schedule work. "
+                    "Generate no immediate report/file; the reminder worker will invoke LLM at trigger time."
+                )
+            else:
+                content = self._execute_tool_call(tool_name=tool_name, arguments=arguments, callables=callables)
+
+            tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": str(content),
+                }
+            )
+
+        return {
+            "messages": tool_messages,
+            "step_count": int(state.get("step_count") or 0) + 1,
+        }
+
     @staticmethod
-    def _resolve_tool_arguments(
-        *,
-        tool_name: str,
-        raw_arguments: Any,
-        state: AgentState,
-    ) -> dict[str, Any]:
-        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-
-        if tool_name == "reminder_scheduler" and "chat_id" not in arguments:
-            state_chat_id = state.get("chat_id")
-            if isinstance(state_chat_id, int):
-                arguments["chat_id"] = state_chat_id
-
-        if tool_name == "reminder_scheduler":
-            arguments.setdefault("org_id", str(state.get("org_id") or "default-org"))
-            state_user_id = state.get("user_id")
-            if isinstance(state_user_id, int):
-                arguments.setdefault("user_id", state_user_id)
-
-        return arguments
-
-    @staticmethod
-    def _execute_tool_call(
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        callables: dict[str, Any],
-    ) -> str:
+    def _execute_tool_call(*, tool_name: str, arguments: dict[str, Any], callables: dict[str, Any]) -> str:
         tool_fn = callables.get(tool_name)
         if tool_fn is None:
             return f"Tool {tool_name} not found"
-
         try:
-            result = tool_fn(**arguments)
-            return str(result)
+            return str(tool_fn(**arguments))
         except Exception as exc:
             return f"Tool {tool_name} failed: {exc}"
 
     @staticmethod
-    def _sanitize_tool_content_for_model(content: str) -> str:
-        text = str(content or "")
-        if not text:
-            return ""
+    def _build_input_messages(history_messages: list[dict[str, Any]], user_message: str) -> list[dict[str, str]]:
+        output: list[dict[str, str]] = []
+        for item in history_messages:
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"system", "user", "assistant"}:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            output.append({"role": role, "content": content})
 
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return text
-
-        if not isinstance(parsed, dict):
-            return text
-
-        base64_data = parsed.get("base64")
-        if isinstance(base64_data, str) and base64_data:
-            parsed["base64"] = "<omitted>"
-            parsed["base64_omitted"] = True
-            parsed["base64_size_chars"] = len(base64_data)
-
-        return json.dumps(parsed, ensure_ascii=True)
+        output.append({"role": "user", "content": str(user_message or "")})
+        return output
 
     @staticmethod
-    def _extract_file_payload_for_transport(content: str) -> dict[str, Any] | None:
-        text = str(content or "")
-        if not text:
-            return None
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-
-        if not isinstance(parsed, dict):
-            return None
-
-        payload_type = str(parsed.get("type") or "").strip().lower()
-        if payload_type not in {"file", "image", "video"}:
-            return None
-
-        has_base64 = isinstance(parsed.get("base64"), str) and bool(parsed.get("base64"))
-        has_path = isinstance(parsed.get("path"), str) and bool(str(parsed.get("path")).strip())
-        if not has_base64 and not has_path:
-            return None
-
-        return parsed
-
-    def _route_after_agent(self, state: AgentState) -> str:
-        if state["step_count"] >= self.settings.agent_max_steps:
-            return "end"
-
-        last_message = state["messages"][-1]
-        if last_message.get("tool_calls"):
-            return "tools"
-        return "end"
+    def _extract_raw_messages(raw_result: Any) -> list[Any]:
+        if isinstance(raw_result, dict):
+            messages = raw_result.get("messages")
+            if isinstance(messages, list):
+                return messages
+        return []
 
     @staticmethod
-    def _last_assistant_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
+    def _normalize_messages(messages: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in messages:
+            msg = OllamaLangGraphAgent._normalize_message(item)
+            if msg is not None:
+                normalized.append(msg)
+        return normalized
+
+    @staticmethod
+    def _normalize_message(raw: Any) -> dict[str, Any] | None:
+        if isinstance(raw, dict):
+            role = str(raw.get("role") or "").strip().lower()
+            if role in {"system", "user", "assistant", "tool"}:
+                msg = {"role": role, "content": OllamaLangGraphAgent._normalize_content(raw.get("content"))}
+                tool_calls = raw.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    msg["tool_calls"] = OllamaLangGraphAgent._normalize_tool_calls(tool_calls)
+                if role == "tool" and raw.get("tool_name"):
+                    msg["tool_name"] = str(raw.get("tool_name"))
                 return msg
-        return {"role": "assistant", "content": ""}
+            return None
 
-    @staticmethod
-    def _normalize_assistant_message(raw_message: Any) -> dict[str, Any]:
-        role = getattr(raw_message, "role", "assistant")
-        content = getattr(raw_message, "content", "")
-        thinking = getattr(raw_message, "thinking", None)
-        raw_tool_calls = getattr(raw_message, "tool_calls", None) or []
-
-        tool_calls = [OllamaLangGraphAgent._normalize_tool_call(tc) for tc in raw_tool_calls]
-
-        message: dict[str, Any] = {
-            "role": role,
-            "content": content,
+        msg_type = str(getattr(raw, "type", "")).strip().lower()
+        role_map = {
+            "system": "system",
+            "human": "user",
+            "ai": "assistant",
+            "tool": "tool",
         }
-        if thinking:
-            message["thinking"] = thinking
-        if tool_calls:
-            message["tool_calls"] = tool_calls
+        role = role_map.get(msg_type)
+        if not role:
+            return None
+
+        content = OllamaLangGraphAgent._normalize_content(getattr(raw, "content", ""))
+        message: dict[str, Any] = {"role": role, "content": content}
+
+        if role == "assistant":
+            raw_tool_calls = getattr(raw, "tool_calls", None)
+            if isinstance(raw_tool_calls, list) and raw_tool_calls:
+                message["tool_calls"] = OllamaLangGraphAgent._normalize_tool_calls(raw_tool_calls)
+        thinking = getattr(raw, "reasoning", None) or getattr(raw, "thinking", None)
+        if role == "assistant" and isinstance(thinking, str) and thinking.strip():
+            message["thinking"] = thinking.strip()
+        if role == "tool":
+            tool_name = str(getattr(raw, "name", "") or "").strip()
+            if tool_name:
+                message["tool_name"] = tool_name
         return message
 
     @staticmethod
-    def _normalize_tool_call(raw_tool_call: Any) -> dict[str, Any]:
-        if isinstance(raw_tool_call, dict):
-            function = raw_tool_call.get("function") or {}
-            name = function.get("name") or "unknown_tool"
-            arguments = function.get("arguments") or {}
-            return {
-                "function": {
-                    "name": name,
-                    "arguments": OllamaLangGraphAgent._normalize_arguments(arguments),
-                }
-            }
+    def _normalize_content(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    value = str(part.get("text") or "")
+                    if value:
+                        chunks.append(value)
+            return "\n".join(chunks)
+        return str(content or "")
 
-        function = getattr(raw_tool_call, "function", None)
-        name = getattr(function, "name", "unknown_tool")
-        arguments = getattr(function, "arguments", {})
-        return {
-            "function": {
-                "name": name,
-                "arguments": OllamaLangGraphAgent._normalize_arguments(arguments),
-            }
-        }
+    @staticmethod
+    def _normalize_tool_calls(raw_tool_calls: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for call in raw_tool_calls:
+            if isinstance(call, dict):
+                name = str(call.get("name") or call.get("tool_name") or "").strip()
+                args = call.get("args", call.get("arguments", {}))
+            else:
+                name = str(getattr(call, "name", "") or getattr(call, "tool_name", "")).strip()
+                args = getattr(call, "args", getattr(call, "arguments", {}))
+
+            if not name:
+                continue
+            parsed_args = OllamaLangGraphAgent._normalize_arguments(args)
+            normalized.append({"function": {"name": name, "arguments": parsed_args}})
+        return normalized
 
     @staticmethod
     def _normalize_arguments(arguments: Any) -> dict[str, Any]:
@@ -509,14 +462,93 @@ class OllamaLangGraphAgent:
         return {}
 
     @staticmethod
-    def _extract_token_usage(response: Any) -> TokenUsage:
-        if isinstance(response, dict):
-            prompt = int(response.get("prompt_eval_count") or 0)
-            completion = int(response.get("eval_count") or 0)
-            total = int(response.get("total_tokens") or (prompt + completion))
-            return TokenUsage(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
+    def _last_assistant_message(messages: list[dict[str, Any]]) -> dict[str, Any]:
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                return msg
+        return {"role": "assistant", "content": ""}
 
-        prompt = int(getattr(response, "prompt_eval_count", 0) or 0)
-        completion = int(getattr(response, "eval_count", 0) or 0)
-        total = int(getattr(response, "total_tokens", 0) or (prompt + completion))
-        return TokenUsage(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
+    @staticmethod
+    def _extract_token_usage(raw_messages: list[Any]) -> TokenUsage:
+        usage = TokenUsage()
+        saw_usage = False
+        for message in raw_messages:
+            msg_type = OllamaLangGraphAgent._message_type(message)
+            if msg_type != "ai":
+                continue
+
+            usage_metadata = OllamaLangGraphAgent._message_usage_metadata(message)
+            if not usage_metadata:
+                continue
+
+            prompt = OllamaLangGraphAgent._coerce_int(
+                usage_metadata.get("input_tokens")
+                or usage_metadata.get("prompt_tokens")
+                or usage_metadata.get("prompt_eval_count")
+            )
+            completion = OllamaLangGraphAgent._coerce_int(
+                usage_metadata.get("output_tokens")
+                or usage_metadata.get("completion_tokens")
+                or usage_metadata.get("eval_count")
+            )
+            total = OllamaLangGraphAgent._coerce_int(
+                usage_metadata.get("total_tokens")
+                or usage_metadata.get("total_token_count")
+                or (prompt + completion)
+            )
+
+            usage.prompt_tokens += prompt
+            usage.completion_tokens += completion
+            usage.total_tokens += total
+            usage.request_count += 1
+            saw_usage = True
+        if not saw_usage:
+            usage.request_count = 1
+        return usage
+
+    @staticmethod
+    def _message_type(message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("type") or message.get("role") or "").strip().lower()
+        return str(getattr(message, "type", "") or getattr(message, "role", "")).strip().lower()
+
+    @staticmethod
+    def _message_usage_metadata(message: Any) -> dict[str, Any] | None:
+        if isinstance(message, dict):
+            direct = message.get("usage_metadata")
+            if isinstance(direct, dict):
+                return direct
+            response_metadata = message.get("response_metadata")
+            if isinstance(response_metadata, dict):
+                prompt = OllamaLangGraphAgent._coerce_int(response_metadata.get("prompt_eval_count"))
+                completion = OllamaLangGraphAgent._coerce_int(response_metadata.get("eval_count"))
+                if prompt or completion:
+                    return {
+                        "prompt_eval_count": prompt,
+                        "eval_count": completion,
+                        "total_tokens": prompt + completion,
+                    }
+            return None
+
+        direct = getattr(message, "usage_metadata", None)
+        if isinstance(direct, dict):
+            return direct
+
+        response_metadata = getattr(message, "response_metadata", None)
+        if isinstance(response_metadata, dict):
+            prompt = OllamaLangGraphAgent._coerce_int(response_metadata.get("prompt_eval_count"))
+            completion = OllamaLangGraphAgent._coerce_int(response_metadata.get("eval_count"))
+            if prompt or completion:
+                return {
+                    "prompt_eval_count": prompt,
+                    "eval_count": completion,
+                    "total_tokens": prompt + completion,
+                }
+        return None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0

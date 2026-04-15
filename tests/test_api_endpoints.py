@@ -494,6 +494,31 @@ def test_api_smoke_register_login_and_user_chat_flow(client: tuple[TestClient, _
     assert payload[1]["sender_type"] == "assistant"
 
 
+def test_chat_websocket_ready_and_subscribe_snapshot(client: tuple[TestClient, _FakeApiService]) -> None:
+    test_client, _ = client
+
+    login_response = test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@acme.test", "password": "AdminPass123"},
+    )
+    assert login_response.status_code == 200
+    token = str(login_response.json()["access_token"])
+
+    with test_client.websocket_connect(
+        "/api/v1/chat/ws",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as socket:
+        ready_payload = socket.receive_json()
+        assert ready_payload["type"] == "ready"
+
+        socket.send_json({"action": "subscribe", "chat_id": "default"})
+        snapshot_payload = socket.receive_json()
+
+        assert snapshot_payload["type"] == "chat.snapshot"
+        assert snapshot_payload["chat_id"] == "default"
+        assert isinstance(snapshot_payload["messages"], list)
+
+
 def test_chat_send_is_available_for_new_user_scope(client: tuple[TestClient, _FakeApiService]) -> None:
     test_client, _ = client
 
