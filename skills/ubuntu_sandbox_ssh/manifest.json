@@ -1,0 +1,31 @@
+{
+  "name": "ubuntu_sandbox_ssh",
+  "package_version": "1.0.0",
+  "description": "Connects to Ubuntu sandbox via SSH and executes shell commands",
+  "entrypoint": "tool.py",
+  "function": "ubuntu_sandbox_ssh",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "Shell command to execute in sandbox"
+      },
+      "get_pty": {
+        "type": "boolean",
+        "description": "Allocate TTY for command",
+        "default": false
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "additionalProperties": false
+  },
+  "package_files_sha256": {
+    "skill.md": "c1c63c6db3da9dd586e1376ed1719e501a7443f1cdf313e2867935288698737b",
+    "tool.py": "93a6da9d9dd75c07688972133c9023635f512f96c9cd4f71f6fc9dde293417e0"
+  },
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "00ca1137f5228eb1cb3e74fcfe69f80b1d6a3748e663dd3e680ee8dc32b96b0f"
+}

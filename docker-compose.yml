@@ -184,6 +184,25 @@ services:
       api:
         condition: service_healthy
 
+  ubuntu-sandbox:
+    build:
+      context: ./sandbox-ubuntu
+      dockerfile: Dockerfile
+    image: sai-ubuntu-sandbox:latest
+    container_name: sai-ubuntu-sandbox
+    restart: unless-stopped
+    environment:
+      SANDBOX_USER: ${SANDBOX_USER:-aismartsandbox}
+      SANDBOX_PASSWORD: ${SANDBOX_PASSWORD:-sandbox_smartai}
+      ROOT_PASSWORD: ${SANDBOX_ROOT_PASSWORD:-sandbox_smartai}
+    ports:
+      - "2222:22"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sshd >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
 volumes:
   ollama-data:
   postgres-data:

@@ -114,5 +114,6 @@
       "action"
     ]
   },
-  "package_signature_algorithm": "hmac-sha256"
+  "package_signature_algorithm": "hmac-sha256",
+  "package_signature": "4f25a8065e53190b2d2aaeb2b38de901682cdf0e27915da45d8d20394923f81b"
 }

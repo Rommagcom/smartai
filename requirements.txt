@@ -24,6 +24,7 @@ accelerate>=1.2.1
 bitsandbytes>=0.45.0
 imageio>=2.37.0
 imageio-ffmpeg>=0.6.0
+paramiko>=3.4.0
 
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
