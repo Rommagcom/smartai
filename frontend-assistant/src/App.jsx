@@ -243,6 +243,10 @@ function App() {
   const [adminAllSkills, setAdminAllSkills] = useState([]);
   const [adminTargetUserId, setAdminTargetUserId] = useState(0);
   const [adminAssignedSkills, setAdminAssignedSkills] = useState([]);
+  const [adminClaudeFiles, setAdminClaudeFiles] = useState([]);
+  const [adminClaudeSkillPrefix, setAdminClaudeSkillPrefix] = useState("");
+  const [adminClaudeOverwrite, setAdminClaudeOverwrite] = useState(false);
+  const [adminClaudeConvertResults, setAdminClaudeConvertResults] = useState([]);
   const [adminUserQuery, setAdminUserQuery] = useState("");
   const [adminCreateUserForm, setAdminCreateUserForm] = useState(DEFAULT_ADMIN_CREATE_USER_FORM);
   const [adminCreateOrgForm, setAdminCreateOrgForm] = useState(DEFAULT_ADMIN_CREATE_ORG_FORM);
@@ -264,6 +268,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const activeChatIdRef = useRef(DEFAULT_CHAT_ID);
   const forcePromptShownRef = useRef(false);
+  const adminClaudeFileInputRef = useRef(null);
 
   const apiBase = useMemo(() => (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, ""), []);
   const isAuthenticated = Boolean(token);
@@ -313,6 +318,10 @@ function App() {
     setAdminAllSkills([]);
     setAdminTargetUserId(0);
     setAdminAssignedSkills([]);
+    setAdminClaudeFiles([]);
+    setAdminClaudeSkillPrefix("");
+    setAdminClaudeOverwrite(false);
+    setAdminClaudeConvertResults([]);
     setAdminUserQuery("");
     setAdminCreateUserForm(DEFAULT_ADMIN_CREATE_USER_FORM);
     setAdminCreateOrgForm(DEFAULT_ADMIN_CREATE_ORG_FORM);
@@ -550,6 +559,18 @@ function App() {
       : [];
   }
 
+  async function fetchAdminSkillsList() {
+    const skillsPayload = await request("/admin/skills", { timeoutMs: 15000 });
+    return Array.isArray(skillsPayload?.skills)
+      ? skillsPayload.skills
+          .map((item) => ({
+            tool_name: String(item?.tool_name || "").trim(),
+            description: String(item?.description || "").trim(),
+          }))
+          .filter((item) => item.tool_name)
+      : [];
+  }
+
   async function openAdminSkillsManager() {
     if (!isAuthenticated || !isAdmin) {
       return;
@@ -557,16 +578,12 @@ function App() {
     setIsBusy(true);
     try {
       const users = await fetchAdminUsersList();
-      const skillsPayload = await request("/admin/skills", { timeoutMs: 15000 });
-      const allSkills = Array.isArray(skillsPayload?.skills)
-        ? skillsPayload.skills.map((item) => ({
-            tool_name: String(item?.tool_name || "").trim(),
-            description: String(item?.description || "").trim(),
-          })).filter((item) => item.tool_name)
-        : [];
+      const allSkills = await fetchAdminSkillsList();
 
       setAdminUsers(users);
       setAdminAllSkills(allSkills);
+      setAdminClaudeFiles([]);
+      setAdminClaudeConvertResults([]);
       setAdminUserQuery("");
       const firstUserId = users[0]?.user_id || 0;
       setAdminTargetUserId(firstUserId);
@@ -574,6 +591,118 @@ function App() {
       setAdminSkillsOpen(true);
     } catch (error) {
       setStatus(`Failed to load admin skills manager: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function onAdminClaudeFilesChange(event) {
+    const nextFiles = Array.from(event?.target?.files || []);
+    setAdminClaudeFiles(nextFiles);
+    setAdminClaudeConvertResults([]);
+  }
+
+  function buildAdminClaudeFilesFormData({ includeOverwrite }) {
+    const formData = new FormData();
+    for (const file of adminClaudeFiles) {
+      formData.append("files", file);
+    }
+    const normalizedPrefix = String(adminClaudeSkillPrefix || "").trim();
+    if (normalizedPrefix) {
+      formData.append("skill_name_prefix", normalizedPrefix);
+    }
+    if (includeOverwrite) {
+      formData.append("overwrite", adminClaudeOverwrite ? "true" : "false");
+    }
+    return formData;
+  }
+
+  async function convertAdminClaudeFiles() {
+    if (!isAdmin) {
+      return;
+    }
+    if (!adminClaudeFiles.length) {
+      setStatus("Select one or more markdown files.");
+      return;
+    }
+
+    const formData = buildAdminClaudeFilesFormData({ includeOverwrite: true });
+
+    setIsBusy(true);
+    try {
+      const payload = await request("/admin/skills/convert-claude-files", {
+        method: "POST",
+        body: formData,
+        timeoutMs: 120000,
+      });
+
+      const results = Array.isArray(payload?.results)
+        ? payload.results
+            .map((item) => ({
+              filename: String(item?.filename || "").trim(),
+              status: String(item?.status || "error").trim().toLowerCase(),
+              skill_name: String(item?.skill_name || "").trim(),
+              error: String(item?.error || "").trim(),
+              exists: false,
+              mode: "convert",
+            }))
+            .filter((item) => item.filename)
+        : [];
+
+      setAdminClaudeConvertResults(results);
+      setAdminAllSkills(await fetchAdminSkillsList());
+      const created = Number(payload?.created || 0);
+      const failed = Number(payload?.failed || 0);
+      setStatus(`Claude conversion completed. Created: ${created}, failed: ${failed}.`);
+      if (adminClaudeFileInputRef.current) {
+        adminClaudeFileInputRef.current.value = "";
+      }
+      setAdminClaudeFiles([]);
+    } catch (error) {
+      setStatus(`Failed to convert Claude files: ${error.message}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function dryRunAdminClaudeFiles() {
+    if (!isAdmin) {
+      return;
+    }
+    if (!adminClaudeFiles.length) {
+      setStatus("Select one or more markdown files.");
+      return;
+    }
+
+    const formData = buildAdminClaudeFilesFormData({ includeOverwrite: false });
+
+    setIsBusy(true);
+    try {
+      const payload = await request("/admin/skills/convert-claude-files/dry-run", {
+        method: "POST",
+        body: formData,
+        timeoutMs: 120000,
+      });
+
+      const results = Array.isArray(payload?.results)
+        ? payload.results
+            .map((item) => ({
+              filename: String(item?.filename || "").trim(),
+              status: String(item?.status || "error").trim().toLowerCase(),
+              skill_name: String(item?.proposed_skill_name || "").trim(),
+              error: String(item?.error || "").trim(),
+              exists: Boolean(item?.exists),
+              mode: "dry-run",
+            }))
+            .filter((item) => item.filename)
+        : [];
+
+      setAdminClaudeConvertResults(results);
+      const valid = Number(payload?.valid || 0);
+      const invalid = Number(payload?.invalid || 0);
+      setStatus(`Claude dry-run completed. Valid: ${valid}, invalid: ${invalid}.`);
+    } catch (error) {
+      setStatus(`Failed to dry-run Claude files: ${error.message}`);
     } finally {
       setIsBusy(false);
     }
@@ -2143,6 +2272,56 @@ function App() {
                     </label>
                   );
                 })}
+              </div>
+            </div>
+            <div className="skills-panel">
+              <h3>{t("convertClaudeFilesTitle")}</h3>
+              <div className="context-grid profile-grid">
+                <label>
+                  {t("files")}
+                  <input
+                    ref={adminClaudeFileInputRef}
+                    type="file"
+                    accept=".md,.markdown,text/markdown,text/plain"
+                    multiple
+                    onChange={onAdminClaudeFilesChange}
+                  />
+                </label>
+                <label>
+                  {t("skillNamePrefix")}
+                  <input
+                    value={adminClaudeSkillPrefix}
+                    placeholder={t("optional")}
+                    onChange={(event) => setAdminClaudeSkillPrefix(event.target.value)}
+                  />
+                </label>
+              </div>
+              <label className="skill-item">
+                <span>{t("overwriteExistingSkills")}</span>
+                <input
+                  type="checkbox"
+                  checked={adminClaudeOverwrite}
+                  disabled={isBusy}
+                  onChange={(event) => setAdminClaudeOverwrite(Boolean(event.target.checked))}
+                />
+              </label>
+              <div className="top-actions">
+                <button className="ghost" type="button" disabled={isBusy || !adminClaudeFiles.length} onClick={() => void dryRunAdminClaudeFiles()}>
+                  {t("dryRunClaudeFiles")}
+                </button>
+                <button className="secondary" type="button" disabled={isBusy || !adminClaudeFiles.length} onClick={() => void convertAdminClaudeFiles()}>
+                  {t("convertClaudeFiles")}
+                </button>
+              </div>
+              <div className="list-table">
+                {adminClaudeConvertResults.length === 0 ? <div className="empty">{t("noConversionResults")}</div> : null}
+                {adminClaudeConvertResults.map((item) => (
+                  <div key={item.filename + item.skill_name + item.status} className="list-row">
+                    <span title={item.filename}>{item.filename}</span>
+                    <span>{item.status === "ok" ? t("success") : t("error")}</span>
+                    <span title={item.error || item.skill_name || ""}>{item.error || item.skill_name || t("none")}{item.mode === "dry-run" && item.exists ? ` (${t("alreadyExists")})` : ""}</span>
+                  </div>
+                ))}
               </div>
             </div>
             <div className="top-actions">
